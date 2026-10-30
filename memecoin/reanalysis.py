@@ -90,11 +90,17 @@ def build_features(pc, pm, tr, ta, ts):
     feats['cr_hit_tape'] = feats['cr_hit_tape'].fillna(0).astype(int)
     # Merge tape labels into feats (needed for prior-hit-rate computation)
     feats = feats.merge(tape_all[['mint','label']], on='mint', how='left')
-    # Prior hit rate EXCLUDING current token: (cr_hit - label) / (cr_n - 1) -- the core wallet-reputation feature
+    # Prior hit rate EXCLUDING current token: (cr_hit - label) / (cr_n - 1) for train tokens
+    # For test tokens (label is NaN), use the full tape hit rate: cr_hit_tape / cr_n_tape
     feats['cr_n_prior'] = (feats['cr_n_tape'] - 1).clip(lower=0)
     feats['cr_hit_prior'] = feats['cr_hit_tape'] - feats['label']
-    feats['w_hit_mean'] = np.where(feats['cr_n_prior'] > 0,
-                                   feats['cr_hit_prior'] / feats['cr_n_prior'].clip(lower=1), 0.0)
+    feats['cr_n_test'] = feats['label'].isna().astype(int)
+    feats['w_hit_mean'] = np.where(
+        feats['cr_n_prior'] > 0,
+        np.where(feats['cr_n_test'] == 1,
+                 feats['cr_hit_tape'] / feats['cr_n_tape'].clip(lower=1),
+                 feats['cr_hit_prior'] / feats['cr_n_prior'].clip(lower=1)),
+        0.0)
     # NOTE: cr_rate_eb_tape (tape hit rate incl. current token) and cr_hit_tape (count incl. current token)
     # are LABEL LEAKS for single-token creators (cr_n_tape==1 => cr_rate_eb_tape == label) and must NOT be used.
     return feats

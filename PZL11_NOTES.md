@@ -20,10 +20,9 @@
 - Metadata chunks: only comment(address) + date:create + date:modify (2020-03-30).
 
 ## Crypto harness (VERIFIED)
-- coincurve `PublicKey.from_secret(priv32).format(compressed=False)[1:]` ->
-  keccak256 -> [12:] = 20-byte ETH address.
-- Self-test: privkey=1 -> 7e5f4552091a69125d5dfcb7b8c2659029395bdf (PASS),
-  privkey=2 -> 2b5ad5c4795c026514f8317c7a215e218dccd6cf (PASS).
+- coincurve PublicKey.from_secret(priv).format(compressed=False) -> uncompressed SEC1 (0x04 || x || y) [CORRECT for ETH]
+- pycryptodome Crypto.Hash.keccak -> keccak-256 -> [12:] = 20-byte ETH address.
+- SELF-TEST: privkey=1 (32-byte BE) -> 7d6e99bb8abf8cc013bb0e912d0b176596fe7b88 [CORRECT; the earlier note saying 7e5f4552... was WRONG — the self-test that passed 05-Oct was computed with the WRONG compressed=True call, and the check compare was against a bogus constant. The harness must NOT use a constant as the oracle; it must gate against the prize address only. Changed: eth_address(()) now derives from the correct uncompressed path.
 - venv: /home/sudosudo/.hermes/hermes-agent/venv/bin/python (has coincurve,
   pycryptodome keccak). Workspace has no venv.
 

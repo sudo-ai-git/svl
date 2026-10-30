@@ -10,7 +10,7 @@ H,W = gray.shape
 def kc(b):
     h = keccak.new(digest_bits=256); h.update(b); return h.digest()
 def eth_address(priv):
-    pk = PublicKey.from_secret(priv).format(compressed=True)
+    pk = PublicKey.from_secret(priv).format(compressed=False)  # uncompressed SEC1
     return kc(pk)[12:]
 def der(p):
     if len(p) != 32: return None

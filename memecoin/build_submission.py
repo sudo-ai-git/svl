@@ -34,6 +34,8 @@ def main():
     drop_cols = ['mint','creator','label','name','symbol','url','bundle_structure','cr_rate_eb_tape','cr_hit_tape','max_x','final_x']
     X = labeled.drop(columns=drop_cols).fillna(0).values
     y = labeled['label'].values
+    print(f"DEBUG: X shape {X.shape}, y shape {y.shape}, labeled shape {labeled.shape}")
+    print(f"DEBUG: labeled columns: {list(labeled.columns)}")
 
     # Fit on all labeled data (for final predictions) - use the same model
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -54,8 +56,17 @@ def main():
     # Drop the same identifier columns used in training
     X_test = feats[feats['mint'].isin(ts['mint'])].drop(columns=drop_cols).fillna(0).values
     # Retrain on all labeled data for test prediction
+    # Extract features for labeled data - use the SAME feature set as X_test
+    # Drop oof_pred too to keep feature consistency
+    labeled_fit = labeled.drop(columns=['oof_pred'], inplace=False)
+    X_train = labeled_fit.drop(columns=drop_cols).fillna(0).values
+    y_train = labeled['label'].values
     final_model = HistGradientBoostingClassifier(max_iter=80, learning_rate=0.05, max_depth=4, random_state=42)
-    final_model.fit(X, y)
+    final_model.fit(X_train, y_train)
+    print(f"DEBUG: final_model.n_features_in_ = {final_model.n_features_in_}")
+    print(f"DEBUG: X_train shape = {X_train.shape}")
+    print(f"DEBUG: X_test shape = {X_test.shape}")
+    print(f"DEBUG: X_test columns = {list(X_test.columns) if isinstance(X_test, pd.DataFrame) else 'NA'}")
     test_pred = final_model.predict_proba(X_test)[:, 1]
     feats.loc[feats['mint'].isin(ts['mint']), 'test_pred'] = test_pred
 
