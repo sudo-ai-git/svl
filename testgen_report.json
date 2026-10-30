@@ -1,0 +1,86 @@
+{
+  "report_id": "TGEN-001",
+  "timestamp": "2026-09-26T00:00:00",
+  "target_package": "pcomp",
+  "summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "pass_rate": 1.0,
+    "execution_time_ms": 0.8630450010969071
+  },
+  "test_results": [
+    {
+      "test_id": "TC-0001",
+      "target": "pcomp.cgemm",
+      "passed": true,
+      "execution_time_ms": 0.030915000024833716,
+      "error": "",
+      "confidence": false,
+      "oracle_method": "cmat"
+    },
+    {
+      "test_id": "TC-0001",
+      "target": "pcomp.cgemm",
+      "passed": true,
+      "execution_time_ms": 0.02749899977061432,
+      "error": "",
+      "confidence": false,
+      "oracle_method": "cmat"
+    },
+    {
+      "test_id": "TC-0002",
+      "target": "pcomp.cgemm_blocked",
+      "passed": true,
+      "execution_time_ms": 0.7489820000046166,
+      "error": "",
+      "confidence": true,
+      "oracle_method": "verify"
+    },
+    {
+      "test_id": "TC-0003",
+      "target": "pcomp.cgemm_blocked",
+      "passed": true,
+      "execution_time_ms": 0.029179000193835236,
+      "error": "",
+      "confidence": false,
+      "oracle_method": "cmat"
+    },
+    {
+      "test_id": "TC-0003",
+      "target": "pcomp.cgemm_blocked",
+      "passed": true,
+      "execution_time_ms": 0.026470001103007235,
+      "error": "",
+      "confidence": false,
+      "oracle_method": "cmat"
+    }
+  ],
+  "oracle_results": {
+    "total": 5
+  },
+  "verifier_results": {
+    "total_verified": 5,
+    "passed": 5,
+    "failed": 0,
+    "pass_rate": 1.0,
+    "avg_confidence": 1.0,
+    "all_pass": true
+  },
+  "evolution_stats": {
+    "high_quality": 0,
+    "medium_quality": 0,
+    "low_quality": 0,
+    "total": 0
+  },
+  "vector_store_stats": {
+    "capacity": 50,
+    "stored": 2,
+    "passing": 2,
+    "failing": 0,
+    "pass_rate": 1.0,
+    "full": false,
+    "fingerprint_index_size": 2
+  },
+  "metadata": {}
+}

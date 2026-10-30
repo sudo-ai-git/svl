@@ -1,0 +1,19 @@
+{
+  "name": "coinscanner",
+  "version": "1.0.0",
+  "description": "Cryptocurrency Scanner Mobile App",
+  "main": "index.js",
+  "scripts": {
+    "start": "npx serve .",
+    "android": "npx cap add android",
+    "build": "npm run build:web && npx cap sync",
+    "build:web": "npx cap sync"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.1.0",
+    "@capacitor/android": "^6.1.0"
+  },
+  "devDependencies": {
+    "serve": "^14.2.0"
+  }
+}

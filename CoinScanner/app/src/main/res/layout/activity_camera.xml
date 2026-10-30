@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/viewFinder"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/controlPanel"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Coin guide overlay circle -->
+    <View
+        android:id="@+id/coinGuide"
+        android:layout_width="280dp"
+        android:layout_height="280dp"
+        android:background="@drawable/coin_guide_circle"
+        app:layout_constraintTop_toTopOf="@id/viewFinder"
+        app:layout_constraintBottom_toBottomOf="@id/viewFinder"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/tvSideLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="FRONT"
+        android:textColor="#FFD700"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:background="#66000000"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="4dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Preview thumbnails -->
+    <ImageView
+        android:id="@+id/imgObversePreview"
+        android:layout_width="80dp"
+        android:layout_height="80dp"
+        android:layout_margin="8dp"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        android:contentDescription="Front photo"
+        app:layout_constraintBottom_toTopOf="@id/controlPanel"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <ImageView
+        android:id="@+id/imgReversePreview"
+        android:layout_width="80dp"
+        android:layout_height="80dp"
+        android:layout_margin="8dp"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        android:contentDescription="Back photo"
+        app:layout_constraintBottom_toTopOf="@id/controlPanel"
+        app:layout_constraintStart_toEndOf="@id/imgObversePreview" />
+
+    <!-- Control panel -->
+    <LinearLayout
+        android:id="@+id/controlPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="16dp"
+        android:background="#CC1A1A2E"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <TextView
+            android:id="@+id/tvInstructions"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="Position the FRONT of the coin"
+            android:textColor="#E0E0E0"
+            android:textSize="14sp"
+            android:layout_marginBottom="12dp" />
+
+        <ProgressBar
+            android:id="@+id/progressBar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:visibility="gone"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRetake"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Retake"
+                android:textColor="#AAAAAA"
+                android:visibility="gone"
+                android:layout_marginEnd="16dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnCapture"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:text="📷"
+                android:textSize="24sp"
+                app:cornerRadius="36dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

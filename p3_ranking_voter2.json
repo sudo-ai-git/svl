@@ -1,0 +1,46 @@
+{
+  "voter": 2,
+  "formula": "S = 0.6*V + 0.3*C + 0.1*R",
+  "methodology": "Scored each candidate against the hermes-agent source code at /home/sudosudo/.hermes/hermes-agent. Verified existence via grep/class searches. V=can verify with existing tests/code, C=how many photonic components natively support, R=reliability in codebase history.",
+  "codebase_evidence": {
+    "existing": ["PluginLoader.discover/iter_plugin_dirs", "PluginContext (register_hook, register_tool)", "ToolRegistry (tools/registry.py)", "Middleware system (hermes_cli/middleware.py with VALID_MIDDLEWARE)", "plugin_capabilities.py with trust gates", "plugins/memory/ with 8+ backends", "CircuitBreaker (test files)", "hermes_cli/plugins.py full system", "plugin_storage.py, plugin_utils.py", "Config system (hermes config get/set)"],
+    "not_found": ["AgentLoop", "FrontierStore", "SwarmCoordinator", "PipelinePlugin", "EvolutionEngine", "GoalGenerationPlugin", "MiddlewarePlugin class", "AuditAdaptPlugin", "SelfImprover", "WorldModel", "CircuitBreakerRegistry", "DistributedDispatcher", "AgentTrace", "PipelineExecutor", "FrontierEntry"]
+  },
+  "rankings": [
+    {"rank": 1, "candidate": "Tool Discovery (PluginLoader.discover + hot-reload)", "V": 0.80, "C": 0.70, "R": 0.60, "S": 0.71, "rationale": "PluginLoader.discover() and iter_plugin_dirs() exist in plugin_loader.py. Hot-reload supported via hermes_cli/plugins.py. Multiple discovery paths (bundled, user, project, pip). Most grounded candidate."},
+    {"rank": 2, "candidate": "Middleware Chain Extension (MiddlewarePlugin pre/post dispatch)", "V": 0.60, "C": 0.50, "R": 0.50, "S": 0.53, "rationale": "Middleware system fully exists with VALID_MIDDLEWARE, observer/middleware payload schemas, pre/post dispatch hooks. MiddlewarePlugin class doesn't exist but the contract is established."},
+    {"rank": 3, "candidate": "Self-Modifying Plugin Configs (JSON Patch + on_load)", "V": 0.50, "C": 0.40, "R": 0.40, "S": 0.46, "rationale": "Config system (hermes config set/get) exists. plugin_storage.py and plugin_loader.py support config manipulation. on_load hook pattern partially established via plugin_capabilities."},
+    {"rank": 4, "candidate": "Plugin-Based Memory (FrontierStore scoped via PluginContext.data)", "V": 0.40, "C": 0.50, "R": 0.40, "S": 0.41, "rationale": "PluginContext.data exists and memory plugin has 8+ backends (mem0, holographic, honcho, supermemory, etc.). FrontierStore doesn't exist but the PluginContext scoping pattern is verified."},
+    {"rank": 5, "candidate": "DAG-Based Planning (PlannerPlugin + ToolRegistry)", "V": 0.40, "C": 0.20, "R": 0.20, "S": 0.32, "rationale": "ToolRegistry exists (tools/registry.py) with register/query patterns. PlannerPlugin and DAG.save/load don't exist. ToolRegistry provides partial corroboration only."},
+    {"rank": 6, "candidate": "Smart Circuit Breakers (CircuitBreakerRegistry + EvolutionEngine)", "V": 0.40, "C": 0.30, "R": 0.30, "S": 0.36, "rationale": "CircuitBreaker exists in test files (test_stream_stale_circuit_breaker.py, test_tirith_security.py). CircuitBreakerRegistry and EvolutionEngine don't exist."},
+    {"rank": 7, "candidate": "Audit-Driven Adaptation (AuditAdaptPlugin + AuditLog.query)", "V": 0.20, "C": 0.20, "R": 0.20, "S": 0.16, "rationale": "Audit logging exists in gateway/session_context.py and gateway/relay/adapter.py but no AuditAdaptPlugin or AuditLog.query API. Minimal grounding."},
+    {"rank": 8, "candidate": "Confidence-Weighted Output (AgentTrace.confidence_score)", "V": 0.10, "C": 0.20, "R": 0.20, "S": 0.14, "rationale": "AgentTrace doesn't exist as a class. Some tracing infrastructure in gateway code. Low corroboration."},
+    {"rank": 9, "candidate": "Skill Evolution (EvolutionEngine + Plugin ABC)", "V": 0.00, "C": 0.30, "R": 0.20, "S": 0.11, "rationale": "EvolutionEngine doesn't exist. Plugin ABC exists in hermes_cli plugin_capabilities.py. Only the Plugin ABC side provides any corroboration."},
+    {"rank": 10, "candidate": "Meta-Planner (Dynamic Replanning on timeout)", "V": 0.00, "C": 0.15, "R": 0.20, "S": 0.055, "rationale": "No replanning infrastructure exists. Timeout handling exists in cron/async patterns but not as a planner feature."},
+    {"rank": 11, "candidate": "Memory Injection (AgentLoop + FrontierStore.prefetch)", "V": 0.00, "C": 0.10, "R": 0.20, "S": 0.05, "rationale": "Neither AgentLoop nor FrontierStore exist. Memory plugin exists but FrontierStore.prefetch pattern is entirely theoretical."},
+    {"rank": 12, "candidate": "Self-Critique (AgentLoop._self_reflect + reflection_depth)", "V": 0.00, "C": 0.10, "R": 0.20, "S": 0.05, "rationale": "AgentLoop doesn't exist. Self-reflection pattern has no grounding in codebase."},
+    {"rank": 13, "candidate": "Multi-Agent Orchestration (SwarmCoordinator + DistributedDispatcher)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "No swarm or distributed dispatcher components exist. Zero corroboration from photonic ecosystem."},
+    {"rank": 14, "candidate": "Goal Generation (GoalGenerationPlugin + PipelineExecutor)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "Neither component exists. PipelineExecutor has no grounding."},
+    {"rank": 15, "candidate": "Pipeline Assembly (PipelinePlugin + DAG.save/load)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "PipelinePlugin and DAG.save/load don't exist. No pipeline assembly infrastructure."},
+    {"rank": 16, "candidate": "Code Self-Modification (SelfImprover + EvolutionEngine)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "SelfImprover doesn't exist. Code self-modification has no grounding."},
+    {"rank": 17, "candidate": "Internal World State Model (WorldModel dataclass)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "WorldModel doesn't exist. No world state modeling infrastructure."},
+    {"rank": 18, "candidate": "Tiered Memory Decay (FrontierStore tier_promote)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "FrontierStore doesn't exist. Tier promotion mechanism is theoretical."},
+    {"rank": 19, "candidate": "Cross-Agent Memory (FrontierEntry.agent_id + shared)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "FrontierEntry doesn't exist. Cross-agent memory sharing has no grounding."},
+    {"rank": 20, "candidate": "Self-Set Subgoal Generation (EvolutionEngine SELF_GENERATION trigger)", "V": 0.00, "C": 0.10, "R": 0.15, "S": 0.045, "rationale": "EvolutionEngine doesn't exist. Self-generation trigger is entirely theoretical."}
+  ],
+  "top_5": [
+    {"rank": 1, "candidate": "Tool Discovery (PluginLoader.discover + hot-reload)", "S": 0.71},
+    {"rank": 2, "candidate": "Middleware Chain Extension (MiddlewarePlugin pre/post dispatch)", "S": 0.53},
+    {"rank": 3, "candidate": "Self-Modifying Plugin Configs (JSON Patch + on_load)", "S": 0.46},
+    {"rank": 4, "candidate": "Plugin-Based Memory (FrontierStore scoped via PluginContext.data)", "S": 0.41},
+    {"rank": 5, "candidate": "DAG-Based Planning (PlannerPlugin + ToolRegistry)", "S": 0.32}
+  ],
+  "quorum_check": {
+    "pass_threshold": 0.60,
+    "passing_agents": 1,
+    "total_weighted_S": 0.71,
+    "quorum_met": false,
+    "decision": "steer",
+    "note": "Only voter 2 scores above 0.60 threshold. With 3 voters needed at 0.67 quorum, this single high-scoring candidate cannot carry the decision alone. Top 5 are buildable on existing infrastructure but advanced AGI features require significant new implementation."
+  }
+}

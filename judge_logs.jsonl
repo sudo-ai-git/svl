@@ -1,0 +1,9 @@
+{"timestamp": "2026-10-30T12:57:36.229158", "level": "INFO", "message": "Dynamic goal judge initialized", "details": {"goal": "solve_arweave_pzl11"}}
+{"timestamp": "2026-10-30T12:57:37.241548", "level": "DEBUG", "message": "Tested: phrase_as_key -> fail", "details": {"address": "key length != 32"}}
+{"timestamp": "2026-10-30T12:57:37.241848", "level": "DEBUG", "message": "Tested: sha256_phrase -> fail", "details": {"address": "0x87655b7e88e6a612e6c490493581c1ed3ca3d3af"}}
+{"timestamp": "2026-10-30T12:57:37.241943", "level": "DEBUG", "message": "Tested: keccak_phrase -> fail", "details": {"address": "0xba74a70a594daddccacbc97a26bdd2b6581578bf"}}
+{"timestamp": "2026-10-30T12:57:37.241990", "level": "DEBUG", "message": "Tested: bip39_seed -> fail", "details": {"address": "0x3e0ae3f36b5e7ca3e07fe7444a559fcf64eeaa46"}}
+{"timestamp": "2026-10-30T12:57:37.242067", "level": "DEBUG", "message": "Tested: idx_bytes -> fail", "details": {"address": "0xf256b5ba6b6795399a2c19c531bc31934b37cd0f"}}
+{"timestamp": "2026-10-30T12:57:37.242129", "level": "DEBUG", "message": "Tested: 132bit_padded -> fail", "details": {"address": "0xede74e25bdf78e8ec8942f6b407d56d485b10778"}}
+{"timestamp": "2026-10-30T12:57:37.242182", "level": "INFO", "message": "Goal in progress", "details": {"status": "in_progress"}}
+{"timestamp": "2026-10-30T12:57:37.242614", "level": "INFO", "message": "Dynamic judge complete", "details": {"status": "in_progress"}}

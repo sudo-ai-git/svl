@@ -1,0 +1,270 @@
+{
+  "formula": "S = 0.6*V + 0.3*C + 0.1*R",
+  "quorum": 0.67,
+  "ideas": [
+    {
+      "id": 14,
+      "name": "Hallucination Correction Loop (Detect\u2192Trace\u2192Repair)",
+      "source": "pcomp_nextgen_ideas_round5.md",
+      "V": 0.9,
+      "C": 0.5,
+      "R": 0.5,
+      "note": "Closed-loop error correction; most commercially impactful",
+      "S": 0.74,
+      "quorum_pass": true
+    },
+    {
+      "id": 13,
+      "name": "Knowledge Distillation (Verified Reasoning Compression)",
+      "source": "pcomp_nextgen_ideas_round5.md",
+      "V": 0.8,
+      "C": 0.5,
+      "R": 0.5,
+      "note": "Lossless compression of verified reasoning into compact circuits",
+      "S": 0.68,
+      "quorum_pass": true
+    },
+    {
+      "id": 2,
+      "name": "Persistent Deterministic Memory (Cross-Session)",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.75,
+      "C": 0.55,
+      "R": 0.5,
+      "note": "ringbuf + neuromorphic retrieval; moderate existing infra support",
+      "S": 0.665,
+      "quorum_pass": false
+    },
+    {
+      "id": 12,
+      "name": "Automated Test Generation + Code Verification",
+      "source": "pcomp_nextgen_ideas_round5.md",
+      "V": 0.7,
+      "C": 0.5,
+      "R": 0.5,
+      "note": "Photonically-computed test oracles and regression suites",
+      "S": 0.62,
+      "quorum_pass": false
+    },
+    {
+      "id": "N4",
+      "name": "Photonic Entropy Novelty Scorer (E6 PUF)",
+      "source": "grAIl_pcomp_cutting_edge_brainstorm.md",
+      "V": 0.6,
+      "C": 0.65,
+      "R": 0.55,
+      "note": "E6 PUF min-entropy as creativity meter; highest feasibility per doc",
+      "S": 0.61,
+      "quorum_pass": false
+    },
+    {
+      "id": 3,
+      "name": "Self-Evolving Reasoning Strategies",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.7,
+      "C": 0.45,
+      "R": 0.45,
+      "note": "photonic_evolve_adder evolves tool call patterns; moderate feasibility",
+      "S": 0.6,
+      "quorum_pass": false
+    },
+    {
+      "id": 11,
+      "name": "Reasoning Compiler (LLM \u2192 Photonic Circuit Transpilation)",
+      "source": "pcomp_nextgen_ideas_round5.md",
+      "V": 0.9,
+      "C": 0.15,
+      "R": 0.1,
+      "note": "Transpiles reasoning into executable photonic circuits; highest ambition",
+      "S": 0.595,
+      "quorum_pass": false
+    },
+    {
+      "id": 5,
+      "name": "Cross-Model Deterministic Bridge",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.85,
+      "C": 0.2,
+      "R": 0.2,
+      "note": "Deterministic convergence substrate between heterogeneous LLMs",
+      "S": 0.59,
+      "quorum_pass": false
+    },
+    {
+      "id": 8,
+      "name": "Photonic Self-Improvement Loop (Tool Genesis)",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.7,
+      "C": 0.4,
+      "R": 0.4,
+      "note": "System invents its own tools through evolution + verification",
+      "S": 0.58,
+      "quorum_pass": false
+    },
+    {
+      "id": 17,
+      "name": "Runtime Code Synthesis + Hardware Verification",
+      "source": "pcomp_nextgen_ideas_round5.md",
+      "V": 0.85,
+      "C": 0.15,
+      "R": 0.1,
+      "note": "Iterative synthesis loop: generate \u2192 verify \u2192 correct \u2192 re-verify",
+      "S": 0.565,
+      "quorum_pass": false
+    },
+    {
+      "id": "N6",
+      "name": "Photonic Game-Theoretic Arena (pcomp_verify as Judge)",
+      "source": "grAIl_pcomp_cutting_edge_brainstorm.md",
+      "V": 0.6,
+      "C": 0.5,
+      "R": 0.45,
+      "note": "pcomp_verify as impartial competitive judge; highest feasibility",
+      "S": 0.555,
+      "quorum_pass": false
+    },
+    {
+      "id": "N7",
+      "name": "Photonic Learned Environment Model (World Simulator)",
+      "source": "grAIl_pcomp_cutting_edge_brainstorm.md",
+      "V": 0.7,
+      "C": 0.35,
+      "R": 0.3,
+      "note": "Ringbuf + cmat as causal world simulator; enables planning",
+      "S": 0.555,
+      "quorum_pass": false
+    },
+    {
+      "id": 4,
+      "name": "Photonic Planning Topology Optimization",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.65,
+      "C": 0.4,
+      "R": 0.4,
+      "note": "photonic_evolve_gate explores plan DAG topologies",
+      "S": 0.55,
+      "quorum_pass": false
+    },
+    {
+      "id": 15,
+      "name": "Autonomous Skill Discovery via Environmental Probing",
+      "source": "pcomp_nextgen_ideas_round5.md",
+      "V": 0.75,
+      "C": 0.2,
+      "R": 0.2,
+      "note": "Agent probes hardware to discover fundamentally new capabilities",
+      "S": 0.53,
+      "quorum_pass": false
+    },
+    {
+      "id": 6,
+      "name": "Real-Time Adaptive Reasoning Controller",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.5,
+      "C": 0.5,
+      "R": 0.5,
+      "note": "LiveCoprocessor coherence \u2192 continuous parameter adjustment",
+      "S": 0.5,
+      "quorum_pass": false
+    },
+    {
+      "id": "N5",
+      "name": "Photonic Cross-Modal Verifier (Image-Text Consistency)",
+      "source": "grAIl_pcomp_cutting_edge_brainstorm.md",
+      "V": 0.65,
+      "C": 0.25,
+      "R": 0.2,
+      "note": "Optical interference verifies image-text consistency",
+      "S": 0.485,
+      "quorum_pass": false
+    },
+    {
+      "id": 9,
+      "name": "Photonic Collaborative Composition (Model Fusion)",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.65,
+      "C": 0.2,
+      "R": 0.2,
+      "note": "Representation-level fusion through optical interference",
+      "S": 0.47,
+      "quorum_pass": false
+    },
+    {
+      "id": 10,
+      "name": "Thermodynamic Reasoning Optimization",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.45,
+      "C": 0.5,
+      "R": 0.5,
+      "note": "energy/thermal/osnr as first-class reasoning metrics",
+      "S": 0.47,
+      "quorum_pass": false
+    },
+    {
+      "id": "N3",
+      "name": "Ringbuf Analogy Engine (Phase-Coherent Analogy Retrieval)",
+      "source": "grAIl_pcomp_cutting_edge_brainstorm.md",
+      "V": 0.55,
+      "C": 0.35,
+      "R": 0.3,
+      "note": "Phase coherence computes structural similarity for analogy retrieval",
+      "S": 0.465,
+      "quorum_pass": false
+    },
+    {
+      "id": "N1",
+      "name": "Photonic Attention-Substrate Symbolic Grounding",
+      "source": "grAIl_pcomp_cutting_edge_brainstorm.md",
+      "V": 0.7,
+      "C": 0.1,
+      "R": 0.1,
+      "note": "LLM attention becomes physically symbolic computation",
+      "S": 0.46,
+      "quorum_pass": false
+    },
+    {
+      "id": "N2",
+      "name": "cmat Causal Discovery Engine (Photonic Inversion)",
+      "source": "grAIl_pcomp_cutting_edge_brainstorm.md",
+      "V": 0.55,
+      "C": 0.3,
+      "R": 0.25,
+      "note": "Matrix inversion as causal structure learning; hardware-speed PC algorithm",
+      "S": 0.445,
+      "quorum_pass": false
+    },
+    {
+      "id": 1,
+      "name": "Photonic Multi-Agent Consensus Fabric",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.55,
+      "C": 0.2,
+      "R": 0.2,
+      "note": "Phase-level consensus via optical interconnect; needs major HW infra",
+      "S": 0.41,
+      "quorum_pass": false
+    },
+    {
+      "id": 16,
+      "name": "Causal Inference Engine (Photonic Do-Calculus)",
+      "source": "pcomp_nextgen_ideas_round5.md",
+      "V": 0.55,
+      "C": 0.2,
+      "R": 0.15,
+      "note": "Photonic intervention-based causal reasoning",
+      "S": 0.405,
+      "quorum_pass": false
+    },
+    {
+      "id": 7,
+      "name": "Quantum-Inspired Photonic State Machine",
+      "source": "pcomp_nextgen_ideas.md",
+      "V": 0.35,
+      "C": 0.2,
+      "R": 0.15,
+      "note": "Superposition + interference for parallel hypothesis evaluation; very experimental",
+      "S": 0.285,
+      "quorum_pass": false
+    }
+  ]
+}

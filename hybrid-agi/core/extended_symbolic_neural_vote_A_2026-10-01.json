@@ -1,0 +1,21 @@
+{
+  "choice": "A",
+  "proposal": "extend symbolic-neural-coupling (DifferentiableAdder MLP) with concrete architecture/training changes and apply to all 4 pixel-level interior patterns",
+  "concrete_steps": [
+    "Modify hybrid-agi/core/differentiable_adder.py: change hidden from 256 -> 8 (single smaller hidden layer to enforce tighter symbolic compression, not larger; keep 2 layers but shrink second to 8 neurons) \u2014 explicit edit to W2/W3 dims.",
+    "Set train epochs to 100 (not 500/1000) for faster honest convergence; keep lr=2.0, seed=42, max_val=64.",
+    "Apply to all 4 interior patterns in arc2-mined/slice2_primitives.py: (1) interior_cell_recolor (interior pixels with 4 non-bg neighbors), (2) hole-fill/interior_bg (interior bg not reachable from border), (3) erosion/center extraction (interior non-border cells), (4) interior recolor with added fill \u2014 map each pattern's binary mask into one-hot pairs fed to the reduced adder as (x_mask_area, y_fill_color_index) -> predicted interior_size.",
+    "Keep deterministic base58/gematria projection untouched; the MLP is an overlay oracle, not a replacement (matches skill doc: 'base pipeline untouched')."
+  ],
+  "verification_gate": {
+    "layer": "PASS/FAIL + numeric",
+    "gate_1_pass_criteria": "After 100 epochs, final cross-entropy loss < 0.05 (honest real loss from softmax, not fabricated); FAIL if >= 0.05 or loss NaN.",
+    "gate_2_pass_criteria": "Prediction accuracy on held-out (x,y) pairs (x+y < 64) >= 95% correct sum; confidence (softmax prob at argmax) >= 0.80 average over 100 random pairs; FAIL if accuracy < 95% or avg conf < 0.80.",
+    "gate_3_symbolic_invariant": "d*G == Q verification unchanged: gematria base58 projection stays constant (no edit to projection pipeline); symbolic-neural coupling only adds the MLP layer. FAIL if base projection modified.",
+    "gate_4_pixel_interiors": "All 4 interior primitives (interior_cell_recolor, hole-fill/interior_bg, erosion/center, interior_recolor_fill) produce deterministic outputs matching original primitive outputs; MLP overlay must NOT alter primitive results. PASS = 4/4 primitives unchanged; FAIL if any interior pattern output diverges.",
+    "honest_blocker": "No fabrication of loss numbers; actual train() return dict (final_loss, epochs=100) recorded to artifact \u2014 if loss stays > 0.05, result is FAIL, not rewritten."
+  },
+  "artifact_path": "/home/sudosudo/.openclaw/workspace/hybrid-agi/core/extended_symbolic_neural_vote_A_2026-10-01.json",
+  "honest_state": "Not yet executed. Concrete edit targets identified: hidden=8, epochs=100, 4 interior primitives in arc2-mined/slice2_primitives.py. Verification requires real train() run with saved weights; current module has hidden=256, epochs=500/1000 \u2014 this vote specifies the change, not a fabricated outcome. If executed, PASS/FAIL will be read from actual saved JSON at artifact_path.",
+  "fabric_warning": "No synthetic results included. Any 'PASS' claim requires actual file at artifact_path with real final_loss and accuracy values."
+}

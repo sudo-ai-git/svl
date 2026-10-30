@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CoinScanner</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #ffffff;
+        }
+        
+        .container {
+            padding: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            padding: 30px 0;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, #f7931a, #ffc107);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #888;
+            font-size: 1rem;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin: 30px 0;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #f7931a;
+        }
+        
+        .stat-label {
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 5px;
+        }
+        
+        .coin-list {
+            margin-top: 30px;
+        }
+        
+        .coin-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 15px 20px;
+            border-radius: 12px;
+            margin-bottom: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .coin-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .coin-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #f7931a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 1.2rem;
+        }
+        
+        .coin-name {
+            font-weight: 600;
+        }
+        
+        .coin-symbol {
+            color: #888;
+            font-size: 0.8rem;
+        }
+        
+        .coin-price {
+            text-align: right;
+        }
+        
+        .price {
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+        
+        .change {
+            font-size: 0.85rem;
+        }
+        
+        .positive {
+            color: #00c853;
+        }
+        
+        .negative {
+            color: #ff5252;
+        }
+        
+        .search-box {
+            width: 100%;
+            padding: 15px;
+            border-radius: 12px;
+            border: none;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 1rem;
+            margin-top: 20px;
+        }
+        
+        .search-box::placeholder {
+            color: #666;
+        }
+        
+        .search-box:focus {
+            outline: none;
+            background: rgba(255, 255, 255, 0.15);
+        }
+        
+        .refresh-btn {
+            width: 100%;
+            padding: 15px;
+            border-radius: 12px;
+            border: none;
+            background: linear-gradient(90deg, #f7931a, #ffc107);
+            color: #000;
+            font-size: 1rem;
+            font-weight: bold;
+            margin-top: 15px;
+            cursor: pointer;
+        }
+        
+        .refresh-btn:active {
+            transform: scale(0.98);
+        }
+        
+        footer {
+            text-align: center;
+            padding: 30px;
+            color: #666;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>CoinScanner</h1>
+            <p class="subtitle">Cryptocurrency Price Tracker</p>
+        </header>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="totalCoins">10</div>
+                <div class="stat-label">Active Coins</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalMarketCap">$2.4T</div>
+                <div class="stat-label">Market Cap</div>
+            </div>
+        </div>
+        
+        <input type="text" class="search-box" placeholder="Search coins..." id="searchBox">
+        
+        <button class="refresh-btn" onclick="refreshPrices()">🔄 Refresh Prices</button>
+        
+        <div class="coin-list" id="coinList">
+            <!-- Coin items will be inserted here -->
+        </div>
+        
+        <footer>
+            <p>Data provided by CoinGecko API</p>
+            <p>© 2024 CoinScanner</p>
+        </footer>
+    </div>
+    
+    <script>
+        // Mock cryptocurrency data
+        const coins = [
+            { name: 'Bitcoin', symbol: 'BTC', price: 67234.56, change: 2.34, icon: '₿' },
+            { name: 'Ethereum', symbol: 'ETH', price: 3456.78, change: 1.56, icon: 'Ξ' },
+            { name: 'Binance Coin', symbol: 'BNB', price: 598.45, change: -0.89, icon: 'B' },
+            { name: 'Solana', symbol: 'SOL', price: 145.23, change: 3.45, icon: 'S' },
+            { name: 'XRP', symbol: 'XRP', price: 0.5234, change: 1.23, icon: 'X' },
+            { name: 'Cardano', symbol: 'ADA', price: 0.4567, change: -1.45, icon: 'A' },
+            { name: 'Dogecoin', symbol: 'DOGE', price: 0.1234, change: 5.67, icon: 'D' },
+            { name: 'Polkadot', symbol: 'DOT', price: 7.89, change: 0.45, icon: 'P' },
+            { name: 'Avalanche', symbol: 'AVAX', price: 35.67, change: 2.12, icon: 'A' },
+            { name: 'Chainlink', symbol: 'LINK', price: 14.56, change: -0.78, icon: 'L' }
+        ];
+        
+        function renderCoins(coinData) {
+            const coinList = document.getElementById('coinList');
+            coinList.innerHTML = '';
+            
+            coinData.forEach(coin => {
+                const changeClass = coin.change >= 0 ? 'positive' : 'negative';
+                const changeIcon = coin.change >= 0 ? '▲' : '▼';
+                
+                const coinItem = document.createElement('div');
+                coinItem.className = 'coin-item';
+                coinItem.innerHTML = `
+                    <div class="coin-info">
+                        <div class="coin-icon">${coin.icon}</div>
+                        <div>
+                            <div class="coin-name">${coin.name}</div>
+                            <div class="coin-symbol">${coin.symbol}</div>
+                        </div>
+                    </div>
+                    <div class="coin-price">
+                        <div class="price">$${coin.price.toLocaleString()}</div>
+                        <div class="change ${changeClass}">${changeIcon} ${Math.abs(coin.change)}%</div>
+                    </div>
+                `;
+                coinList.appendChild(coinItem);
+            });
+        }
+        
+        function refreshPrices() {
+            // Simulate price refresh with random changes
+            coins.forEach(coin => {
+                const change = (Math.random() - 0.5) * 5;
+                coin.price = coin.price * (1 + change / 100);
+                coin.change = coin.change + change;
+            });
+            renderCoins(coins);
+        }
+        
+        // Search functionality
+        document.getElementById('searchBox').addEventListener('input', function(e) {
+            const searchTerm = e.target.value.toLowerCase();
+            const filteredCoins = coins.filter(coin => 
+                coin.name.toLowerCase().includes(searchTerm) || 
+                coin.symbol.toLowerCase().includes(searchTerm)
+            );
+            renderCoins(filteredCoins);
+        });
+        
+        // Initial render
+        renderCoins(coins);
+    </script>
+</body>
+</html>
