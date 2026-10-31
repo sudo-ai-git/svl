@@ -66,8 +66,9 @@ class UsbSerialTransport(Transport):
             return True
         except serial.SerialException as exc:
             self._port = None
-            self._emitter and self._emitter(self, "error",
-                                             f"cannot open {self.path}: {exc}")
+            if self._emitter is not None:
+                self._emitter(self, "error",
+                               f"cannot open {self.path}: {exc}")
             return False
 
     def disconnect(self) -> None:

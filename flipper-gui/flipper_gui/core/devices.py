@@ -108,29 +108,6 @@ class Device:
 
         return self.protocol.call(transport, name, args, timeout)
 
-    def _read_response(self, timeout: float, idle: float = 0.35) -> list[str]:
-        """Read until the reply settles: no new bytes for `idle` seconds, or
-        `timeout` elapses. Returns the non-empty lines."""
-        deadline = time.monotonic() + timeout
-        lines: list[str] = []
-        last_data = 0.0
-        buf = ""
-
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            data = self.transport.receive(timeout=min(0.05, remaining))
-            if data:
-                buf += data.decode("utf-8", errors="replace")
-                last_data = time.monotonic()
-
-            if buf and (time.monotonic() - last_data) > idle:
-                lines.extend(ln for ln in buf.splitlines() if ln.strip())
-                break
-
-        return [ln.strip() for ln in lines if ln.strip()]
-
     def status_snapshot(self) -> dict:
         """Return a JSON-serialisable view of this device's live state.
 
