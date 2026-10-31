@@ -15,12 +15,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Callable, Iterable
+from typing import Callable, Iterable, TYPE_CHECKING
 import time
 
 from .commands import Command
 from ..comm.protocol import ProtocolABC, TextProtocol
 from ..comm.base import Transport
+
+if TYPE_CHECKING:
+    from .registry import CommandRegistry
 
 
 class DeviceType(str, Enum):
@@ -59,7 +62,7 @@ class Device:
     device_type: DeviceType
     transport: Transport | None = None
     info: DeviceInfo = field(default_factory=DeviceInfo)
-    registry: object | None = None
+    registry: "CommandRegistry | None" = None
     events: Callable[[object, str, object], None] | None = None
     protocol: ProtocolABC = field(default_factory=TextProtocol)
 
@@ -152,17 +155,74 @@ class Device:
         self.events = events
 
     # -------------------------------------------------------------- #
+    # -------------------------------------------------------------- #
+    # -------------------------------------------------------------- #
     # Capability introspection (used by some tabs)
     # -------------------------------------------------------------- #
     def capabilities(self) -> list["Capability"]:
-        return [c for c in getattr(self, "_capabilities", []) if c.enabled]
+        """Return this device's live feature set.
+
+        Capabilities combine explicit toggles the UI persists with command-
+        derived capabilities discovered from the connected device's registry
+        -- the features the device actually speaks on the wire. Duplicate names
+        are merged, so the returned list is clean.
+        """
+        caps = [c for c in getattr(self, "_capabilities", []) if c.enabled]
+        if self.registry is not None:
+            seen = {c.name for c in caps}
+            for cmd_name in self.registry.list_commands():
+                if cmd_name in seen:
+                    continue
+                cmd = self.registry.get(cmd_name)
+                caps.append(Capability(
+                    name=cmd_name,
+                    description=cmd.description if cmd else "",
+                    enabled=True,
+                ))
+                seen.add(cmd_name)
+        return caps
+
+    def set_capabilities(self, capabilities: Iterable["Capability"]) -> None:
+        """Persist the preferred capability set (feature enable/disable state).
+
+        The UI's source of truth for which features a user wants enabled.
+        A live device takes precedence over an explicit set.
+        """
+        self._capabilities = list(capabilities)
+
+    def get_capability(self, name: str) -> "Capability | None":
+        """Return the live capability for *name*, deriving it from the registry
+        when missing, so lookup and toggling work on any connected device."""
+        seen = {c.name for c in self.capabilities()}
+        for c in self.capabilities():
+            if c.name == name:
+                return c
+        return None
+
+    def enable_feature(self, name: str, enabled: bool = True) -> None:
+        """Toggle a capability on or off; add it if not present."""
+        for c in self.capabilities():
+            if c.name == name:
+                c.enabled = enabled
+                return
+        desc = ""
+        if self.registry is not None:
+            cmd = self.registry.get(name)
+            if cmd is not None:
+                desc = cmd.description
+        self._capabilities.append(
+            Capability(name=name, enabled=enabled, description=desc)
+        )
 
 
 @dataclass
 class Capability:
+    """A named, enabled, documented feature capability the device exposes."""
+
     name: str
     enabled: bool = True
     description: str = ""
 
-    def is_available(self, device: Device) -> bool:
+    def is_available(self, device: "Device") -> bool:
+        """Return True if this capability is available on *device*."""
         return self.enabled and bool(device.is_connected())
