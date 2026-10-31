@@ -134,3 +134,37 @@ class TestCapability:
         dev.enable_feature("nfc", enabled=True)
         assert dev.get_capability("nfc").enabled is True
         assert cap.is_available(dev) is True
+
+    def test_get_capability_on_fresh_device_returns_none(self) -> None:
+        dev = Device(device_type=DeviceType.USB_SERIAL)
+        # No capabilities set yet -> none (must not raise AttributeError).
+        assert dev.get_capability("nfc") is None
+
+    def test_enable_feature_on_fresh_device_creates(self) -> None:
+        dev = Device(device_type=DeviceType.USB_SERIAL)
+        dev.enable_feature("nfc", True)
+        cap = dev.get_capability("nfc")
+        assert cap is not None
+        assert cap.enabled is True
+        # Persisted store now exists.
+        assert dev._capabilities is not None
+        assert len(dev._capabilities) == 1
+
+    def test_capability_available_malformed_device_returns_false(self) -> None:
+        # A non-Device object without an is_connected() contract must never
+        # raise AttributeError -- it returns False instead.
+        class _NoConnect:
+            enabled = True
+
+            def is_connected(self) -> bool:
+                return False
+
+        cap = Capability(name="nfc", enabled=True)
+        assert cap.is_available(_NoConnect()) is False
+
+    def test_capability_available_none_device_returns_false(self) -> None:
+        assert Capability(name="nfc").is_available(None) is False
+
+    def test_capability_available_disconnected_device_returns_false(self) -> None:
+        dev = Device(device_type=DeviceType.USB_SERIAL)
+        assert Capability(name="nfc", enabled=True).is_available(dev) is False

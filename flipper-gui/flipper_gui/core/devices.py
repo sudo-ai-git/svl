@@ -197,7 +197,9 @@ class Device:
         entries, so this lookup uses the raw persisted list so a disabled
         feature can still be retrieved and re-enabled.
         """
-        for c in self._capabilities:
+        seen = getattr(self, "_capabilities", None)
+        store = seen if isinstance(seen, list) else []
+        for c in store:
             if c.name == name:
                 return c
         return None
@@ -206,20 +208,25 @@ class Device:
         """Toggle a capability on or off; add it if not present.
 
         Works against the raw persisted list, so a previously disabled
-        feature can be re-enabled without being duplicated.
+        feature can be re-enabled without being duplicated.  A device that
+        has never had its capability set is treated as a clean store (no
+        crash on first use).
         """
-        for c in self._capabilities:
+        store = getattr(self, "_capabilities", None)
+        if not isinstance(store, list):
+            store = []
+        for c in store:
             if c.name == name:
                 c.enabled = enabled
+                self._capabilities = store
                 return
         desc = ""
         if self.registry is not None:
             cmd = self.registry.get(name)
             if cmd is not None:
                 desc = cmd.description
-        self._capabilities.append(
-            Capability(name=name, enabled=enabled, description=desc)
-        )
+        store.append(Capability(name=name, enabled=enabled, description=desc))
+        self._capabilities = store
 
 
 @dataclass
@@ -236,7 +243,18 @@ class Capability:
         A capability is only actionable when it is enabled AND the
         underlying device is connected; ``device=None`` (no live device)
         is always treated as unavailable so the UI/tabs never crash.
+        A capability is never actionable when the device cannot report
+        connection state (a miswired call site), and is always
+        actionable when the device is connected and the capability is
+        enabled.
         """
         if device is None:
             return False
-        return self.enabled and bool(device.is_connected())
+        try:
+            is_connected = bool(device.is_connected())
+        except AttributeError:
+            # Malformed/miswired caller passed something that is not a
+            # Device (or lacks the is_connected contract) -- treat it
+            # as unavailable rather than raise.
+            return False
+        return self.enabled and is_connected

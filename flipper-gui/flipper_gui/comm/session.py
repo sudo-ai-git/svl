@@ -9,13 +9,14 @@ callback) when a reply arrives, and the UI subscribes to those events.
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from .base import Transport
 from .usb_serial import UsbSerialTransport
 
 if TYPE_CHECKING:
-    from ..core.devices import Device  # noqa: F401
+    from ..core.devices import Device
+    from ..core.registry import CommandRegistry
 
 __all__ = ["Session"]
 
@@ -33,9 +34,14 @@ class Session:
         registry: the command registry; defaults to the device's own.
     """
 
-    def __init__(self, device: "Device", transport: Transport, registry: object | None = None) -> None:
+    def __init__(self, device: "Device", transport: Transport, registry: "CommandRegistry | None" = None) -> None:
         self.device = device
-        self.device.registry = registry or device.registry
+        # A session may be constructed with no live device (e.g. during a
+        # "disconnected / no device selected" boot state).  Guard so the
+        # attribute access cannot raise and the caller can still inspect
+        # ``device_type`` / ``connected`` on a None device.
+        if self.device is not None:
+            self.device.registry = registry if registry is not None else self.device.registry
         self.transport = transport
 
     # -------------------------------------------------------------- #
