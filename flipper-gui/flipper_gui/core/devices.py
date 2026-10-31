@@ -106,7 +106,12 @@ class Device:
         if transport is None:
             return []
 
-        return self.protocol.call(transport, name, args, timeout)
+        reply = self.protocol.call(transport, name, args, timeout)
+        # Deliver the reply on the event bus so feature tabs observe it
+        # (device_info / live tabs subscribe here). The emit is best-effort:
+        # a missing/emit-cost tolerance never blocks the wire reply.
+        self.emit("data.received", reply)
+        return reply
 
     def status_snapshot(self) -> dict:
         """Return a JSON-serialisable view of this device's live state.

@@ -15,7 +15,7 @@ from .base import Transport
 from .usb_serial import UsbSerialTransport
 
 if TYPE_CHECKING:
-    from .devices import Device  # noqa: F401
+    from ..core.devices import Device  # noqa: F401
 
 __all__ = ["Session"]
 
