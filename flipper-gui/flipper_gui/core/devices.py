@@ -19,6 +19,8 @@ from typing import Callable, Iterable
 import time
 
 from .commands import Command
+from ..comm.protocol import ProtocolABC, TextProtocol
+from ..comm.base import Transport
 
 
 class DeviceType(str, Enum):
@@ -55,10 +57,11 @@ class Device:
     """
 
     device_type: DeviceType
-    transport: object | None = None
+    transport: Transport | None = None
     info: DeviceInfo = field(default_factory=DeviceInfo)
     registry: object | None = None
     events: Callable[[object, str, object], None] | None = None
+    protocol: ProtocolABC = field(default_factory=TextProtocol)
 
     # -------------------------------------------------------------- #
     # Connection
@@ -103,12 +106,7 @@ class Device:
         if transport is None:
             return []
 
-        line = cmd.name
-        if args:
-            line += " " + " ".join(str(a) for a in args)
-        transport.send((line + "\n").encode("utf-8", errors="replace"))
-
-        return self._read_response(timeout)
+        return self.protocol.call(transport, name, args, timeout)
 
     def _read_response(self, timeout: float, idle: float = 0.35) -> list[str]:
         """Read until the reply settles: no new bytes for `idle` seconds, or
@@ -132,6 +130,33 @@ class Device:
                 break
 
         return [ln.strip() for ln in lines if ln.strip()]
+
+    def status_snapshot(self) -> dict:
+        """Return a JSON-serialisable view of this device's live state.
+
+        Intentionally omits :attr:`transport` and :attr:`protocol` so the
+        snapshot is safe to send over the wire or log.
+        """
+        capabilities = [c.name for c in self.capabilities()]
+
+        device_type = self.device_type
+        if isinstance(device_type, DeviceType):
+            device_type = device_type.value
+
+        return {
+            "device_type": device_type,
+            "model": self.info.model,
+            "firmware_channel": self.info.firmware_channel,
+            "region": self.info.region,
+            "battery_percent": self.info.battery_percent,
+            "battery_voltage": self.info.battery_voltage,
+            "transport_type": self.info.transport_type,
+            "transport_path": self.info.transport_path,
+            "connected": self.info.connected,
+            "uptime_s": self.info.uptime_s,
+            "device_category": self.info.device_type,
+            "capabilities": capabilities,
+        }
 
     def emit(self, event: str, payload: object) -> None:
         events = getattr(self, "events", None)
