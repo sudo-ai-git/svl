@@ -1,26 +1,26 @@
 """Feature Capabilities tab.
 
 Exposes the connected device's live feature set through :class:`Capability`
-with a live readout of ``Capability.is_available(device)``. A capability is
-*actionable* only when both its user preference is enabled *and* the device
+with a live readout of :meth:`Capability.is_available`. A capability is
+*actionable* only when both its user preference is enabled and the device
 itself is connected.
 
 Layout:
 
     Capabilities                                  | Status: connected
-
     Feature        | Description                  | Enable | Available
     -------------------------------------------------------------------------
     nfc            | 13.56 MHz card emulation     | [x]    | yes
     sub-ghz        | Sub-GHz scanner              | [ ]    | no
 
-The ``Available`` column is derived live from :meth:`Capability.is_available`
-and therefore reflects the device's connection state - a capability with an
-enabled toggle that is currently disconnected shows as *not available*.
+The ``Available`` column is derived live from
+:meth:`Capability.is_available` and therefore reflects the device's
+connection state - a capability with an enabled toggle that is currently
+disconnected shows as *not available*.
 
 The whole tab re-reads the device's capability set from
-:meth:`Device.capabilities` every time the device changes, so no capability
-surface is ever hard-coded into this UI.
+:meth:`Device.capabilities` every time the device changes, so no
+capability surface is ever hard-coded into this UI.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from PySide6 import QtCore, QtWidgets
 
 from ...core.devices import Capability, Device
 
-__all__ = ["CapabilityTable", "CapabilitiesTab", "sync_capabilities"]
+__all__ = ["CapabilityTable", "CapabilitiesTab"]
 
 
 # --------------------------------------------------------------------------- #
@@ -45,6 +45,7 @@ class CapabilityTable(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._device: Device | None = None
+        self._caps: list[Capability] = []
         self._rows: dict[str, int] = {}
 
         self.setLayout(QtWidgets.QVBoxLayout())
@@ -88,6 +89,7 @@ class CapabilityTable(QtWidgets.QWidget):
         self._table.clearContents()
         self._table.setRowCount(0)
         self._rows.clear()
+        self._caps.clear()
 
     def _refresh(self) -> None:
         caps = self._device.capabilities() if self._device is not None else []
@@ -104,11 +106,13 @@ class CapabilityTable(QtWidgets.QWidget):
         else:
             ordered = list(caps)
 
-        self._table.setRowCount(len(ordered))
+        self._caps = list(ordered)
         self._rows.clear()
-        for row, cap in enumerate(ordered):
+        for row, cap in enumerate(self._caps):
             self._rows[cap.name] = row
 
+        self._table.setRowCount(len(self._caps))
+        for row, cap in enumerate(self._caps):
             name_item = QtWidgets.QTableWidgetItem(cap.name)
             name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemIsEditable)
             name_item.setData(QtCore.Qt.UserRole, cap.name)
@@ -119,9 +123,12 @@ class CapabilityTable(QtWidgets.QWidget):
             enabled_item = QtWidgets.QTableWidgetItem("on" if cap.enabled else "off")
             enabled_item.setData(QtCore.Qt.UserRole, "enabled")
             enabled_item.setFlags(
-                enabled_item.flags() & ~(QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsUserCheckable)
+                enabled_item.flags()
+                & ~(QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsUserCheckable)
             )
-            enabled_item.setCheckState(QtCore.Qt.Checked if cap.enabled else QtCore.Qt.Unchecked)
+            enabled_item.setCheckState(
+                QtCore.Qt.Checked if cap.enabled else QtCore.Qt.Unchecked
+            )
 
             available = cap.is_available(self._device) if self._device is not None else False
             avail_item = QtWidgets.QTableWidgetItem("yes" if available else "no")
@@ -134,7 +141,9 @@ class CapabilityTable(QtWidgets.QWidget):
         if self._device is None or not self._device.is_connected():
             return
         row = self._table.row(item)
-        cap = self._device.capabilities()[row]
+        if row < 0 or row >= len(self._caps):
+            return
+        cap = self._caps[row]
         new_enabled = not cap.enabled
         self._device.enable_feature(cap.name, new_enabled)
         self.capability_changed.emit(cap.name, new_enabled)
@@ -142,15 +151,15 @@ class CapabilityTable(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------ #
     def capabilities(self) -> list[Capability]:
-        return list(self._rows)  # type: ignore[return-value]
+        return list(self._caps)
 
 
 # --------------------------------------------------------------------------- #
 # Tab
 # --------------------------------------------------------------------------- #
 class CapabilitiesTab(QtWidgets.QWidget):
-    """Feature Capabilities tab: advertises everything the device knows how to
-    do, its availability and the current enable/disable state of each."""
+    """Feature Capabilities tab: advertises everything the device knows how
+    to do, its availability and the current enable/disable state of each."""
 
     def __init__(self, device: Device | None = None, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -170,12 +179,22 @@ class CapabilitiesTab(QtWidgets.QWidget):
         self.layout().addWidget(self._status)
 
         self._panel.set_device(device)
-        self._status.setText("Device connected - refreshing capabilities" if device is not None else "No device connected")
+        self._status.setText(
+            "Device connected - refreshing capabilities"
+            if device is not None
+            else "No device connected"
+        )
 
+    # ------------------------------------------------------------------ #
     def set_device(self, device: Device | None) -> None:
-        self._status.setText("No device connected" if device is None else "Device connected - refreshing capabilities")
+        self._status.setText(
+            "No device connected" if device is None
+            else "Device connected - refreshing capabilities"
+        )
         self._panel.set_device(device)
-        self._status.setStyleSheet("color: #1f6feb;" if device is not None else "color: #555;")
+        self._status.setStyleSheet(
+            "color: #1f6feb;" if device is not None else "color: #555;"
+        )
 
     def _on_capability_changed(self, name: str, enabled: bool) -> None:
         self._status.setText(f"Capability '{name}' enabled={enabled}")
