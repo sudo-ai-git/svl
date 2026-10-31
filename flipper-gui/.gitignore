@@ -1,0 +1,9 @@
+# Runtime / test artefacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Local config (never commit credentials)
+settings.json
