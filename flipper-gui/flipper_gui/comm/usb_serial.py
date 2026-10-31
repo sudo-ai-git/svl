@@ -16,16 +16,22 @@ import serial
 from .base import Transport
 
 _DEFAULT_BAUD = 115200
-_RECONNECT_DELAY = 0.5
+_DEFAULT_TIMEOUT = 0.5
 
 
 class UsbSerialTransport(Transport):
-    """USB-serial wrapper around pyserial."""
+    """USB-serial wrapper around pyserial.
 
-    def __init__(self, path: str = "", baud: int = _DEFAULT_BAUD, timeout: float = 0.5) -> None:
+    Wire protocol: newline-separated UTF-8 command/response lines (see base).
+    A command that sends a line and then reads a bounded reply works through
+    `receive(timeout)` in a polling loop.
+    """
+
+    def __init__(self, path: str = "", baud: int = _DEFAULT_BAUD,
+                 receive_timeout: float = 0.1) -> None:
         self.path = path
         self.baud = baud
-        self.timeout = timeout
+        self.receive_timeout = receive_timeout
         self._port: serial.Serial | None = None
         self._emitter: Callable[[Transport, str, object], None] | None = None
 
@@ -40,7 +46,11 @@ class UsbSerialTransport(Transport):
             if not self.path:
                 return False
         try:
-            self._port = serial.Serial(self.path, self.baud, timeout=0.5, write_timeout=0.5)
+            self._port = serial.Serial(
+                self.path, self.baud,
+                timeout=0.0,          # we poll ourselves in receive()
+                write_timeout=0.5,
+            )
             return True
         except serial.SerialException as exc:
             self._port = None
@@ -64,22 +74,28 @@ class UsbSerialTransport(Transport):
         except (OSError, serial.SerialException):
             return False
 
-    def receive(self) -> bytes | None:
+    def receive(self, timeout: float = 0.05) -> bytes:
+        """Poll until `timeout` seconds have elapsed, returning any bytes
+        that have arrived. Respects the transport's own read timeout."""
         if self._port is None or not self._port.is_open:
-            return None
+            return b""
         try:
             if self._port.in_waiting:
                 return self._port.read(self._port.in_waiting)
+            if timeout <= 0.0:
+                return b""
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                if self._port.in_waiting:
+                    return self._port.read(self._port.in_waiting)
+                time.sleep(0.02)
+            return b""
         except (OSError, serial.SerialException):
             self.disconnect()
-        return None
+            return b""
 
     def on_event(self, emitter: Callable[[Transport, str, object], None]) -> None:
         self._emitter = emitter
-
-    def command(self, name: str, args: list[str] | None = None, payload: object | None = None) -> list[str] | None:
-        # USB-serial backends speak a newline/text protocol; override per device.
-        return None
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -88,12 +104,11 @@ class UsbSerialTransport(Transport):
     def probe(cls) -> str | None:
         """Return the first Flipper-like serial device on this host."""
         patterns = {
-            "/dev/ttyACM*",
-            "/dev/ttyUSB*",
-            "/dev/cu.usbmodem*",
-            "/dev/cu.usbserial*",
-            "COM3",
-            "COM4",
+            "/dev/ttyACM*",          # Linux (STM32 CDC)
+            "/dev/ttyUSB*",          # Linux (FTDI/PL2303 adapters)
+            "/dev/cu.usbmodem*",     # macOS
+            "/dev/cu.usbserial*",    # macOS (FTDI)
+            "COM3", "COM4",
         }
         for pattern in patterns:
             for path in glob.glob(pattern):

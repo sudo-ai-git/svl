@@ -81,6 +81,6 @@ class TestDevice:
         dev.disconnect()
         assert dev.is_connected() is False
 
-    def test_command_with_no_registry_returns_none(self) -> None:
+    def test_request_with_no_registry_returns_empty(self) -> None:
         dev = DummyDevice(registry=None)
-        assert dev.command("x") is None
+        assert dev.request("x") == []

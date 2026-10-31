@@ -46,9 +46,9 @@ def test_device_connect_delegates() -> None:
     assert dev.is_connected() is False
 
 
-def test_device_command_without_registry_returns_none() -> None:
+def test_request_with_no_registry_returns_empty() -> None:
     dev = Device(device_type=DeviceType.USB_SERIAL, registry=None)
-    assert dev.command("list") is None
+    assert dev.request("list") == []
 
 
 class TestCommandRegistry:

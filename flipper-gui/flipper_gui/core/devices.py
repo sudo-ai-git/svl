@@ -3,13 +3,20 @@
 Pure domain only — no Qt, no transport. It imports :class:`Command` from
 ``.commands`` and keeps the cross-module ``CommandRegistry`` reference as a
 forward-declared string so there is no circular import.
+
+Layout:
+  devices.Device       logical device (model + transport + command registry)
+  devices.DeviceInfo   device info model (model, channel, region, battery...)
+  commands.Command     versioned command schema + timeout
+  registry.CommandRegistry  command lookup + discovery
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Callable
+from typing import Callable, Iterable
+import time
 
 from .commands import Command
 
@@ -39,7 +46,13 @@ class DeviceInfo:
 
 @dataclass
 class Device:
-    """Logical device the GUI talks to: a transport + capability set + registry."""
+    """Logical device the GUI talks to: a transport + command registry.
+
+    Wire protocol (see ``comm/base.py``): newline-separated UTF-8 command
+    and response lines. The single blocking entry point is :meth:`request`,
+    which *send the command, read the reply, return the lines.* That is
+    what every feature tab uses.
+    """
 
     device_type: DeviceType
     transport: object | None = None
@@ -47,6 +60,9 @@ class Device:
     registry: object | None = None
     events: Callable[[object, str, object], None] | None = None
 
+    # -------------------------------------------------------------- #
+    # Connection
+    # -------------------------------------------------------------- #
     def connect(self) -> bool:
         if self.transport is None:
             return False
@@ -62,11 +78,60 @@ class Device:
         self.info.connected = False
         self.emit("device.disconnected", None)
 
-    def command(self, name: str, args: list[str] | None = None) -> list[str] | None:
+    def is_connected(self) -> bool:
+        return self.info.connected
+
+    # -------------------------------------------------------------- #
+    # Commands / replies
+    # -------------------------------------------------------------- #
+    def request(self, name: str, args: list[str] | None = None,
+                timeout: float = 3.0) -> list[str]:
+        """Send a command and read the full reply (blocking, bounded).
+
+        Builds the wire line from the command name + args, pushes it over the
+        transport, then reads (with a stability guard) until the reply has
+        settled. Returns the non-empty response lines. Returns ``[]`` when
+        the command, transport, or device is missing/ disconnected.
+        """
         reg = getattr(self, "registry", None)
-        if reg is None or reg.get(name) is None or not self.is_connected():
-            return None
-        return reg.get(name).execute(self, args or [])
+        if reg is None:
+            return []
+        cmd = reg.get(name)
+        if cmd is None or not self.is_connected():
+            return []
+        transport = self.transport
+        if transport is None:
+            return []
+
+        line = cmd.name
+        if args:
+            line += " " + " ".join(str(a) for a in args)
+        transport.send((line + "\n").encode("utf-8", errors="replace"))
+
+        return self._read_response(timeout)
+
+    def _read_response(self, timeout: float, idle: float = 0.35) -> list[str]:
+        """Read until the reply settles: no new bytes for `idle` seconds, or
+        `timeout` elapses. Returns the non-empty lines."""
+        deadline = time.monotonic() + timeout
+        lines: list[str] = []
+        last_data = 0.0
+        buf = ""
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            data = self.transport.receive(timeout=min(0.05, remaining))
+            if data:
+                buf += data.decode("utf-8", errors="replace")
+                last_data = time.monotonic()
+
+            if buf and (time.monotonic() - last_data) > idle:
+                lines.extend(ln for ln in buf.splitlines() if ln.strip())
+                break
+
+        return [ln.strip() for ln in lines if ln.strip()]
 
     def is_connected(self) -> bool:
         return self.info.connected
@@ -81,6 +146,12 @@ class Device:
 
     def set_events(self, events: Callable[[object, str, object], None] | None) -> None:
         self.events = events
+
+    # -------------------------------------------------------------- #
+    # Capability introspection (used by some tabs)
+    # -------------------------------------------------------------- #
+    def capabilities(self) -> list["Capability"]:
+        return [c for c in getattr(self, "_capabilities", []) if c.enabled]
 
 
 @dataclass

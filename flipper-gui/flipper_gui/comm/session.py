@@ -1,75 +1,54 @@
-"""Event bus + session: wires a Transport to a Device and publishes events.
+"""Session: holds a Device, its Transport, and its registry, and exposes
+the request/reply path. No background thread — a tab's ``request`` does a
+bounded send + read, so one command does not share the wire with another.
 
-The session owns the two "glue" threads:
-
-  * **send loop**: calls ``Device.command()`` when a tab asks for it.
-  * **receive loop**: calls ``Transport.receive()`` on an interval and
-    dispatches any bytes as bus events (so UI tabs never block on I/O).
-
-This keeps a tab's request/response model clean while the bus carries
-asynchronous events (``device.connected``, ``device.disconnected``,
-``rf.send``, vendor/JSON payloads, etc.).
+To keep things testable and honest, the event-bus machinery lives here only
+as a thin binding: the Device emits ``data.received`` (via its events
+callback) when a reply arrives, and the UI subscribes to those events.
 """
 
 from __future__ import annotations
 
-import logging
-import threading
-import time
+from typing import Callable, Iterable, TYPE_CHECKING
 
 from .base import Transport
-from ..core.devices import Device, DeviceInfo
-from ..core.registry import CommandRegistry
+from .usb_serial import UsbSerialTransport
 
-logger = logging.getLogger("flipper_gui.comm.session")
+if TYPE_CHECKING:
+    from .devices import Device  # noqa: F401
+
+__all__ = ["Session"]
 
 
 class Session:
-    """Owns a Device (wrapping a Transport) and forwards its events onto the bus."""
+    """Thin binding between a :class:`Device` and a :class:`Transport`.
 
-    def __init__(self, device: Device, transport: Transport, registry: CommandRegistry | None = None,
-                 interval: float = 0.1) -> None:
+    Construct with a (device, transport, registry). Every feature tab issues
+    commands through :meth:`request` and receives results on the device's
+    event loop.
+
+    Attributes:
+        device: the logical device (model + registry + event callback).
+        transport: the wire backend implementing :class:`Transport`.
+        registry: the command registry; defaults to the device's own.
+    """
+
+    def __init__(self, device: "Device", transport: Transport, registry: object | None = None) -> None:
         self.device = device
+        self.device.registry = registry or device.registry
         self.transport = transport
-        self.registry = registry or device.registry
-        self.interval = interval
-        self._running = False
-        self._thread: threading.Thread | None = None
 
-    def start(self) -> None:
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+    # -------------------------------------------------------------- #
+    # Request / reply
+    # -------------------------------------------------------------- #
+    def request(self, name: str, args: list[str] | None = None, timeout: float = 3.0) -> list[str]:
+        """Equivalent to :meth:`Device.request` against this session's device."""
+        return self.device.request(name, args=args, timeout=timeout)
 
-    def stop(self) -> None:
-        self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+    @property
+    def device_type(self) -> str:
+        return self.device.device_type if self.device is not None else "none"
 
-    def _loop(self) -> None:
-        # Keep the receive loop responsive but bounded.
-        while self._running:
-            try:
-                data = self.transport.receive()
-            except Exception:  # noqa: BLE001
-                data = None
-            if data:
-                self._handle_payload(data)
-            time.sleep(self.interval)
-
-    def _handle_payload(self, data: bytes) -> None:
-        text = data.decode("utf-8", errors="replace").strip()
-        if not text:
-            return
-        lines = [ln for ln in text.splitlines() if ln.strip()]
-        for ln in lines:
-            self._publish("data.received", {"text": ln, "bytes": len(data)})
-
-    def _publish(self, event: str, payload: object) -> None:
-        # Device.push_event is the only bus boundary the UI subscribes to.
-        dest = getattr(self.device, "events", None)
-        if dest is not None:
-            try:
-                dest(self.device, event, payload)
-            except Exception:  # noqa: BLE001
-                logger.exception("event publish failed: %s", event)
+    @property
+    def connected(self) -> bool:
+        return self.device.is_connected() if self.device is not None else False
