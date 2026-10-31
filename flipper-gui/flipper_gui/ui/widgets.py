@@ -10,7 +10,7 @@ from typing import List
 
 from PySide6 import QtWidgets
 
-from .device_manager import DeviceCandidate
+from ..comm.device_manager import DeviceCandidate
 
 __all__ = ["DeviceListWidget", "StatusBadge"]
 

@@ -1,18 +1,29 @@
-""""""
+"""Device info tab: shows live model, firmware channel, region, battery.
+
+This tab is populated from the connected :class:`Device` and refreshes when
+the device connects or its capabilities change.
+"""
 
 from __future__ import annotations
 
-import os
+from typing import Optional
+
 from PySide6 import QtWidgets
+
+from ...core.devices import Device
+
+__all__ = ["DeviceInfoTab"]
 
 
 class DeviceInfoTab(QtWidgets.QWidget):
-    """Device info tab: shows model, firmware channel, region, battery."""
+    """Live device info: model, firmware channel, region, battery."""
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None,
+                 device: "Device" | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Device info")
+        self.device: "Device | None" = device
         self._build_layout()
+        self.refresh()
 
     def _build_layout(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -38,11 +49,25 @@ class DeviceInfoTab(QtWidgets.QWidget):
 
         layout.addWidget(header)
         layout.addLayout(grid)
-        layout.addWidget(QtWidgets.QLabel("(placeholder tab — connects on Phase 4)"))
+
+    def device(self) -> "Device | None":
+        return self._device
+
+    def set_device(self, device: "Device | None") -> None:
+        self._device = device
+        self.refresh()
 
     def refresh(self) -> None:
-        """Placeholder: populated when a device is connected."""
-        self.model_label.setText("Flipper Zero")
-        self.channel_label.setText("RELEASE")
-        self.region_label.setText("")
-        self.battery_label.setText("100%")
+        d = self._device
+        if d is None or not d.is_connected():
+            self.model_label.setText("—")
+            self.channel_label.setText("—")
+            self.region_label.setText("—")
+            self.battery_label.setText("—")
+            return
+
+        info = d.info
+        self.model_label.setText(info.model or "—")
+        self.channel_label.setText(info.firmware_channel or "—")
+        self.region_label.setText(info.region or "—")
+        self.battery_label.setText(f"{info.battery_percent}%")

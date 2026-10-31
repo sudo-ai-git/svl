@@ -9,21 +9,51 @@ responsibilities are:
 Connect is a two-step flow: the menu item / button enumerates candidate
 devices (serial + BLE), the user picks one, and the window opens a transport
 for it via :class:`DeviceManager`.  The opened transport is wrapped in a
-:class:`Device` the tabs talk to.
+:class:`Device` the tabs talk to, and each tab is handed the device so it can
+dispatch commands.
 """
 
 from __future__ import annotations
 
 from PySide6 import QtWidgets
 
+# ---- tab surface ------------------------------------------------------- #
 from .tabs import DeviceInfoTab
-from .widgets import StatusBadge, DeviceListWidget
+from .tabs.firmware import FirmwareTab
+from .tabs.ibutton import IButtonTab
+from .tabs.infrared import InfraredTab
+from .tabs.nfc import NfcTab
+from .tabs.rfid import RfidTab
+from .tabs.settings import SettingsTab
+from .tabs.signals import SubGhzReadTab
+from .tabs.sub_ghz import SubGhzAnalysisTab
+
+# ---- transports -------------------------------------------------------- #
 from .comm.device_manager import CandidateKind, DeviceCandidate, DeviceManager
-from .comm.usb_serial import UsbSerialTransport
 from .comm.ble import BleTransport
+from .comm.usb_serial import UsbSerialTransport
 from .core.devices import Capability, Device, DeviceType
 
 __all__ = ["MainWindow"]
+
+# feature name -> tab class
+_TABS: list[tuple[str, type]] = [
+    ("Device info", DeviceInfoTab),
+    ("Sub-GHz", SubGhzReadTab),
+    ("Sub-1 GHz Analysis", SubGhzAnalysisTab),
+    ("NFC (13.56 MHz)", NfcTab),
+    ("RFID (125 kHz)", RfidTab),
+    ("iButton", IButtonTab),
+    ("Infrared / Universal remote", InfraredTab),
+    ("Firmware", FirmwareTab),
+    ("Settings", SettingsTab),
+]
+
+# transport kind -> factory
+_CONNECTORS = {
+    CandidateKind.SERIAL: UsbSerialTransport,
+    CandidateKind.BLE: BleTransport,
+}
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -37,6 +67,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.manager = DeviceManager()
         self._device: "Device | None" = None
         self._transport = None
+        self._tabs: dict[str, object] = {}
 
         self.tab_widget = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tab_widget)
@@ -85,7 +116,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.tab_widget)
 
     def _build_tabs(self) -> None:
-        self.tab_widget.addTab(DeviceInfoTab(), "Device info")
+        for title, tab_cls in _TABS:
+            tab = tab_cls(device=None)
+            self.tab_widget.addTab(tab, title)
+            self._tabs[title] = tab
 
     def _update_badge(self) -> None:
         self.status_badge.set_type("info")
@@ -125,9 +159,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_badge.setText(f"Connect failed: {status}")
             return False
 
-        # Each previously-open tab re-registers its commands so the new
-        # Device can dispatch them (see :meth:`Device.register_commands`).
-        self._commit(transport)
+        self._commit(transport, _kind_to_devicetype(cand.kind))
         self._update_disconnect_buttons()
         self.status_badge.set_type("connected")
         self.status_badge.setText(f"Connected: {self._device.info.model}")
@@ -138,6 +170,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._device.disconnect()
             self._device = None
             self._transport = None
+        # Clear every tab's live device reference.
+        for tab in self._tabs.values():
+            if hasattr(tab, "set_device"):
+                tab.set_device(None)
         self._update_disconnect_buttons()
         self._set_status("disconnected", "Disconnected")
 
@@ -150,11 +186,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return None, f"no connector for {cand.kind}"
         return self.manager.connect(cand, lambda: factory(cand.path))
 
-    def _commit(self, transport) -> None:
+    def _commit(self, transport, device_type: "DeviceType") -> None:
         self._transport = transport
-        self._device = Device(device_type=DeviceType.USB_SERIAL, transport=transport)
+        self._device = Device(device_type=device_type, transport=transport)
         self._device.set_events(self._on_device_event)
         self._device.connect()
+        # Hand the live device to every feature tab.
+        for tab in self._tabs.values():
+            if hasattr(tab, "set_device"):
+                tab.set_device(self._device)
 
     def _on_device_event(self, device, event, payload) -> None:
         if event == "device.connected":
@@ -179,7 +219,5 @@ class MainWindow(QtWidgets.QMainWindow):
         self._on_disconnect()
 
 
-_CONNECTORS = {
-    CandidateKind.SERIAL: UsbSerialTransport,
-    CandidateKind.BLE: BleTransport,
-}
+def _kind_to_devicetype(kind: str) -> "DeviceType":
+    return DeviceType(kind.upper())
