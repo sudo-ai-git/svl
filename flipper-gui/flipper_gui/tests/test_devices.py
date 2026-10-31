@@ -8,10 +8,11 @@ from unittest import mock
 
 from flipper_gui.core.commands import Command
 from flipper_gui.core.devices import Device, DeviceInfo, DeviceType, Capability
+from flipper_gui.comm.base import Transport
 from flipper_gui.core.registry import CommandRegistry
 
 
-class DummyTransport:
+class DummyTransport(Transport):
     """Transport stub whose :meth:`receive` takes the ``timeout`` kwarg that
     :class:`Protocol` expects and returns canned reply bytes."""
 
@@ -124,15 +125,21 @@ class TestCapability:
         dev.connect()
         cap = Capability(name="nfc", enabled=True)
         dev._capabilities = [cap]
-        assert dev.get_capability("nfc").enabled is True
+        cap = dev.get_capability("nfc")  # type: ignore[reportAttributeAccessIssue]
+        assert cap is not None
+        assert cap.enabled is True
         assert cap.is_available(dev) is True
 
         dev.enable_feature("nfc", enabled=False)
-        assert dev.get_capability("nfc").enabled is False
+        cap = dev.get_capability("nfc")
+        assert cap is not None
+        assert cap.enabled is False
         assert cap.is_available(dev) is False
 
         dev.enable_feature("nfc", enabled=True)
-        assert dev.get_capability("nfc").enabled is True
+        cap = dev.get_capability("nfc")
+        assert cap is not None
+        assert cap.enabled is True
         assert cap.is_available(dev) is True
 
     def test_get_capability_on_fresh_device_returns_none(self) -> None:
@@ -160,7 +167,8 @@ class TestCapability:
                 return False
 
         cap = Capability(name="nfc", enabled=True)
-        assert cap.is_available(_NoConnect()) is False
+        # type: ignore[reportArgumentType]  # deliberate duck-typed probe: miswired call site
+        assert cap.is_available(_NoConnect()) is False  # type: ignore[reportArgumentType]  # deliberate duck-typed probe: miswired call site
 
     def test_capability_available_none_device_returns_false(self) -> None:
         assert Capability(name="nfc").is_available(None) is False

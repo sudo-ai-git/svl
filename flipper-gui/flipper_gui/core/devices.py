@@ -237,7 +237,7 @@ class Capability:
     enabled: bool = True
     description: str = ""
 
-    def is_available(self, device: "Device") -> bool:
+    def is_available(self, device: "Device | None") -> bool:
         """Return True if this capability is available on *device*.
 
         A capability is only actionable when it is enabled AND the
