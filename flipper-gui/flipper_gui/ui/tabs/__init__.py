@@ -103,6 +103,35 @@ class TabBase(QtWidgets.QWidget):
     def _render(self, lines: list[str]) -> None:
         self.log.append("\n".join(lines) if lines else "(no output / not connected)")
 
+    def set_device(self, device: "Device | None") -> None:
+        """Attach (or drop) the live device, and subscribe to its event feed.
+
+        Receiver side of the event bus: ``device.connected`` refreshes this
+        tab's status, and ``data.received`` appends the device's output so the
+        log never goes behind what a user just typed.
+        """
+        # Drop any previous subscription so a re-connect doesn't double-sub.
+        try:
+            self.device.set_events(None)  # type: ignore[union-attr]
+        except Exception:
+            pass
+        self.device = device
+        self._handler = None
+        if device is not None:
+            self._handler = self._on_event
+            try:
+                device.set_events(self._handler)
+            except Exception:
+                pass
+
+    def _on_event(self, event: str, payload: object) -> None:
+        if event == "data.received":
+            lines = payload if isinstance(payload, list) else [payload]
+            for ln in lines:
+                self._line(ln)
+        elif event == "device.connected":
+            self.refresh()
+
     def refresh(self) -> None:
         """Called when the device is connected or settings change."""
         self.log.append(f"[{self.TITLE}] ready (connected={self.device.is_connected()})")
