@@ -133,9 +133,6 @@ class Device:
 
         return [ln.strip() for ln in lines if ln.strip()]
 
-    def is_connected(self) -> bool:
-        return self.info.connected
-
     def emit(self, event: str, payload: object) -> None:
         events = getattr(self, "events", None)
         if events is not None:

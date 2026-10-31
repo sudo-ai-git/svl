@@ -43,6 +43,7 @@ class Transport(ABC):
         empty). Intentional consumer of the wire; do not call from two
         threads at once."""
 
-    @abstractmethod
     def close(self) -> None:
-        """Close the transport and release resources. Alias for disconnect()."""
+        """Release the transport's resources. Concrete transports override
+        this; by default it is a no-op."""
+        pass
