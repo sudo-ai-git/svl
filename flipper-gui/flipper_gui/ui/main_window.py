@@ -18,7 +18,7 @@ from __future__ import annotations
 from PySide6 import QtWidgets
 
 # ---- tab surface ------------------------------------------------------- #
-from .tabs import DeviceInfoTab
+from .tabs import CapabilityTable, CapabilitiesTab, DeviceInfoTab
 from .tabs.firmware import FirmwareTab
 from .tabs.ibutton import IButtonTab
 from .tabs.infrared import InfraredTab
@@ -39,6 +39,7 @@ __all__ = ["MainWindow"]
 # feature name -> tab class
 _TABS: list[tuple[str, type]] = [
     ("Device info", DeviceInfoTab),
+    ("Feature capabilities", CapabilitiesTab),
     ("Sub-GHz", SubGhzReadTab),
     ("Sub-1 GHz Analysis", SubGhzAnalysisTab),
     ("NFC (13.56 MHz)", NfcTab),

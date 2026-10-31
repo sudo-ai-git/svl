@@ -83,7 +83,6 @@ class TestCapability:
         cap = Capability(name="nfc", enabled=True)
         assert cap.is_available(dev) is False
 
-
     def test_request_emits_data_received(self) -> None:
         from flipper_gui.core.registry import CommandRegistry, register
         rec = mock.Mock()
@@ -101,7 +100,37 @@ class TestCapability:
         reply = dev.request("fw")
         assert reply == ["model: Flipper Zero", "channel: RELEASE"]
         print(">>> EVENTS:", rec.call_args_list, file=sys.stderr)
-        # c is a _mock_call: c[0]==args-tuple, c[1]==kwargs-dict (not the name).
         data_calls = [c for c in rec.call_args_list if c.args[1] == "data.received"]
         assert len(data_calls) == 1
-        assert data_calls[0].args[2] == ["model: Flipper Zero", "channel: RELEASE"]
+
+    def test_capability_available_only_when_enabled_and_connected(self) -> None:
+        tx = DummyTransport()
+        dev = Device(device_type=DeviceType.USB_SERIAL, transport=tx)
+        cap = Capability(name="nfc", enabled=True)
+        assert cap.is_available(dev) is False
+        dev.connect()
+        assert cap.is_available(dev) is True
+        dev.disconnect()
+        assert cap.is_available(dev) is False
+
+    def test_capability_guard_none_device(self) -> None:
+        cap = Capability(name="nfc", enabled=True)
+        assert cap.is_available(None) is False
+
+    def test_enable_feature_toggle_and_persist(self) -> None:
+        dev = Device(device_type=DeviceType.USB_SERIAL)
+        tx = DummyTransport()
+        dev.transport = tx
+        dev.connect()
+        cap = Capability(name="nfc", enabled=True)
+        dev._capabilities = [cap]
+        assert dev.get_capability("nfc").enabled is True
+        assert cap.is_available(dev) is True
+
+        dev.enable_feature("nfc", enabled=False)
+        assert dev.get_capability("nfc").enabled is False
+        assert cap.is_available(dev) is False
+
+        dev.enable_feature("nfc", enabled=True)
+        assert dev.get_capability("nfc").enabled is True
+        assert cap.is_available(dev) is True

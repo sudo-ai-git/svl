@@ -3,22 +3,20 @@
 Every command dispatched by the GUI is declared here with its name,
 description, argument schema, and a handler. This is the single source of
 truth for the feature set and makes protocol drift auditable.
-
-Handler contract: ``handler(device, args, payload) -> list[str]``. The
-handler receives the :class:`Device` (transport + capability set), the
-declared arguments, and an optional wire payload; it returns the lines the
-GUI renders.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 # Allowed wire payloads.
 PAYLOAD_TEXT = "text"
 PAYLOAD_JSON = "json"
 PAYLOAD_BYTES = "bytes"
+
+if TYPE_CHECKING:
+    from .devices import Device
 
 
 @dataclass(frozen=True)
@@ -32,7 +30,13 @@ class Command:
     requires_connected: bool = True
     handler: Callable[..., list[str]] | None = None
 
-    def execute(self, device: object, args: list[str] | None = None, payload: object | None = None) -> list[str] | None:
+    def execute(self, device: "Device | None", args: list[str] | None = None,
+                payload: object | None = None) -> list[str] | None:
+        """Run this command against *device*.
+
+        Returns the rendered reply lines, or ``None`` when the device is
+        disconnected, missing, or this command has no handler.
+        """
         if self.requires_connected:
             if device is None or not hasattr(device, "is_connected") or not device.is_connected():
                 return None

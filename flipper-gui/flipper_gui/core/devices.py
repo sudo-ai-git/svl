@@ -191,17 +191,24 @@ class Device:
         self._capabilities = list(capabilities)
 
     def get_capability(self, name: str) -> "Capability | None":
-        """Return the live capability for *name*, deriving it from the registry
-        when missing, so lookup and toggling work on any connected device."""
-        seen = {c.name for c in self.capabilities()}
-        for c in self.capabilities():
+        """Return the capability named *name*, searching the persistent store.
+
+        Note: the UI-visible :meth:`capabilities` view filters out disabled
+        entries, so this lookup uses the raw persisted list so a disabled
+        feature can still be retrieved and re-enabled.
+        """
+        for c in self._capabilities:
             if c.name == name:
                 return c
         return None
 
     def enable_feature(self, name: str, enabled: bool = True) -> None:
-        """Toggle a capability on or off; add it if not present."""
-        for c in self.capabilities():
+        """Toggle a capability on or off; add it if not present.
+
+        Works against the raw persisted list, so a previously disabled
+        feature can be re-enabled without being duplicated.
+        """
+        for c in self._capabilities:
             if c.name == name:
                 c.enabled = enabled
                 return
@@ -224,5 +231,12 @@ class Capability:
     description: str = ""
 
     def is_available(self, device: "Device") -> bool:
-        """Return True if this capability is available on *device*."""
+        """Return True if this capability is available on *device*.
+
+        A capability is only actionable when it is enabled AND the
+        underlying device is connected; ``device=None`` (no live device)
+        is always treated as unavailable so the UI/tabs never crash.
+        """
+        if device is None:
+            return False
         return self.enabled and bool(device.is_connected())

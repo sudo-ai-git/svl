@@ -15,8 +15,9 @@ from typing import Iterable, Tuple
 from PySide6 import QtWidgets
 
 from ..core.devices import Capability, Device
+from .capabilities import CapabilityTable, CapabilitiesTab
 
-__all__ = ["TabBase"]
+__all__ = ["TabBase", "CapabilityTable", "CapabilitiesTab"]
 
 
 class TabBase(QtWidgets.QWidget):
