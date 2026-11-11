@@ -1,0 +1,1 @@
+module m{func main()type void{let x:int=1 let y:int=2 let z:int=x&y let w:int=x|y let v:int=x^y let u:int=~x return}}

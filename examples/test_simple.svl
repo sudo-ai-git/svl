@@ -1,0 +1,1 @@
+module m{func t(v:int)type void{let a=v+128 return}func main()type void{return}}

@@ -1,0 +1,15 @@
+module m{
+  func t(v:int)type void{
+    let a=(v+128)%256
+    let b=(a+128)%256
+    let c=if b%2==0 then(b+1)%256 else(b-1)%256
+    let d=if c%2==0 then(c+1)%256 else(c-1)%256
+    assert d==v
+    print_int(v)print(" ")print_int((v+128)%256)print(" ")print_int(v)print(" ")print_int(if v%2==0 then v+1 else v-1)print(" ")print_int(v)print("\n")
+  }
+  func main()type void{
+    let i:int=0
+    while i<20{t(i)let i:int=i+1}
+    print("Done\n")
+  }
+}

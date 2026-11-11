@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# SVL build/test artifacts
+test_pgo/
+test_pgo_spike/
+*.wasm
+*.wat

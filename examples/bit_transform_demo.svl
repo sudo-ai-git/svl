@@ -1,0 +1,110 @@
+module bit_transform_demo {
+  // Transform: add 1-bit to front (MSB), output, remove, output, add to right (LSB), output, remove, output
+  // Uses XOR for perfectly reversible bit toggling:
+  //   Add front bit:  XOR 128 (toggle MSB - sets to 1 since MSB=0 for 0-19)
+  //   Remove front:  XOR 128 (toggle MSB back)
+  //   Add right bit:  XOR 1   (toggle LSB)
+  //   Remove right:  XOR 1   (toggle LSB back)
+  // All operations perfectly reversible!
+  
+  // XOR with 128 - for values 0-19 (< 128), this is just val + 128
+  func xor_128(val: int) type int {
+    return (val + 128) % 256
+  }
+
+  // XOR with 1 - toggles LSB
+  func xor_1(val: int) type int {
+    // if even: val + 1, if odd: val - 1
+    let is_even: int = val % 2
+    if is_even == 0 then {
+      return (val + 1) % 256
+    } else {
+      return (val - 1) % 256
+    } else {
+      // empty else
+    }
+  }
+
+  func transform_byte(val: int) type void {
+    // Original value
+    print("Original: ")
+    print_int(val)
+    print("\n")
+    print("  Binary: ")
+    print_binary(val)
+    print("\n")
+
+    // Add 1-bit to front (MSB): XOR 128
+    let with_front_bit: int = xor_128(val)
+    print("With 1-bit at front (MSB): ")
+    print_int(with_front_bit)
+    print(" (binary: ")
+    print_binary(with_front_bit)
+    print(")\n")
+
+    // Remove front bit: XOR 128
+    let without_front: int = xor_128(with_front_bit)
+    print("After removing front bit: ")
+    print_int(without_front)
+    print(" (binary: ")
+    print_binary(without_front)
+    print(")\n")
+
+    // Add 1-bit to right (LSB): XOR 1
+    let with_right_bit: int = xor_1(without_front)
+    print("With 1-bit at right (LSB): ")
+    print_int(with_right_bit)
+    print(" (binary: ")
+    print_binary(with_right_bit)
+    print(")\n")
+
+    // Remove right bit: XOR 1
+    let final_val: int = xor_1(with_right_bit)
+    print("After removing right bit: ")
+    print_int(final_val)
+    print(" (binary: ")
+    print_binary(final_val)
+    print(")\n")
+
+    assert final_val == val
+    print("✓ Transform cycle complete\n")
+  }
+
+  // Print binary representation of a byte (8 bits)
+  func print_binary(val: int) type void {
+    print_bit(val, 128)
+    print_bit(val, 64)
+    print_bit(val, 32)
+    print_bit(val, 16)
+    print_bit(val, 8)
+    print_bit(val, 4)
+    print_bit(val, 2)
+    print_bit(val, 1)
+    print(" ")
+  }
+
+  func print_bit(val: int, mask: int) type void {
+    let div: int = val / mask
+    let bit: int = div % 2
+    print_int(bit)
+  }
+
+  // Main: cycle through first 20 symbols (0-19)
+  func main() type void {
+    let i: int = 0
+    while i < 20 {
+      print("=== Symbol ")
+      print_int(i)
+      print(" ===\n")
+      
+      transform_byte(i)
+      
+      // increment using let binding (shadowing)
+      let next_i: int = i + 1
+      let i: int = next_i  // shadow previous i
+    }
+    
+    print("All 20 symbols processed!\n")
+    return
+  }
+}

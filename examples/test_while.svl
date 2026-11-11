@@ -1,0 +1,1 @@
+module m{func main()type void{let i:int=0 while i<20{let i:int=i+1}print("Done\n")}}

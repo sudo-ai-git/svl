@@ -1,0 +1,1 @@
+module m{func main()type void{let a=(1+128)%256 let b=(a+128)%256 let c=b%2 let d=if c==1 then(b+1)%256 else(b-1)%256 let e=d%2 let f=if e==1 then(d+1)%256 else(d-1)%256 assert f==1 let r=1+1-1%2*2 print_int(1)print(" ")print_int(1+128)print(" ")print_int(1)print(" ")print_int(1+1-1%2*2)print(" ")print_int(1)print("\n")return}}

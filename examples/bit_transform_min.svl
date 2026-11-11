@@ -1,0 +1,33 @@
+module m {
+  func xor_128(x: int) type int { return (x + 128) % 256 }
+  func xor_1(x: int) type int {
+    if x % 2 == 0 then { return (x + 1) % 256 } else { return (x - 1) % 256 } else { }
+  }
+  func pb(x: int, m: int) type void {
+    let d: int = x / m
+    print_int(d % 2)
+  }
+  func pbin(v: int) type void {
+    pb(v, 128) pb(v, 64) pb(v, 32) pb(v, 16)
+    pb(v, 8) pb(v, 4) pb(v, 2) pb(v, 1)
+    print(" \n")
+  }
+  func t(v: int) type void {
+    print("Original: ") print_int(v) print("\n  Binary: ") pbin(v) print("\n")
+    let a: int = xor_128(v)
+    print("With 1-bit at front: ") print_int(a) print(" (") pbin(a) print(")\n")
+    let b: int = xor_128(a)
+    print("After removing front: ") print_int(b) print(" (") pbin(b) print(")\n")
+    let c: int = xor_1(b)
+    print("With 1-bit at right: ") print_int(c) print(" (") pbin(c) print(")\n")
+    let d: int = xor_1(c)
+    print("After removing right: ") print_int(d) print(" (") pbin(d) print(")\n")
+    assert d == v
+    print("✓\n")
+  }
+  func main() type void {
+    let i: int = 0
+    while i < 20 { t(i) let i: int = i + 1 }
+    print("Done\n")
+  }
+}
