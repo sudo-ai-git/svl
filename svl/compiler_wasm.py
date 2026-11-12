@@ -237,6 +237,18 @@ class WasmFunction:
 # COMPILER
 # ============================================================================
 
+# Host import surface: the ONLY `env` functions a module may call. Imports are emitted
+# only when called, and a call to anything outside this set is a compile error.
+# `print` takes (ptr, len); the rest are single-i32.
+HOST_IMPORT_SIGS = {
+    'print': '(func $print (param i32 i32))',
+    'print_int': '(func $print_int (param i32))',
+    'malloc': '(func $malloc (param i32) (result i32))',
+    'iterator_next': '(func $iterator_next (param i32) (result i32))',
+    'await': '(func $await (param i32) (result i32))',
+}
+
+
 class WasmCompiler:
     """SVL to WASM compiler."""
     
@@ -392,8 +404,14 @@ class WasmCompiler:
             func = self.state.current_function
             if not func.body or not func.body[-1].startswith('return'):
                 if func.func_type.results:
-                    func.body.append('drop')  # Drop any leftover value
-                func.body.append('return')
+                    # The body did not end in an explicit `return`, so nothing is on the
+                    # stack here. `drop; return` (the old code) is INVALID for a function
+                    # with results: `drop` needs an operand and `return` needs the result.
+                    # Every meaningful path already returned, so mark the fall-through
+                    # unreachable — valid WASM, and it traps if control can actually reach it.
+                    func.body.append('unreachable')
+                else:
+                    func.body.append('return')
     
     def _collect_local_names(self, block) -> set:
         """Collect every local name bound in a function body (params excluded).
@@ -854,21 +872,46 @@ class WasmCompiler:
             '%': 'i32.rem_s', '==': 'i32.eq', '!=': 'i32.ne',
             '<': 'i32.lt_s', '>': 'i32.gt_s', '<=': 'i32.le_s', '>=': 'i32.ge_s',
             '&&': 'i32.and', '||': 'i32.or',
+            # Bitwise. These were missing, so they fell through to the `i32.add` default
+            # and produced a WRONG ANSWER silently (12 & 10 compiled as 12 + 10 = 22).
+            '&': 'i32.and', '|': 'i32.or', '^': 'i32.xor',
+            '<<': 'i32.shl', '>>': 'i32.shr_s',
         }
-        wasm_op = op_map.get(expr.operator, 'i32.add')
+        wasm_op = op_map.get(expr.operator)
+        if wasm_op is None:
+            # Never fall back to an operator. An unmapped op must fail loudly — a silent
+            # default turns a missing arm into a plausible-looking wrong result.
+            raise SyntaxError(
+                f"unsupported binary operator '{expr.operator}' "
+                f"at line {getattr(expr, 'line', '?')}"
+            )
         func.body.append(wasm_op)
     
     def _compile_unary_expr(self, expr: UnaryExpr):
-        self._compile_expr(expr.operand)
         func = self.state.current_function
         if expr.operator == '-':
+            # Negation is `0 - operand`. The zero MUST be pushed BEFORE the operand:
+            # compiling the operand first made this `operand - 0`, i.e. a silent no-op
+            # that returned `5` for `-5`.
             func.body.append('i32.const 0')
+            self._compile_expr(expr.operand)
             func.body.append('i32.sub')
-        elif expr.operator == '!':
+            return
+        self._compile_expr(expr.operand)
+        if expr.operator == '!':
             func.body.append('i32.eqz')
+        elif expr.operator == '~':
+            # bitwise NOT: x ^ -1
+            func.body.append('i32.const -1')
+            func.body.append('i32.xor')
+        else:
+            raise SyntaxError(
+                f"unsupported unary operator '{expr.operator}' "
+                f"at line {getattr(expr, 'line', '?')}"
+            )
     
     def _compile_call_expr(self, expr: CallExpr):
-        callee = self._resolve_callee(expr.callee)
+        callee = self._resolve_callee(expr.callee, getattr(expr, 'line', '?'))
         # `print` is a host import taking (ptr: i32, len: i32). A lone string-literal
         # argument is therefore expanded into its (ptr, len) pair — pushing only the
         # pointer left the call one operand short and the module failed to validate.
@@ -885,18 +928,21 @@ class WasmCompiler:
         func = self.state.current_function
         func.body.append(f'call {callee}')
 
-    def _resolve_callee(self, callee: str) -> str:
+    def _resolve_callee(self, callee: str, line: Any = '?') -> str:
         """
         A CallExpr carries the bare name (`fib`) while definitions are keyed by the
-        module-qualified name (`svl_payload$fib`) — emit the qualified one, and fall back
-        to the bare name for host imports (print / malloc / iterator_next / await).
+        module-qualified name (`svl_payload$fib`) — emit the qualified one and leave the
+        host imports bare. An unknown callee is a compile error: emitting `call $g` for a
+        function that does not exist produced an unassemblable module.
         """
         if callee in self.state.functions:
             return f'${callee}'
         for name in self.state.sorted_functions:
             if name == callee or name.endswith(f'${callee}'):
                 return f'${name}'
-        return f'${callee}'
+        if callee in HOST_IMPORT_SIGS:
+            return f'${callee}'
+        raise SyntaxError(f"call to undefined function '{callee}' at line {line}")
     
     def _compile_match_expr(self, expr: MatchExpr):
         # Simplified: compile as if-else chain
@@ -993,7 +1039,20 @@ class WasmCompiler:
     def _compile_literal(self, expr: Literal):
         func = self.state.current_function
         if expr.literal_type == 'int':
-            func.body.append(f'i32.const {expr.value}')
+            # SVL `int` lowers to i32. An out-of-range literal used to be emitted verbatim
+            # and only failed later as "invalid i32 number: constant out of range" from the
+            # assembler — fail here, with the line, instead.
+            try:
+                value = int(expr.value)
+            except (TypeError, ValueError):
+                raise SyntaxError(
+                    f"invalid integer literal {expr.value!r} at line {getattr(expr, 'line', '?')}"
+                )
+            if not (-0x80000000 <= value <= 0x7FFFFFFF):
+                raise SyntaxError(
+                    f"integer literal {value} out of i32 range at line {getattr(expr, 'line', '?')}"
+                )
+            func.body.append(f'i32.const {value}')
         elif expr.literal_type == 'float':
             func.body.append(f'f64.const {expr.value}')
         elif expr.literal_type == 'bool':
@@ -1080,13 +1139,7 @@ class WasmCompiler:
         # Imports — emit ONLY the host functions the module actually calls. An unused
         # import is still an import: the host must supply it or instantiation fails, so
         # adding one unconditionally breaks every existing host.
-        host_sigs = {
-            'print': '(func $print (param i32 i32))',
-            'print_int': '(func $print_int (param i32))',
-            'malloc': '(func $malloc (param i32) (result i32))',
-            'iterator_next': '(func $iterator_next (param i32) (result i32))',
-            'await': '(func $await (param i32) (result i32))',
-        }
+        host_sigs = {name: sig for name, sig in HOST_IMPORT_SIGS.items()}
         called_hosts = set()
         for func_name in self.state.sorted_functions:
             for instr in self.state.functions[func_name].body:

@@ -1277,7 +1277,17 @@ class Parser:
 
     # Expression parsing with precedence (highest to lowest)
     def parse_expr(self) -> Expr:
-        return self.parse_assignment()
+        # Bound the recursion: deeply nested parentheses used to escape as a raw
+        # RecursionError. Empirically the interpreter's own limit is hit at ~56 nested
+        # levels (Python frame cost ~15/level with recursionlimit 1000), so guard at 50.
+        depth = getattr(self, '_expr_depth', 0) + 1
+        if depth > 50:
+            raise SyntaxError("expression nesting too deep (>50 levels)")
+        self._expr_depth = depth
+        try:
+            return self.parse_assignment()
+        finally:
+            self._expr_depth = depth - 1
 
     def parse_expr_no_struct_lit(self) -> Expr:
         """Parse expression without struct literal ambiguity (for for-loop iter expressions)."""
@@ -1476,7 +1486,8 @@ class Parser:
         return left
 
     def parse_unary(self) -> Expr:
-        if self.match(TokenType.MINUS, TokenType.NOT, TokenType.BITWISE_NOT):
+        if self.match(TokenType.MINUS, TokenType.NOT, TokenType.BITWISE_NOT,
+                      TokenType.EXCLAMATION):
             op = self.tokens[self.pos - 1].value
             operand = self.parse_unary()
             return UnaryExpr(
@@ -2033,9 +2044,17 @@ class IndexExpr(ASTNode):
 
 
 def parse(tokens: List[Token]) -> Program:
-    """Convenience function to parse tokens."""
+    """Convenience function to parse tokens.
+
+    A RecursionError escaping from here is normalised to SyntaxError: a caller with a
+    deeper stack can hit the interpreter limit before the in-parser depth guard, and an
+    unclean crash is not an acceptable failure mode for bad input.
+    """
     parser = Parser(tokens)
-    return parser.parse()
+    try:
+        return parser.parse()
+    except RecursionError:
+        raise SyntaxError("expression nesting too deep (parser recursion limit reached)") from None
 
 
 if __name__ == '__main__':
