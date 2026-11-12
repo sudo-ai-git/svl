@@ -29,7 +29,7 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 
 | Layer | Name | Technology | Purpose |
 |-------|------|------------|---------|
-| **L1** | Syntax | 231-Gate Checksums | Structural integrity via SUM/LINEAR/PRODUCT mod 231 |
+| **L1** | Syntax | 231-Gate Checksums | Structural integrity via SUM/LINEAR/ROLLING mod 231 |
 | **L2** | Types | Mod-5 Dual-Stream | Mod-5 buckets + Z/2 negation + structural checksums |
 | **L3** | Theorem | BPSW Monodromy — **informational only** | hash-primality parity via SHA256 + BPSW on primes {37,73,17}; constant-true (0/60 programs fail it), **not** part of `passed` |
 | **L3+** | SMT (opt-in) | Z3 theorem layer | the real prover: tri-state `proven` / `counterexample` / `unverified` |
@@ -227,14 +227,19 @@ let result: List<int> = map(add1, nums)  // [2, 3, 4]
 ```
 SUM     = (Σ bytes) mod 231
 LINEAR  = (Σ (i+1) * byte[i]) mod 231
-PRODUCT = (Π (byte[i] + 1)) mod 231  (0→1 mapping)
+ROLLING = (H*31 + byte[i]) mod 231,  H_0 = 0
 ```
+The third channel was originally `PRODUCT = Π(b+1) mod 231`, which was **degenerate**:
+it is 0 whenever any byte has `b+1` divisible by 3, 7 or 11, so 2000/2000 random 512-byte
+windows produced 0.  It was replaced (2026-11-12) with the rolling hash above; 31 is
+coprime to 231, so the channel is non-degenerate and a one-byte change alters it with
+probability ≈ 1 − 1/231.
 
 **Verification Gates**:
 1. **AST Guard** - Forbids `sum()` on iterables (requires `neumaier_sum()`)
 2. **Golden References** - Psalm 119 Aleph, Genesis 1:1
 3. **Mutation Test** - 3+ injected corruptions must be caught
-4. **Meta-Checksum** - `SUM ⊕ LINEAR ⊕ PRODUCT mod 231` for tamper detection
+4. **Meta-Checksum** - `SUM ⊕ LINEAR ⊕ ROLLING mod 231` for tamper detection
 
 **Viable Start Detection**: Exactly **one** viable start position per 512-byte block where all three checksums match expected values.
 
@@ -302,9 +307,10 @@ svl> save <file>             # Save buffer
 - **Block**: On blank line (executes block)
 - **Full**: `verify` command runs all 3 layers
 
-**Executes (2026-11-12):** the buffer is wrapped in `module repl { func main() ... }` before
-verification and then compiled and run, so a block prints its result. Known gap: definitions
-do not persist across blocks (each block is independent).
+**Executes (2026-11-12):** the buffer is wrapped in `module repl { <definitions> func main() ... }`
+before verification and then compiled and run, so a block prints its result. Top-level
+declarations (`func`/`struct`/`const`/`var`/`type`) persist across blocks — a later block can
+call a function defined in an earlier one.
 
 **Example Session**:
 ```
@@ -943,7 +949,7 @@ ic = IncrementalChecksum()
 for byte in b"Hello, World! ":
     ic.append_byte(byte)
 ic.update_byte(0, ord('J'))        # in-place edit, checksums recomputed incrementally
-print(ic.get_checksums())          # (SUM, LINEAR, PRODUCT) mod 231
+print(ic.get_checksums())          # (SUM, LINEAR, ROLLING) mod 231
 ```
 
 - `IncrementalChecksumManager` tracks checksums per buffer for IDE-style feedback.
@@ -1089,6 +1095,9 @@ does, is deleted rather than relabelled. Do not re-add one without wiring it int
 | `try`/`catch`/`throw` | `_compile_try_stmt` / `_compile_throw_stmt` | error-flag lowering (WASM MVP has no exceptions) |
 | `print` type dispatch | `_compile_call_expr` | `int`/`bool` → `print_int`; a string expression → `(ptr, len)` |
 | Import linking | `compile_file_to_wasm(base_dir=...)` | resolves and links imported files; an inline `import` is rejected |
+| ROLLING channel | `svl/gate231.py` | replaces the degenerate `Π(b+1)` PRODUCT with `H=(H*31+b) mod 231` |
+| Free list | `$alloc` / `$free` (`free(ptr)`) | exact-size blocks are reclaimed and reused; the heap resets at the entry point |
+| Non-array iterators | `_compile_for_stmt` | a non-range, non-array iterable is a clear compile error, not a silent no-op |
 
 ---
 

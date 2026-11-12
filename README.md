@@ -4,7 +4,7 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 
 | Layer | Name | Technology | Purpose |
 |-------|------|------------|---------|
-| **L1** | Syntax | 231-Gate Checksums | Structural integrity via SUM/LINEAR/PRODUCT mod 231 |
+| **L1** | Syntax | 231-Gate Checksums | Structural integrity via SUM/LINEAR/ROLLING mod 231 |
 | **L2** | Types | Mod-5 Dual-Stream | Mod-5 buckets + Z/2 negation + structural checksums |
 | **L3** | Theorem | BPSW Monodromy | Cryptographic verification via SHA256 + BPSW on primes {37,73,17} — **constant-true, see the scope note** |
 
@@ -24,8 +24,10 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 > **One advertised layer carries no information and is documented as such** rather than quietly run:
 > the BPSW "theorem" layer is constant-true (0/200 random programs fail; every residue of {17,37,73}
 > parities even) and is now **excluded from `passed`** — `TheoremVerifyResultWrapper.bpsw_status`
-> is `"informational"`. The 231-gate's PRODUCT channel is also degenerate for real programs (0 for
-> 2000/2000 random 512-byte windows). The SMT layer is **no longer hollow**: it discharges real
+> is `"informational"`. The 231-gate's third channel was also degenerate for real programs (the
+> old `Π(b+1) mod 231` was 0 for 2000/2000 random 512-byte windows); it was **replaced on
+> 2026-11-12 with a rolling hash** `H=(H*31+b) mod 231` (31 is coprime to 231), which is
+> non-degenerate and flip-sensitive. The SMT layer is **no longer hollow**: it discharges real
 > `assert`s in Z3 and reports a tri-state (`proven` / `counterexample` / `unverified`). See KB §5.3.2.
 
 ## Quick Start
@@ -119,11 +121,12 @@ module prog {
   (literals, `a[i]` read/write with bounds checks, `len`, `zeros(n)`, `for x in <array>`), **structs**
   (declaration, literals, field read/write, pass to functions), **`match`** (`case <lit> => e`,
   `case _ => e`), `while` (incl. nested), `for i in a..b`, `if`/`else`, `if…then…else` *expressions*,
-  `const`/`var`, `assert`, `print`/`print_int`, `void` returns, **recursion**, arithmetic, bitwise
-  (`& | ^ << >>`, unary `~`) and unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**,
-  and **top-level `import`** (resolved with `base_dir`). Measured 2026-11-12: the 61-test pytest
-  suite assembles **and runs** every construct; the 30-row probe suite is
-  **26 PASS / 0 FAIL / 4 INFO** (`svl-rating/probes.py`).
+  `const`/`var`, `assert`, `print`/`print_int`, **`free(ptr)`** (returns an allocation to the
+  free list), `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
+  unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**, and **top-level
+  `import`** (resolved with `base_dir`). Measured 2026-11-12: the 61-test pytest suite assembles
+  **and runs** every construct; the 32-row probe suite is **29 PASS / 0 FAIL / 3 INFO**
+  (`svl-rating/probes.py`).
 - **Command line** — `pip install -e .` then `svlc build|run|check|corpus` (`svl/cli.py`,
   console script in `pyproject.toml`).
 - ~~**Self-hosting compiler** — bootstraps in 3 stages~~ **RETRACTED**: `svl/compiler_svl.svl` is a
@@ -170,7 +173,9 @@ holding an f64 literal (invalid WAT that still parsed) and `x + y` on two floats
   handlers), **REPL** (evaluates a block and prints the result), tree-sitter grammar, tactic
   prover, time-travel debugger, component-model FFI/WIT, package registry with attestations,
   incremental compilation, distributed build cache, LSIF, docs generation, Jupyter kernel.
-  Not yet working: REPL state does not persist across blocks; non-array iterators still error.
+  Not yet working: non-array iterators are rejected with a clear compile error (only ranges
+  and arrays are iterable); allocations are reclaimed only through `free` or the entry-point
+  heap reset (there is no garbage collector).
 
 ## Repository Layout
 
@@ -224,10 +229,9 @@ requirements-dev.txt    # every dependency the suite and spikes import
     2 fail with `Unknown identifier 'ELSE'`).
 12. **Determinism** — WAT sha256 identical across `PYTHONHASHSEED` 0/1/12345/random, and the
     canonical AST fingerprint is identical for ASCII, Hebrew, re-indented and commented variants.
-13. **Defect probe suite** — `python svl-rating/probes.py` (workspace) runs 30 execution probes
-    that each must be able to fail: **26 PASS / 0 FAIL / 4 INFO**. The four INFO rows are
-    documented scope limits (BPSW constant-true, PRODUCT channel degenerate, compile-latency
-    measurement), not failures.
+13. **Defect probe suite** — `python svl-rating/probes.py` (workspace) runs 32 execution probes
+    that each must be able to fail: **29 PASS / 0 FAIL / 3 INFO**. The three INFO rows are
+    documented scope limits (BPSW constant-true, compile-latency measurement), not failures.
 14. **CLI** — `pip install -e .` then `svlc version` prints `0.1.0` and `svlc run <file.svl>`
     compiles and executes a program.
 
