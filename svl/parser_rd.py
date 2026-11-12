@@ -1070,8 +1070,13 @@ class Parser:
                     line=name_tok.line, column=name_tok.column, offset=name_tok.offset,
                     name=name, type_ann=type_ann
                 ))
-                if not self.match(TokenType.COMMA):
-                    break
+                # Fields may be separated by a comma or just whitespace/newlines
+                # (the rest of the language is newline-separated too).
+                if self.match(TokenType.COMMA):
+                    continue
+                if self.current and self.current.type == TokenType.IDENT:
+                    continue
+                break
             self.expect(TokenType.RBRACE)
         return StructDecl(
             type=NodeType.STRUCT_DECL,
@@ -1310,10 +1315,12 @@ class Parser:
             op = self.tokens[self.pos - 1].value
             right = self.parse_assignment()
             
-            # Assignment target must be an identifier
-            if isinstance(left, Ident):
+            # Assignment targets: a local/name, an array element, or a struct field.
+            # Without memory targets the language could read `a[i]` / `p.x` but never
+            # mutate them — which rules out most real programs.
+            if isinstance(left, (Ident, IndexExpr, FieldAccess)):
                 return AssignExpr(
-                    type=NodeType.BINARY_EXPR,
+                    type=NodeType.ASSIGN_EXPR if hasattr(NodeType, 'ASSIGN_EXPR') else NodeType.BINARY_EXPR,
                     line=left.line, column=left.column, offset=left.offset,
                     target=left, operator=op, value=right
                 )
@@ -1602,16 +1609,23 @@ class Parser:
                 name=name
             )
 
+        # Match / await are expression forms that start with a keyword token. They must be
+        # handled BEFORE the keyword-as-identifier map below, otherwise `match x { ... }`
+        # is consumed as an identifier named MATCH and the `{` then reads as a struct literal.
+        if self.match(TokenType.MATCH):
+            return self.parse_match_expr()
+        if self.match(TokenType.AWAIT):
+            return self.parse_await_expr()
+
         # Hebrew tokens as standalone keywords
         hebrew_map = {
             TokenType.LET: 'LET', TokenType.IF: 'IF', TokenType.THEN: 'THEN',
             TokenType.ELSE: 'ELSE', TokenType.WHILE: 'WHILE', TokenType.FOR: 'FOR',
-            TokenType.FUNC: 'FUNC', TokenType.RETURN: 'RETURN', TokenType.MATCH: 'MATCH',
+            TokenType.FUNC: 'FUNC', TokenType.RETURN: 'RETURN',
             TokenType.TYPE: 'TYPE', TokenType.STRUCT: 'STRUCT', TokenType.MODULE: 'MODULE',
             TokenType.IMPORT: 'IMPORT', TokenType.EXPORT: 'EXPORT', TokenType.CONST: 'CONST',
             TokenType.VAR: 'VAR', TokenType.ASSERT: 'ASSERT', TokenType.TRY: 'TRY',
             TokenType.CATCH: 'CATCH', TokenType.THROW: 'THROW', TokenType.ASYNC: 'ASYNC',
-            TokenType.AWAIT: 'AWAIT',
         }
         for tt, kw in hebrew_map.items():
             if self.match(tt):
@@ -1711,7 +1725,9 @@ class Parser:
         )
 
     def parse_match_expr(self) -> MatchExpr:
-        subject = self.parse_expr()
+        # The subject is followed by `{`, so it must be parsed with struct literals
+        # disabled — otherwise `match x {` steals `x {` as a struct literal.
+        subject = self.parse_expr_no_struct_lit()
         self.expect(TokenType.LBRACE)
         cases = []
         while not self.match(TokenType.RBRACE):
@@ -1725,7 +1741,9 @@ class Parser:
     def parse_case_clause(self) -> CaseClause:
         self.expect(TokenType.CASE)
         pattern = self.parse_pattern()
-        self.expect(TokenType.FAT_ARROW)
+        # `=>` is the canonical arrow; accept `->` too since it reads naturally.
+        if not self.match(TokenType.FAT_ARROW, TokenType.ARROW):
+            raise SyntaxError(f"expected '=>' after a match pattern, got {self.current}")
         body = self.parse_expr()
         return CaseClause(
             type=NodeType.CASE_CLAUSE,
@@ -1740,12 +1758,17 @@ class Parser:
                 line=self.current.line, column=self.current.column, offset=self.current.offset,
                 kind='wildcard', value=None
             )
-        if self.match(TokenType.LITERAL):
-            return Pattern(
-                type=NodeType.PATTERN,
-                line=self.current.line, column=self.current.column, offset=self.current.offset,
-                kind='literal', value=str(self.tokens[self.pos - 1].value)
-            )
+        # Literal patterns: the lexer emits the real literal token kinds (INT/FLOAT/STRING/
+        # BOOL). The old code matched a `TokenType.LITERAL` that does not exist.
+        for tok_type, kind in ((TokenType.INT, 'int'), (TokenType.FLOAT, 'float'),
+                               (TokenType.STRING, 'string'), (TokenType.BOOL, 'bool'),
+                               (TokenType.NULL, 'null')):
+            if self.match(tok_type):
+                return Pattern(
+                    type=NodeType.PATTERN,
+                    line=self.current.line, column=self.current.column, offset=self.current.offset,
+                    kind=kind, value=self.tokens[self.pos - 1].value
+                )
         if self.match(TokenType.IDENT):
             name = self.tokens[self.pos - 1].value
             if self.match(TokenType.LBRACE):
