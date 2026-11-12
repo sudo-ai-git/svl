@@ -643,36 +643,72 @@ def spike_h20_pcc_wasm() -> SpikeResult:
 
 # H21: Abstract Interpretation for Type Layer
 def spike_h21_abstract_interpretation() -> SpikeResult:
-    """Test abstract interpretation framework."""
+    """Test the abstract interpreter: domains AND the AST analysis built on them.
+
+    The domains alone prove nothing about a program, so this spike also runs real
+    programs through `analyze_program` and asserts both directions: a provable
+    out-of-bounds index / zero divisor MUST be reported, and a correct program MUST NOT
+    be (a false positive would reject a valid program at compile time).
+    """
+    metrics = {
+        'module_exists': False, 'interval_join': False, 'congruence_join': False,
+        'product_join': False, 'oob_found': False, 'div_zero_found': False,
+        'safe_program_clean': False, 'unknown_length_silent': False,
+        'no_internal_errors': False,
+    }
     try:
-        from svl.abstract_interpretation import IntervalDomain, CongruenceDomain, ProductDomain, AbstractInterpreter
-        has_module = True
-        
-        # Test basic functionality
+        from svl.abstract_interpretation import (
+            IntervalDomain, CongruenceDomain, ProductDomain, AbstractInterpreter,
+            analyze_program,
+        )
+        from svl.lexer import tokenize
+        from svl.parser_rd import parse
+        metrics['module_exists'] = True
+
+        def run(body: str):
+            src = ("module t {\n  func main() type int {\n" + body + "\n  }\n}\n")
+            return analyze_program(parse(tokenize(src)))
+
+        # --- domain sanity (kept from the original spike) -----------------------
         interval_dom = IntervalDomain()
-        a = interval_dom.top()
-        b = interval_dom.bottom()
-        join_works = interval_dom.join(a, b) == a
-        
+        metrics['interval_join'] = interval_dom.join(interval_dom.top(),
+                                                     interval_dom.bottom()) == interval_dom.top()
         congruence_dom = CongruenceDomain()
-        c = congruence_dom.top()
-        d = congruence_dom.bottom()
-        congr_join_works = congruence_dom.join(c, d) == c
-        
+        metrics['congruence_join'] = congruence_dom.join(congruence_dom.top(),
+                                                         congruence_dom.bottom()) == congruence_dom.top()
         product_dom = ProductDomain({'interval': interval_dom, 'congruence': congruence_dom})
-        prod_join_works = True
-        
+        metrics['product_join'] = product_dom.join(product_dom.top(),
+                                                   product_dom.bottom()) == product_dom.top()
+
+        # --- the analysis must actually find the provable errors ---------------
+        r = run("let a: int = [1, 2, 3]\nlet i: int = 5\nreturn a[i]")
+        metrics['oob_found'] = any(f.kind == 'oob-index' for f in r.findings)
+
+        r = run("let z: int = 0\nreturn 10 / z")
+        metrics['div_zero_found'] = any(f.kind == 'div-zero' for f in r.findings)
+
+        # --- ... and must stay silent on correct programs ----------------------
+        r = run("let a: int = [1, 2, 3]\nlet n: int = len(a)\n"
+                "let i: int = 0\nlet s: int = 0\n"
+                "while i < n {\n  s += a[i]\n  i += 1\n}\nreturn s")
+        metrics['safe_program_clean'] = r.passed and not r.internal_errors
+
+        # An unknown array length disables the bounds check rather than guessing.
+        r = run("let i: int = 99\nreturn a[i]")
+        metrics['unknown_length_silent'] = r.passed
+
+        metrics['no_internal_errors'] = True
     except ImportError as e:
-        has_module = False
-        join_works = False
-        congr_join_works = False
-        prod_join_works = False
         print(f"Import error: {e}")
-        
-    all_pass = has_module and join_works and congr_join_works and prod_join_works
+    except Exception as e:  # noqa: BLE001 - a crashing spike is a failing spike
+        print(f"Unexpected error: {type(e).__name__}: {e}")
+
+    all_pass = all(metrics.values())
+    failed = [k for k, v in metrics.items() if not v]
     return SpikeResult("H21", "Abstract Interpretation for Type Layer", all_pass,
-                      metrics={'module_exists': has_module, 'interval_join': join_works, 'congruence_join': congr_join_works, 'product_join': prod_join_works},
-                      notes="Abstract interpretation with interval, congruence, and product domains implemented" if all_pass else "Abstract interpretation module not fully working")
+                      metrics=metrics,
+                      notes="interval analysis proves OOB index + zero divisor, silent on correct programs"
+                            if all_pass else f"failed checks: {failed}")
 
 # H22: Differential Verification
 def spike_h22_differential_verification() -> SpikeResult:

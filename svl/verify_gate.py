@@ -8,6 +8,11 @@ What runs here, and why only this:
 
 * **AST guard** — rejects forbidden constructs (e.g. `sum()`), a real policy check.
 * **Type checker** (`verify_type`) — the one layer with real inference behind it.
+* **Abstract interpretation** (`abstract_interpretation.analyze_program`) — proves
+  out-of-bounds array indexes and division by a provably zero divisor, and refuses to
+  compile them.  This is the H21 work; it only ever reports what it can *prove*, so a
+  program that reaches this gate is either correct on those two points or the analysis
+  says nothing about them.
 
 What deliberately does NOT run here:
 
@@ -55,6 +60,22 @@ def verify_program(source: str) -> List[str]:
             problems.extend(result.errors or ["type verification failed"])
     except Exception as exc:                                          # noqa: BLE001
         problems.append(f"type verification error: {exc}")
+
+    # 3. Abstract interpretation: provable out-of-bounds index / division by zero.
+    #    Only findings the analysis can PROVE become problems; anything it cannot decide
+    #    is silence, never a rejection.
+    try:
+        from svl.abstract_interpretation import analyze_program
+        ai = analyze_program(ast)
+        for f in ai.findings:
+            if f.severity == 'error':
+                problems.append(
+                    f"abstract interpretation: {f.message} "
+                    f"[{f.function} line {f.line}]")
+        for err in ai.internal_errors:
+            problems.append(f"abstract interpretation error: {err}")
+    except Exception as exc:                                          # noqa: BLE001
+        problems.append(f"abstract interpretation error: {exc}")
 
     return problems
 
