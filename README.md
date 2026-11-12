@@ -6,7 +6,7 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 |-------|------|------------|---------|
 | **L1** | Syntax | 231-Gate Checksums | Structural integrity via SUM/LINEAR/PRODUCT mod 231 |
 | **L2** | Types | Mod-5 Dual-Stream | Mod-5 buckets + Z/2 negation + structural checksums |
-| **L3** | Theorem | BPSW Monodromy | Cryptographic verification via SHA256 + BPSW on primes {37,73,17} |
+| **L3** | Theorem | BPSW Monodromy | Cryptographic verification via SHA256 + BPSW on primes {37,73,17} — **constant-true, see the scope note** |
 
 > **Scope of the layers (measured, don't skip this).**
 >
@@ -57,6 +57,16 @@ python -m svl.repl
 python3 -c "from svl.smt_theorem import verify_with_smt; r = verify_with_smt(open('examples/sieve.svl').read()); print(r.status, f'{r.assertions_proven}/{r.assertions_checked} assertions proven')"
 python3 -c "from svl.smt_theorem import verify_with_smt; print(verify_with_smt('module t { func f(a: int) type int { assert a + 1 > a return 0 } }').status)"  # proven
 
+# The AST round-trips exactly through the binary format
+python3 -c "from svl.serialization import test_roundtrip; test_roundtrip()"
+
+# The Mod-5 lattice laws hold (12/12, exhaustively over all 125 triples)
+python3 -c "from svl.mod5_types import verify_mod5_lattice; print(all(verify_mod5_lattice().values()))"
+
+# Self-framing resync: find an artifact's leading block inside a larger stream
+python3 -c "open('/tmp/stream.bin','wb').write(b'padding'*100 + open('/tmp/sieve.wasm','rb').read())"
+python3 examples/attest.py examples/sieve.svl --locate /tmp/stream.bin   # -> starts: [700]
+
 # Interactive LSP server
 python -m svl.lsp_server
 ```
@@ -97,7 +107,10 @@ module prog {
 
 ## Features
 
-- **22 tokens** mapped to the Hebrew alphabet (+ ASCII aliases)
+- **22 tokens** mapped to the Hebrew alphabet (+ ASCII aliases), and the alias contract is **tested**
+  (`svl/hebrew_alias.py`): 22/22 letter→token mappings, and a program plus its Hebrew spelling must
+  compile to **byte-identical** WAT. Final forms (sofit) are excluded by design — a sofit letter only
+  occurs at the end of a Hebrew word, so using one as a keyword would be ambiguous.
 - **Deterministic compilation** — bit-identical WASM output across runs, with no `PYTHONHASHSEED`
   pinning required (every value that feeds a checksum, a serialised AST or a program hash is a fixed
   function of its input)
@@ -114,7 +127,7 @@ module prog {
 - **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types — **parse-level only.** The
   qualifiers are parsed and then consumed by nothing: `grep "kind == 'linear'"` outside the parser
   returns no engine, and `type_families._match_lhs` is `len(args) > 0` (it matches anything). See KB §11.
-- **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: PCC embeds a self-declared boolean (and its WAT does not assemble). **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, and the SMT layer (`svl/smt_theorem.py`) now discharges real `assert`s in Z3 — see below.
+- **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: PCC embeds a self-declared boolean (and its WAT does not assemble). **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract — see below.
 - **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model of a program's straight-line arithmetic and discharges every `assert` by refuting its negation: `unsat` → proven, `sat` → a concrete counterexample. Measured: `assert a + 1 > a` is **proven for all `a`**; `assert a > 0` is refuted with the counterexample `a = 0`. It reports a tri-state — `proven`, `counterexample`, `unverified` (loops, `/`/`%`, arrays: modelled with the wrong semantics would be a false proof, so they are declined), and `vacuous` (no assertions). It is **opt-in**, not on the compile path: far more expensive than the interval interpreter, and answering a different question (all inputs vs. provable index bounds).
 - **A canonical program fingerprint that is harnessed** — `svl.serialization.to_canonical_binary` omits the AST's
   source-position fields, so the fingerprint is a function of the *program*: ASCII and Hebrew spellings of the
@@ -136,6 +149,21 @@ module prog {
   **0 findings across all 42 compilable programs** in `examples/` + the workspace corpus, and both
   defect classes caught on demand. Not done: call return values are `top` (no interprocedural value
   summary), so `let n = f(x)` loses precision.
+- **The Mod-5 buckets form a real lattice** — `B0 < B1 < B2 < B3 < B4` with join = max and meet = min,
+  and `z2_negate` is an order-reversing involution (a duality, **not** a complement:
+  `bucket_join(B1,B3) == B3 != B4`). `verify_mod5_lattice()` checks 12 laws exhaustively over all 125
+  triples. Dual-stream agreement is now compared **per statement**; it used to be
+  `all_semantic == all_structural`, which is True whenever both streams fail everything. Codegen is
+  still unaffected: `compiler_wasm.py` never imports the type layer — the type layer reaches
+  compilation only through the compile-time gate.
+- **The binary deserializer is real** — `svl/serialization.py` round-trips `to_binary` → `from_binary`
+  → `to_binary` exactly. The wire format is **not self-describing** (an int in 1..5, a bool and a
+  string of length 1..5 all begin with the same byte), so the reader is driven by the declared field
+  types and **raises rather than guessing**. Verified: all 42 compilable corpus programs round-trip
+  exactly, all 42 `NODE_TAGS` node types individually, and every `Literal`/`Pattern`/`TypeExpr`
+  discriminator path. `test_roundtrip()` now asserts structural equality **and** byte-stability.
+  Known gap: `CastExpr` is not in `NODE_TAGS`, so the *serializer* rejects it — it has never been
+  serialisable.
 - **Compiler optimizations** — ~~SIMD, tail-call optimization, escape analysis, WASM GC, PGO, LTO, hot reload~~ **six of the seven are standalone libraries the compiler never calls** (`grep` for `pgo`/`lto`/`tco`/`escape_analysis`/`hot_reload` in `svl/compiler_wasm.py` returns nothing). The one that *is* wired — SIMD — currently breaks the program shape it targets (`for i in 0..4 { s = s + a[i] * b[i] }` fails to assemble).
 - **Tooling** — tree-sitter grammar, tactic prover, time-travel debugger, component-model FFI/WIT, package registry with attestations, incremental compilation, distributed build cache, LSIF, docs generation, Jupyter kernel, RL-guided optimization
 
@@ -164,6 +192,18 @@ examples/               # Example SVL programs
 6. Assembling is not enough: the emitted module must **run**. Expected values for a quick probe —
    `while i<=5 { s+=i; i+=1 }` → 15; `for i in 0..5 { s+=i }` → 10; `let r = if c then 10 else 20` with
    `c=0` → 20; `assert x==5` with `x=5` → no trap (and it must trap when the condition is false).
+7. **AST round-trip** — `python3 -c "from svl.serialization import test_roundtrip; test_roundtrip()"`.
+   Asserts structural equality **and** byte-stable re-serialisation. A stub deserializer once made
+   the old size-only check pass while `from_binary(to_binary(ast))` returned a dict.
+8. **The Mod-5 lattice** — `python3 -c "from svl.mod5_types import verify_mod5_lattice; print(all(verify_mod5_lattice().values()))"`
+   must print `True` (12 laws, exhaustively over all 125 triples).
+9. **The Hebrew alias contract** — `svl.hebrew_alias.verify_mapping()` is 22/22 and
+   `verify_alias(source)` requires byte-identical WAT for a program and its Hebrew spelling.
+10. **Corpus expectation** — 52 files, **42 compilable**, **0** abstract-interpreter findings,
+    **42/42** round-trip exact. The 10 non-compiling files are pre-existing legacy fixtures
+    (3 never parsed; 7 fail identically with `strict=False`).
+11. **Determinism** — WAT sha256 identical across `PYTHONHASHSEED` 0/1/12345/random, and the
+    canonical AST fingerprint is identical for ASCII, Hebrew, re-indented and commented variants.
 
 ## License
 
