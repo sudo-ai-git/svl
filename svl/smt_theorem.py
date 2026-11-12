@@ -43,7 +43,7 @@ from svl.serialization import to_binary
 from svl.parser_rd import (
     parse, tokenize, Block, LetStmt, IfStmt, WhileStmt, ForStmt, AssertStmt,
     ExprStmt, AssignExpr, FuncDecl, ConstDecl, VarDecl, Literal, Ident, BinaryExpr,
-    UnaryExpr,
+    UnaryExpr, IndexExpr, FieldAccess, ArrayLit, CallExpr,
 )
 
 
@@ -140,6 +140,20 @@ class _SymbolicVerifier:
         # because discharging them against stale variable values would produce spurious
         # counterexamples -- a false refutation is worse than no answer.
         self.tainted = False
+        # Loop-invariant state.
+        self.loop_depth = 0
+        # Variables whose value after a loop is NOT constrained by the loop's invariant.
+        # An assertion that mentions one is reported as unverified rather than discharged:
+        # discharging it against an unconstrained value would produce a spurious
+        # counterexample -- a false refutation is worse than no answer.
+        self.stale: set = set()
+        self._loop_counter = 0
+        # Arrays: name -> z3 Array, and name -> its length expression.
+        self.arrays: Dict[str, Any] = {}
+        self.array_lens: Dict[str, Any] = {}
+        # The most recent value assigned to each name, used to propose loop invariants
+        # (the lower bound of a counting variable comes from its initialiser).
+        self.last_assign: Dict[str, Any] = {}
 
     # ---- solver ------------------------------------------------------------
 
@@ -190,16 +204,65 @@ class _SymbolicVerifier:
             if e.operator == '!':
                 return z3.Not(v)
             raise _Unsupported(f"unary operator '{e.operator}'")
+        if isinstance(e, IndexExpr):
+            arr = self.expr(e.left)
+            if not z3.is_array(arr):
+                raise _Unsupported(
+                    f"indexing a non-array value ({type(e.left).__name__})")
+            return z3.Select(arr, self.expr(e.right))
+        if isinstance(e, ArrayLit):
+            # A fresh constant array with each element stored at its position. The
+            # literal's length is recorded by the caller (`_bind`) so `len(a)` resolves.
+            arr = z3.K(z3.IntSort(), z3.IntVal(0))
+            for i, elem in enumerate(e.elements):
+                arr = z3.Store(arr, z3.IntVal(i), self.expr(elem))
+            return arr
+        if isinstance(e, CallExpr):
+            if e.callee == 'len':
+                if len(e.arguments) != 1:
+                    raise _Unsupported("len() takes exactly 1 argument")
+                return self._array_length(e.arguments[0])
+            if e.callee == 'zeros':
+                if len(e.arguments) != 1:
+                    raise _Unsupported("zeros() takes exactly 1 argument")
+                return z3.K(z3.IntSort(), z3.IntVal(0))
+            raise _Unsupported(f"call to '{e.callee}'")
         raise _Unsupported(f"expression {type(e).__name__}")
+
+    def _array_length(self, arg) -> Any:
+        """The length of an array expression: a tracked length, or a fresh unknown."""
+        if isinstance(arg, Ident):
+            if arg.name in self.array_lens:
+                return self.array_lens[arg.name]
+            if z3.is_array(self.env.get(arg.name)):
+                return z3.Int(f"{arg.name}_len")
+        raise _Unsupported("len() of an array with no tracked length")
+
+    def _bind(self, name: str, value: Any, length: Any = None) -> None:
+        """Bind a name to a z3 value, recording an array length when there is one.
+
+        Re-binding an array (`a[i] = v`) does NOT change its length, so an existing
+        length is kept unless the caller supplies a new one. Overwriting it with a fresh
+        unknown made `len(a)` in a later condition resolve to an unconstrained variable.
+        """
+        self.env[name] = value
+        self.last_assign[name] = value
+        if z3.is_array(value):
+            self.arrays[name] = value
+            if length is not None:
+                self.array_lens[name] = length
+            elif name not in self.array_lens:
+                self.array_lens[name] = z3.Int(f"{name}_len")
 
     # ---- statements --------------------------------------------------------
 
-    def block(self, block: Block, path=None) -> None:
+    def block(self, block: Block, path=None) -> Any:
+        """Model a block and return the path refined by any loop it contains."""
         if path is None:
             path = z3.BoolVal(True)
         for stmt in getattr(block, 'statements', []) or []:
             try:
-                self.stmt(stmt, path)
+                path = self.stmt(stmt, path)
             except _Unsupported as exc:
                 # One unsupported statement must not abandon the rest of the program: record
                 # it, taint everything downstream, and keep going.
@@ -207,21 +270,30 @@ class _SymbolicVerifier:
                     f"line {getattr(stmt, 'line', 0)}: {type(stmt).__name__} not modelled "
                     f"({exc})")
                 self.tainted = True
+        return path
 
-    def stmt(self, s, path) -> None:
+    def stmt(self, s, path) -> Any:
         if isinstance(s, (LetStmt, ConstDecl, VarDecl)):
-            self.env[s.name] = self.expr(s.value)
-        elif isinstance(s, AssertStmt):
+            self._bind_statement(s)
+            return path
+        if isinstance(s, AssertStmt):
             if self.tainted:
                 self.unverified.append(
                     f"line {getattr(s, 'line', 0)}: assertion "
                     f"\"{_describe(s.condition)}\" was NOT checked -- it depends on an "
                     f"unmodelled construct")
-                return
+                return path
+            if self._mentions_stale(s.condition):
+                self.unverified.append(
+                    f"line {getattr(s, 'line', 0)}: assertion "
+                    f"\"{_describe(s.condition)}\" was NOT checked -- it mentions a "
+                    f"variable whose value after a loop is not constrained by an invariant")
+                return path
             cond = self.expr(s.condition)
             self.assertions.append(
                 (path, cond, int(getattr(s, 'line', 0) or 0), _describe(s.condition)))
-        elif isinstance(s, IfStmt):
+            return path
+        if isinstance(s, IfStmt):
             cond = self.expr(s.condition)
             base = dict(self.env)
             self.env = dict(base)
@@ -229,19 +301,364 @@ class _SymbolicVerifier:
             self.env = dict(base)
             self.block(s.else_branch, z3.And(path, z3.Not(cond)))
             self.env = base          # branch-local bindings do not escape
-        elif isinstance(s, (WhileStmt, ForStmt)):
-            self.unverified.append(
-                f"line {getattr(s, 'line', 0)}: loop body not modelled "
-                f"(proving a loop needs invariants)")
-            self.tainted = True
-        elif isinstance(s, ExprStmt):
-            self.expr(s.expression)
-        elif isinstance(s, AssignExpr):
-            name = getattr(s.target, 'name', None)
-            if name is None:
-                raise _Unsupported("assignment to a non-name target")
-            self.env[name] = self.expr(s.value)
+            return path
+        if isinstance(s, WhileStmt):
+            return self._handle_while(s, path)
+        if isinstance(s, ForStmt):
+            return self._handle_for(s, path)
+        if isinstance(s, ExprStmt):
+            # The parser wraps every expression statement in ExprStmt, so assignments
+            # arrive here -- handling AssignExpr only as a bare statement left `i += 1`
+            # unmodelled (a silent no-op).
+            if isinstance(s.expression, AssignExpr):
+                self._assign(s.expression)
+            else:
+                self.expr(s.expression)
+            return path
+        if isinstance(s, AssignExpr):
+            self._assign(s)
+            return path
         # ReturnStmt / declarations: nothing to model
+        return path
+
+    # ---- binding and assignment --------------------------------------------
+
+    def _bind_statement(self, s) -> None:
+        """Model `let x = v` / `const x = v`, recording array lengths."""
+        value = s.value
+        if isinstance(value, CallExpr) and value.callee == 'zeros':
+            length = self.expr(value.arguments[0])
+            self._bind(s.name, z3.K(z3.IntSort(), z3.IntVal(0)), length)
+            return
+        if isinstance(value, ArrayLit):
+            arr = self.expr(value)
+            self._bind(s.name, arr, z3.IntVal(len(value.elements)))
+            return
+        self._bind(s.name, self.expr(value))
+
+    def _assign(self, s: AssignExpr) -> None:
+        """Model `x = v`, `x += v`, `a[i] = v`."""
+        target = s.target
+        if isinstance(target, IndexExpr):
+            if not isinstance(target.left, Ident):
+                raise _Unsupported("assignment to an index of a non-name")
+            name = target.left.name
+            if not z3.is_array(self.env.get(name)):
+                raise _Unsupported(f"'{name}' is not an array")
+            idx = self.expr(target.right)
+            current = z3.Select(self.env[name], idx)
+            val = self.expr(s.value) if s.operator == '=' else self._compound(
+                s.operator, current, s.value)
+            self._bind(name, z3.Store(self.env[name], idx, val))
+            return
+        name = getattr(target, 'name', None)
+        if name is None:
+            raise _Unsupported("assignment to a non-name target")
+        current = self.env.get(name)
+        if current is None:
+            raise _Unsupported(f"assignment to an unbound name '{name}'")
+        if s.operator == '=':
+            self._bind(name, self.expr(s.value))
+        else:
+            self._bind(name, self._compound(s.operator, current, s.value))
+
+    def _compound(self, operator: str, current: Any, value_expr) -> Any:
+        op = operator[:-1] if operator.endswith('=') else operator     # '+=' -> '+'
+        value = self.expr(value_expr)
+        if op == '+':
+            return current + value
+        if op == '-':
+            return current - value
+        if op == '*':
+            return current * value
+        raise _Unsupported(f"compound assignment '{operator}'")
+
+    # ---- loops and invariants ----------------------------------------------
+
+    def _handle_while(self, s: WhileStmt, path) -> Any:
+        line = int(getattr(s, 'line', 0) or 0)
+        if self.loop_depth > 0:
+            self.unverified.append(f"line {line}: nested loop not modelled")
+            self.tainted = True
+            return path
+        cond = self.expr(s.condition)
+        assigned = self._assigned_vars(s.body)
+        proposal = self._while_candidate(s.condition, assigned)
+        if proposal is None:
+            self.unverified.append(
+                f"line {line}: loop not modelled (no loop invariant could be proposed)")
+            self.tainted = True
+            return path
+        candidate, constrained = proposal
+        self.loop_depth += 1
+        new_path, post_env, ok = self._try_invariant(
+            candidate,
+            lambda env: self._expr_in(s.condition, env),
+            s.body, path, constrained=constrained,
+        )
+        self.loop_depth -= 1
+        if not ok:
+            self.unverified.append(
+                f"line {line}: loop invariant could not be proved; assertions in and "
+                f"after this loop were NOT checked")
+            self.tainted = True
+            return path
+        self.env = post_env
+        self.stale |= (assigned - set(constrained))
+        return new_path
+
+    def _handle_for(self, s: ForStmt, path) -> Any:
+        line = int(getattr(s, 'line', 0) or 0)
+        if self.loop_depth > 0:
+            self.unverified.append(f"line {line}: nested loop not modelled")
+            self.tainted = True
+            return path
+        iter_expr = s.iter_expr
+        if not (isinstance(iter_expr, BinaryExpr) and iter_expr.operator == '..'):
+            self.unverified.append(
+                f"line {line}: iterator loop not modelled (only `for i in a..b`)")
+            self.tainted = True
+            return path
+        start = self.expr(iter_expr.left)
+        end = self.expr(iter_expr.right)
+        if not (z3.is_int(start) and z3.is_int(end)):
+            self.unverified.append(f"line {line}: non-integer loop bounds not modelled")
+            self.tainted = True
+            return path
+        var = s.var
+        self.env[var] = start
+        self.last_assign[var] = start
+        cond = self.env[var] < end
+
+        # A `for` loop whose body provably never runs is a no-op. Without this the body's
+        # assignments would be marked stale and a true assertion about them unverified.
+        probe = self._solver()
+        probe.add(z3.Not(start >= end))
+        if probe.check() == z3.unsat:
+            return path                      # start >= end is provable: zero iterations
+
+        def candidate(env):
+            v = env.get(var)
+            if v is None or not z3.is_int(v):
+                return None
+            # Exact for a counting loop: at entry v == start; the disjunction covers the
+            # zero-iteration case (start > end), where the body never runs.
+            return z3.And(v >= start, z3.Or(v <= end, start > end))
+
+        def step():
+            self.env[var] = self.env[var] + 1
+
+        self.loop_depth += 1
+        new_path, post_env, ok = self._try_invariant(
+            candidate,
+            lambda env: env.get(var, start) < end,
+            s.body, path, constrained={var}, extra_step=step,
+        )
+        self.loop_depth -= 1
+        if not ok:
+            self.unverified.append(
+                f"line {line}: loop invariant could not be proved; assertions in and "
+                f"after this loop were NOT checked")
+            self.tainted = True
+            return path
+        self.env = post_env
+        self.stale |= (self._assigned_vars(s.body) - {var})
+        return new_path
+
+    def _expr_in(self, expr, env) -> Any:
+        """Evaluate an expression against an explicit environment."""
+        saved = self.env
+        self.env = env
+        try:
+            return self.expr(expr)
+        finally:
+            self.env = saved
+
+    def _try_invariant(self, candidate, cond_of, body, path, constrained, extra_step=None):
+        """Validate a candidate loop invariant and model the loop with it.
+
+        A candidate is only ever USED after the solver proves two things:
+
+        * **entry** -- it holds on the state that reaches the loop;
+        * **preservation** -- assuming it and the condition, one execution of the body
+          (plus the loop's own step) re-establishes it.
+
+        If either fails the candidate is discarded and the loop is reported as unverified,
+        exactly as before. Nothing is ever assumed without a proof.
+
+        Returns ``(new_path, post_env, ok)``. Both the body run and the after-loop state
+        use FRESH symbols for the constrained variables: an arbitrary iteration and an
+        arbitrary final state, not the pre-loop constants. Using the pre-loop value made
+        `assert i < 5` inside `while i < 10 { i += 1 }` look proven (0 < 5), which is the
+        classic unsound loop model.
+        """
+        pre_env = dict(self.env)
+        inv_pre = candidate(pre_env)
+        if inv_pre is None:
+            return None, None, False
+        solver = self._solver()
+        solver.add(path)
+        solver.add(z3.Not(inv_pre))
+        if solver.check() != z3.unsat:
+            return None, None, False
+
+        self._loop_counter += 1
+        tag = f"loop{self._loop_counter}"
+        body_env = self._symbolize(pre_env, constrained, tag + "a")
+        inv_body = candidate(body_env)
+        if inv_body is None:
+            return None, None, False
+
+        saved_env, saved_unv, saved_taint = self.env, list(self.unverified), self.tainted
+        saved_assertions = list(self.assertions)
+        self.env = dict(body_env)
+        self.unverified, self.tainted = [], False
+        # Assertions inside the loop are discharged under the invariant: it holds at the
+        # top of every iteration, so this is sound.
+        self.block(body, z3.And(path, inv_body, cond_of(body_env)))
+        if extra_step is not None:
+            extra_step()
+        inv_after = candidate(self.env)
+        post_body_env = dict(self.env)
+        body_assertions = self.assertions[len(saved_assertions):]
+        body_unv, body_taint = list(self.unverified), self.tainted
+
+        self.env, self.tainted = saved_env, saved_taint
+        self.assertions = saved_assertions + body_assertions
+        self.unverified = saved_unv + body_unv
+        if body_taint or inv_after is None:
+            return None, None, False
+
+        solver2 = self._solver()
+        solver2.add(path)
+        solver2.add(inv_body)
+        solver2.add(cond_of(body_env))
+        solver2.add(z3.Not(inv_after))
+        if solver2.check() != z3.unsat:
+            return None, None, False
+
+        # The after-loop state keeps the body's effects (array stores and the like) and
+        # re-symbolises each constrained variable, constrained by the invariant and the
+        # negated condition -- a sound over-approximation of the real final state.
+        post_env = self._symbolize(post_body_env, constrained, tag + "b")
+        inv_post = candidate(post_env)
+        if inv_post is None:
+            return None, None, False
+        new_path = z3.And(path, inv_post, z3.Not(cond_of(post_env)))
+        return new_path, post_env, True
+
+    def _symbolize(self, env, names, tag) -> Dict[str, Any]:
+        """Copy `env`, replacing each named variable with a fresh symbol."""
+        out = dict(env)
+        for name in sorted(names):
+            v = env.get(name)
+            if v is None:
+                continue
+            if z3.is_int(v):
+                out[name] = z3.Int(f"{name}__{tag}")
+            elif z3.is_bool(v):
+                out[name] = z3.Bool(f"{name}__{tag}")
+        return out
+
+    def _while_candidate(self, cond, assigned):
+        """Propose an invariant for a `while` loop, or None when none can be proposed.
+
+        The proposal is built from the loop condition (`i < n` suggests `i <= n`) and the
+        most recent assignment to each variable the body modifies (its lower bound). It is
+        a *candidate*: `_try_invariant` proves it before it is used.
+
+        Returns `(builder, constrained_names)`.
+        """
+        clauses = []                       # (var, 'le'|'ge', bound z3 expression)
+        for op, left, right in self._comparisons(cond):
+            for var_side, bound_side in ((left, right), (right, left)):
+                if not isinstance(var_side, Ident) or var_side.name not in assigned:
+                    continue
+                if isinstance(bound_side, Ident) and bound_side.name in assigned:
+                    continue               # both sides vary: no usable bound
+                try:
+                    bound = self.expr(bound_side)
+                except _Unsupported:
+                    continue
+                if not z3.is_int(bound):
+                    continue
+                if op in ('<', '<='):
+                    clauses.append((var_side.name, 'le', bound))
+                else:
+                    clauses.append((var_side.name, 'ge', bound))
+                break
+        for name in assigned:
+            init = self.last_assign.get(name)
+            if init is not None and z3.is_int(init):
+                clauses.append((name, 'ge', init))
+        if not clauses:
+            return None
+
+        def builder(env):
+            out = []
+            for name, rel, bound in clauses:
+                v = env.get(name)
+                if v is None or not z3.is_int(v):
+                    return None
+                out.append(v <= bound if rel == 'le' else v >= bound)
+            return z3.And(out) if out else None
+
+        return builder, {name for name, _rel, _bound in clauses}
+
+    def _mentions_stale(self, expr) -> bool:
+        """True when an expression references a variable not constrained by an invariant."""
+        if isinstance(expr, Ident):
+            return expr.name in self.stale
+        if hasattr(expr, '__dataclass_fields__'):
+            for f in expr.__dataclass_fields__:
+                value = getattr(expr, f)
+                if isinstance(value, list):
+                    if any(self._mentions_stale(item) for item in value):
+                        return True
+                elif hasattr(value, '__dataclass_fields__'):
+                    if self._mentions_stale(value):
+                        return True
+        return False
+
+    def _comparisons(self, expr):
+        """Yield (op, left, right) for every comparison in an expression tree."""
+        if isinstance(expr, BinaryExpr):
+            if expr.operator in ('<', '<=', '>', '>='):
+                yield (expr.operator, expr.left, expr.right)
+            yield from self._comparisons(expr.left)
+            yield from self._comparisons(expr.right)
+
+    def _assigned_vars(self, block) -> set:
+        """Every name assigned anywhere in a block (including inside nested statements)."""
+        names = set()
+
+        def walk(node):
+            if node is None:
+                return
+            if isinstance(node, AssignExpr):
+                target = node.target
+                if isinstance(target, Ident):
+                    names.add(target.name)
+                elif isinstance(target, IndexExpr) and isinstance(target.left, Ident):
+                    names.add(target.left.name)      # `a[i] = v` modifies the array
+                elif isinstance(target, FieldAccess) and isinstance(target.left, Ident):
+                    names.add(target.left.name)      # `p.f = v` modifies the struct
+                return
+            if isinstance(node, ExprStmt):
+                walk(node.expression)
+                return
+            if hasattr(node, '__dataclass_fields__'):
+                for f in node.__dataclass_fields__:
+                    value = getattr(node, f)
+                    if isinstance(value, list):
+                        for item in value:
+                            walk(item)
+                    elif hasattr(value, '__dataclass_fields__'):
+                        walk(value)
+
+        for stmt in getattr(block, 'statements', []) or []:
+            walk(stmt)
+        return names
 
     # ---- discharge ---------------------------------------------------------
 

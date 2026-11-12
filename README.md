@@ -128,34 +128,22 @@ module prog {
   qualifiers are parsed and then consumed by nothing: `grep "kind == 'linear'"` outside the parser
   returns no engine, and `type_families._match_lhs` is `len(args) > 0` (it matches anything). See KB §11.
 - **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: PCC embeds a self-declared boolean (and its WAT does not assemble). **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract — see below.
-- **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model of a program's straight-line arithmetic and discharges every `assert` by refuting its negation: `unsat` → proven, `sat` → a concrete counterexample. Measured: `assert a + 1 > a` is **proven for all `a`**; `assert a > 0` is refuted with the counterexample `a = 0`. It reports a tri-state — `proven`, `counterexample`, `unverified` (loops, `/`/`%`, arrays: modelled with the wrong semantics would be a false proof, so they are declined), and `vacuous` (no assertions). It is **opt-in**, not on the compile path: far more expensive than the interval interpreter, and answering a different question (all inputs vs. provable index bounds).
-- **A canonical program fingerprint that is harnessed** — `svl.serialization.to_canonical_binary` omits the AST's
-  source-position fields, so the fingerprint is a function of the *program*: ASCII and Hebrew spellings of the
-  same keywords, reformatting, blank lines and comments all give the **same** `ast_sha256` and 231-gate triple
-  (the old `to_binary` gave five different values for those five sources). It is the build-cache key
-  (`svl.distributed_build`), the package identity recorded by the registry, and the payload of the
-  `svl.attest` custom section that `svl.attest.compile_attested` embeds in a shipped artifact. The raw
-  `compile_file_to_wasm` stays byte-identical (`attest=False` by default) so artifacts already pinned
-  elsewhere remain valid. The same artifact carries a self-framing **sync word** (the 231-gate triple of
-  its leading 512-byte block); `svl.attest.locate_sync` finds it inside a larger or shifted stream in
-  O(n) — a 128 KB scan is ~20 ms — though the candidate list is not unique because the PRODUCT channel is
-  degenerate (see the KB).
-- **Abstract interpretation that runs** — `svl/abstract_interpretation.py` performs a sound interval
-  analysis over the AST (i32-aware: intervals that leave `[-2**31, 2**31-1]` widen to `top` because WASM
-  wraps; array lengths tracked per lvalue path; loop fixpoints with widening; a bounded interprocedural
-  pass that binds parameters to the join of their call-site arguments). The compile-time gate refuses a
-  program it can **prove** contains an out-of-bounds `a[i]` or a division by a provably zero divisor —
-  turning two runtime traps into compile errors. It says nothing when it cannot decide: measured
-  **0 findings across all 42 compilable programs** in `examples/` + the workspace corpus, and both
-  defect classes caught on demand. Not done: call return values are `top` (no interprocedural value
-  summary), so `let n = f(x)` loses precision.
-- **The Mod-5 buckets form a real lattice** — `B0 < B1 < B2 < B3 < B4` with join = max and meet = min,
-  and `z2_negate` is an order-reversing involution (a duality, **not** a complement:
-  `bucket_join(B1,B3) == B3 != B4`). `verify_mod5_lattice()` checks 12 laws exhaustively over all 125
-  triples. Dual-stream agreement is now compared **per statement**; it used to be
-  `all_semantic == all_structural`, which is True whenever both streams fail everything. Codegen is
-  still unaffected: `compiler_wasm.py` never imports the type layer — the type layer reaches
-  compilation only through the compile-time gate.
+- **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model
+  of a program's arithmetic and discharges every `assert` by refuting its negation: `unsat` →
+  proven, `sat` → a concrete counterexample. Measured: `assert a + 1 > a` is **proven for all
+  `a`**; `assert a > 0` is refuted with the counterexample `a = 0`. It reports a tri-state —
+  `proven`, `counterexample`, `unverified`, and `vacuous` (no assertions).
+  **Loops and arrays are modelled** (2026-11-12): loop invariants are proposed from the
+  condition and the variable initialisers and then *proved* (entry + preservation) before
+  use, and arrays use the z3 `Array` theory (`a[i]`, `zeros(n)`, `len`). `/` and `%` remain
+  declined — WASM `i32` division truncates while Z3's is Euclidean, and modelling one as the
+  other would be a false proof. It is **opt-in**, not on the compile path.
+
+**Codegen IS now affected by the type layer** (2026-11-12): `compiler_wasm.py` runs the type
+checker (`svl/type_lowering.py`) and lowers locals, parameters, globals, arithmetic width and
+struct resolution from its inferred types. Previously `let x = 1.5` emitted an i32 local
+holding an f64 literal (invalid WAT that still parsed) and `x + y` on two floats emitted
+`i32.add`.
 - **The binary deserializer is real** — `svl/serialization.py` round-trips `to_binary` → `from_binary`
   → `to_binary` exactly. The wire format is **not self-describing** (an int in 1..5, a bool and a
   string of length 1..5 all begin with the same byte), so the reader is driven by the declared field
@@ -164,7 +152,14 @@ module prog {
   discriminator path. `test_roundtrip()` now asserts structural equality **and** byte-stability.
   Known gap: `CastExpr` is not in `NODE_TAGS`, so the *serializer* rejects it — it has never been
   serialisable.
-- **Compiler optimizations** — ~~SIMD, tail-call optimization, escape analysis, WASM GC, PGO, LTO, hot reload~~ **six of the seven are standalone libraries the compiler never calls** (`grep` for `pgo`/`lto`/`tco`/`escape_analysis`/`hot_reload` in `svl/compiler_wasm.py` returns nothing). The one that *is* wired — SIMD — currently breaks the program shape it targets (`for i in 0..4 { s = s + a[i] * b[i] }` fails to assemble).
+- **Compiler optimizations** — **tail-call optimization is wired** into the backend: a tail
+  `return f(args)` with a matching in-module signature becomes a WASM `return_call`
+  (execution-verified: a 20000-deep tail-recursive call completes where the non-tail form
+  traps). The other six — SIMD, escape analysis, WASM GC, PGO, LTO, hot reloading — were
+  standalone libraries the compiler never called and were **removed** on 2026-11-12 rather
+  than left as dead code sustaining the claim. The RL pass-selection compiler (H49) was
+  removed too: every pass was a no-op. Type-directed lowering is also on the path (see the
+  Mod-5 bullet above).
 - **Tooling** — tree-sitter grammar, tactic prover, time-travel debugger, component-model FFI/WIT, package registry with attestations, incremental compilation, distributed build cache, LSIF, docs generation, Jupyter kernel, RL-guided optimization
 
 ## Repository Layout
@@ -175,34 +170,46 @@ SVL_PROGRAMMER_KB.md    # Programmer's knowledge base (complete reference)
 svl_grammar.json        # Generated tree-sitter grammar
 queries/                # Tree-sitter highlight/injection/local queries
 examples/               # Example SVL programs
+tests/                  # pytest suite (assemble + run every compiled module)
+.github/workflows/      # CI: pytest, corpus, golden refs, alias contract, spike suite
+pytest.ini              # testpaths = tests
+requirements-dev.txt    # every dependency the suite and spikes import
 ```
 
 ## Verification Gates
 
 1. `python -m svl.spike_s9_bpsw` — BPSW all primes pass
 2. `python -m svl.spike_s10_self_verify` — 3-stage bootstrap bit-identical + mutations detected
-3. `python -m svl.spike_runner` — no spike regressions (48/50, H36/H37 unimplemented). Note the runner
+3. `python -m svl.spike_runner` — no spike regressions (41/43, H36/H37 unimplemented). Note the runner
    **exits non-zero (2)** when any spike fails — that is deliberate: a gate that cannot fail is not a gate.
-   On a clean checkout expect `Total: 50 | Passed: 48 | Failed: 2` and exit code **2**; the two failures are
-   the self-declared unimplemented stubs, not a broken environment.
+   On a clean checkout expect `Total: 43 | Passed: 41 | Failed: 2` and exit code **2**; the two failures are
+   the self-declared unimplemented stubs, not a broken environment. The set is 43 after the dead-optimization
+   removals (see the Compiler optimizations bullet above).
+
 4. Golden refs: `python -c "from svl.golden_refs import verify_all_golden_refs; print(verify_all_golden_refs())"`
-5. `python -m svl.spike_s17_wasm_determinism` — **assembles** the compiler's output with the wasmtime
+5. `python -m pytest tests -q` — the CI suite: 61 tests covering type-directed lowering, backend
+   execution (assemble **and run**), SMT loop invariants/arrays, TCO, the verification gates and the
+   corpus. Every compiled module is validated with `wasmtime.Module`, not by inspecting text.
+   `.github/workflows/ci.yml` runs it on Python 3.10/3.11/3.12 plus the corpus check, the golden
+   references, the Hebrew alias contract and this spike suite.
+
+6. `python -m svl.spike_s17_wasm_determinism` — **assembles** the compiler's output with the wasmtime
    module. A skipped/absent runtime reports FAIL, not success, and a text-level "determinism" check cannot
    see invalid WAT — which is how a backend that produced unassemblable WASM once looked green.
-6. Assembling is not enough: the emitted module must **run**. Expected values for a quick probe —
+7. Assembling is not enough: the emitted module must **run**. Expected values for a quick probe —
    `while i<=5 { s+=i; i+=1 }` → 15; `for i in 0..5 { s+=i }` → 10; `let r = if c then 10 else 20` with
    `c=0` → 20; `assert x==5` with `x=5` → no trap (and it must trap when the condition is false).
-7. **AST round-trip** — `python3 -c "from svl.serialization import test_roundtrip; test_roundtrip()"`.
+8. **AST round-trip** — `python3 -c "from svl.serialization import test_roundtrip; test_roundtrip()"`.
    Asserts structural equality **and** byte-stable re-serialisation. A stub deserializer once made
    the old size-only check pass while `from_binary(to_binary(ast))` returned a dict.
-8. **The Mod-5 lattice** — `python3 -c "from svl.mod5_types import verify_mod5_lattice; print(all(verify_mod5_lattice().values()))"`
+9. **The Mod-5 lattice** — `python3 -c "from svl.mod5_types import verify_mod5_lattice; print(all(verify_mod5_lattice().values()))"`
    must print `True` (12 laws, exhaustively over all 125 triples).
-9. **The Hebrew alias contract** — `svl.hebrew_alias.verify_mapping()` is 22/22 and
+10. **The Hebrew alias contract** — `svl.hebrew_alias.verify_mapping()` is 22/22 and
    `verify_alias(source)` requires byte-identical WAT for a program and its Hebrew spelling.
-10. **Corpus expectation** — 52 files, **42 compilable**, **0** abstract-interpreter findings,
+11. **Corpus expectation** — 52 files, **42 compilable**, **0** abstract-interpreter findings,
     **42/42** round-trip exact. The 10 non-compiling files are pre-existing legacy fixtures
     (3 never parsed; 7 fail identically with `strict=False`).
-11. **Determinism** — WAT sha256 identical across `PYTHONHASHSEED` 0/1/12345/random, and the
+12. **Determinism** — WAT sha256 identical across `PYTHONHASHSEED` 0/1/12345/random, and the
     canonical AST fingerprint is identical for ASCII, Hebrew, re-indented and commented variants.
 
 ## License

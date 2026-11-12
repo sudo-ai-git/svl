@@ -17,7 +17,7 @@
 11. [Extended Syntax (H2–H16)](#11-extended-syntax-h2h16)
 12. [Verification Extensions (H17–H24, H38–H40)](#12-verification-extensions-h17h24-h38h40)
 13. [Compiler Optimizations & Runtime (H25–H32)](#13-compiler-optimizations--runtime-h25h32)
-14. [Build & Tooling Ecosystem (H33–H35, H41–H49)](#14-build--tooling-ecosystem-h33h35-h41h49)
+14. [Build & Tooling Ecosystem (H33–H35, H41–H48)](#14-build--tooling-ecosystem-h33h35-h41h48)
 15. [Spike Suite Status](#15-spike-suite-status)
 
 ---
@@ -756,11 +756,20 @@ python3 -m svl.package_manager create mypkg 1.0.0 source.svl \
 ### 8.2 Performance Tips
 
 ```svl
-// ✓ Good: Explicit types enable optimization
+// ✓ Good: the type checker's inferred types drive codegen
 func add(x: int, y: int) type int { return x + y }
 
-// ✗ Avoid: Implicit types (slower inference)
-func add(x, y) { return x + y }
+// ✓ Also fine: an un-annotated parameter is typed by inference
+func add(x, y) type int { return x + y }
+```
+
+Types reach the backend (`svl/type_lowering.py`, consumed by `compiler_wasm.py`): locals,
+parameters and globals are lowered to the WASM valtype the checker inferred (`int`→`i32`,
+`float`→`f64`), arithmetic and comparisons select `f64.*` vs `i32.*` from the operand
+types, struct-typed locals are resolved from the inferred type, and a tail
+`return f(args)` with a matching signature becomes a WASM `return_call`. Before this, an
+un-annotated `let x = 1.5` emitted an **i32** local holding an `f64.const` — the text
+parsed but the module failed validation, and `x + y` on two floats emitted `i32.add`.
 
 // ✓ Good: Structs over tuples for complex data
 struct Point { x: int, y: int }
@@ -1158,6 +1167,35 @@ print(f'Theorem: {result.passed}, SMT: {result.smt_verified}')
 - `verify_with_smt_or_bpsw()` runs SMT first and falls back to BPSW only on failure/unavailability.
 - **Pitfall**: only run SMT after BPSW passes — it is additive, not a replacement.
 
+**What it models (2026-11-12):** straight-line `+ - *` and comparisons, `if`/`else`, **arrays**
+(z3 `Array`: literals, `zeros(n)`, `a[i]` read/write, `len`), compound assignment
+(`+= -= *=`), and **loops with invariants**.
+
+**Loop invariants are proposed and then PROVED before use.** For `while i < n { ... i += 1 }`
+the layer proposes `i <= n` from the condition plus `i >= <initialiser>`; it then asks Z3
+for (a) entry — the invariant holds on the state that reaches the loop, and (b) preservation
+— assuming the invariant and the condition, one body execution re-establishes it. Only if
+both are `unsat` is the invariant used. If either fails, the loop is reported as
+`unverified`, exactly as before. Nothing is assumed without a proof.
+
+```python
+from svl.smt_theorem import verify_with_smt
+r = verify_with_smt('module t { func main() type int {'
+                    ' let i = 0 while i < 10 { i += 1 }'
+                    ' assert i == 10 return 0 } }')
+print(r.status)          # 'proven'
+r = verify_with_smt('module t { func main() type int {'
+                    ' let i = 0 while i < 10 { i += 1 }'
+                    ' assert i == 5 return 0 } }')
+print(r.status, r.counterexamples[0]['counterexample'])   # counterexample {'i__loop1b': 10}
+```
+
+**Honest limits:** nested loops, iterator (`for x in xs`) loops, and non-integer bounds are
+declined. A variable the loop modifies that the invariant does **not** constrain (an
+accumulator such as `s += i`) is marked *stale*: an assertion mentioning it after the loop
+is reported as `unverified`, never discharged against an unconstrained value — a spurious
+counterexample is worse than no answer.
+
 ### 12.2 Incremental 231-Gate Checksums (H18)
 
 `svl/incremental_checksum.py` — O(1)-style incremental update of the 231-gate triple.
@@ -1238,130 +1276,86 @@ from svl.semantic_diff import SemanticDiffEngine    # AST-structural diff
 
 ## 13. Compiler Optimizations & Runtime (H25–H32)
 
-### 13.1 SIMD Vectorization (H26)
+**One optimization is on the compile path: tail-call optimization (H27).** The other six
+hypotheses in this range — SIMD vectorization (H26), escape analysis (H28), WASM GC
+(H25), PGO (H29), LTO (H30) and hot reloading (H32) — were standalone libraries the
+compiler never called. They were **removed on 2026-11-12** rather than left as dead code
+sustaining an "optimization stack" claim. The RL pass-selection compiler (H49) was removed
+for the same reason: every one of its passes was a no-op.
 
-`svl/simd_vectorization.py` — detects vectorizable loops and emits WASM SIMD.
+### 13.1 Tail Call Optimization (H27) — WIRED
 
-```python
-from svl.simd_vectorization import SimdVectorizer, run_simd_vectorization_pass, has_simd_instructions
+`compiler_wasm.py` lowers a tail `return f(args)` to a WASM `return_call` when **both**
+hold:
 
-wasm = compile_file_to_wasm(source)
-print(has_simd_instructions(wasm))   # True if v128./i8x16./i16x8./i32x4./f32x4./f64x2. present
-```
+* `f` is a function in the **same module** (host imports are not tail-called), and
+* the callee's signature (params and results) is **identical** to the caller's.
 
-- `SimdVectorizer.analyze_program()` finds arithmetic loops; `SimdWasmEmitter.emit_vectorized_function()` emits `i32x4.*` etc.
-- **Pitfall**: only `*` (mul) computations get SIMD in the reduction pass; nested `BinaryExpr`/`CallExpr`/`UnaryExpr` must be analyzed recursively or vectorization misses `a[i] * b[i]`.
-
-### 13.2 Tail Call Optimization (H27)
-
-```python
-from svl.tco import run_tco_analysis   # returns list[TCOAnalysis]
-
-results = run_tco_analysis("""
-func fact(n: int, acc: int) type int {
-  if n == 0 then { return acc }
-  else { return fact(n - 1, n * acc) }
-}
-""")
-# results[0].is_tail_recursive == True, optimization_possible == True
-```
-
-- `TCOAnalyzer.analyze_function()` detects tail-recursive calls; WASM `return_call` emission is prepared but not the default backend path.
-
-### 13.3 Escape Analysis (H28)
-
-`svl/escape_analysis.py` — stack allocation for non-escaping objects.
+Anything else falls back to a plain `call` + `return`. The signature guard is a correctness
+requirement, not a heuristic: a mismatched `return_call` is invalid WAT.
 
 ```python
-from svl.escape_analysis import EscapeAnalyzer, run_escape_analysis, can_stack_allocate
-
-infos = run_escape_analysis(ast)          # Dict[str, FunctionEscapeInfo] keyed by func name
-info = infos['no_escape']                 # .allocations: list[AllocationSite]
-ok = can_stack_allocate(ast, 'no_escape', 'p')
-```
-
-- `EscapeAnalyzer.analyze_program()` computes `EscapeState` per allocation site; `get_stack_allocatable()` / `get_heap_allocatable()`.
-
-### 13.4 WASM GC Proposal Support (H25)
-
-`svl/wasm_gc.py` — emits `struct`/`array` GC types with root management.
-
-```python
-from svl.wasm_gc import WASMGCManager
 from svl.compiler_wasm import compile_file_to_wasm
-
-manager = WASMGCManager()
-manager.register_struct("Point", [("x", "i32"), ("y", "i32")])   # list of (name, type) tuples
-manager.register_array("IntArray", "i32", mutable=True)
-decls = manager.generate_type_decls()        # -> ["(type $Point ...)", "(type $IntArray ...)"]
-wasm = compile_file_to_wasm(source)          # struct decls also emitted in WASM via the visitor
+wat = compile_file_to_wasm('''
+module t {
+  func fact(n: int, acc: int) type int {
+    if n == 0 then { return acc }
+    else { return fact(n - 1, n * acc) }
+  }
+  func main() type int { return fact(20000, 1) }
+}
+''')
+assert 'return_call' in wat
 ```
 
-- `GCStructLayout` / `GCArrayLayout` model layouts; `generate_type_decls()` emits the `(type ...)` declarations.
-- `WASMGCManager.compile_program_with_gc(program)` takes a **parsed AST program**; `compile_with_gc(program)` is the convenience wrapper.
-- **Pitfall**: `register_struct` fields are `list[(name, type)]`, not a dict — passing `{"x": "i32"}` breaks layout order.
+**Verified by execution, not by text inspection**: the 20000-deep tail-recursive call
+completes, while the non-tail form (`return n * fact(n - 1)`) traps with stack exhaustion
+and is **not** rewritten. Spike H27 fails when `wasmtime` is unavailable rather than
+passing by skipping.
 
-### 13.5 Profile-Guided Optimization (H29)
+### 13.2 AOT Compilation with Cranelift (H31) — STUB
 
-`svl/pgo.py` — instrument WASM, collect profiles, drive inlining/devirtualization.
+Spike-verified: `wasmtime` is available in the environment. The AOT pipeline is a stub in
+`smt_theorem.py`; treat it as **not implemented** — there is no production path.
 
-```python
-from svl.pgo import PGOPipeline, PGOOptimizer, ProfileData
+### 13.3 What was removed, and why
 
-pipeline = PGOPipeline('./profile_dir')
-instrumented = pipeline.instrument(wasm_text)      # adds pgo_profile_count/edge/value/call
-profile = pipeline.collect_profile(runs=3)         # runs instrumented code -> ProfileData
-optimizer = PGOOptimizer(profile)                  # analysis is constructor-driven
-hot = optimizer.get_hot_functions()                # PGOSummary-style hot function list
-optimizer.should_inline(caller, callee)            # inlining decision
-optimizer.should_devirtualize(call_site)           # devirtualization decision
-wasm_opt = pipeline.optimize(wasm_text, profile)   # apply hot-path transforms
-```
+| Module | What it actually was | Decision |
+|---|---|---|
+| `simd_vectorization.py` | placeholders: `_extract_loop_bounds` returned `(0, 100, 1)` regardless of the source; the emitter hard-coded a `sum` local and declared v128 values as `i32` locals, emitting invalid WAT. The H26 spike passed on a **text** check of the emitted ops and never assembled the module. | deleted; the vectorized path was removed from `compiler_wasm.py`, so `for i in 0..4 { s = s + a[i] * b[i] }` now compiles to a correct scalar loop (verified: 70) |
+| `tco.py` | a heuristic tail-call analyzer with a duplicated `_find_calls` and no emitter | deleted; the real `return_call` lowering lives in the backend |
+| `escape_analysis.py` | an analysis reporting which objects could be stack-allocated; the backend has no stack allocation, so nothing consumed it | deleted |
+| `wasm_gc.py` | emitted GC type declarations that no instruction used; the backend models structs as raw memory | deleted, and the dead `generate_wasm_gc_types` / `lower_type_to_wasm_gc` were removed from the backend |
+| `pgo.py` | `collect_profile()` returned an empty `ProfileData`; `optimize()` returned its input unchanged | deleted |
+| `lto.py` | `_merge_modules` renamed functions with a naive text `replace`; `inline_functions` **deleted** small functions that were still called; exports were compared against function names | deleted |
+| `hot_reload.py` | state-schema migration, not codegen; nothing on the compile path | deleted |
+| `rl_compiler.py` | every pass (`inline`, `dce`, `const_fold`, `loop_unroll`, `licm`, `cse`) returned the module unchanged | deleted |
 
-- **Pitfall**: instrumentation must add `pgo` module imports **before** function definitions or WASM validation fails.
+### 13.4 Type-directed lowering — the type layer drives codegen
 
-### 13.6 Link-Time Optimization (H30)
+`compiler_wasm.py` runs the type checker (`svl/type_lowering.py`) before emitting anything
+and lowers from its inferred types:
 
-`svl/lto.py` — parse WASM text, merge modules, DCE, duplicate-function elimination, inlining.
+| Decision | Source |
+|---|---|
+| local / parameter / global WASM valtype | annotation if present, else the inferred type (`int`→`i32`, `float`→`f64`) |
+| `+ - * / %` and comparisons | inferred operand types → `f64.*` or `i32.*`; mixed int/float is a compile error |
+| unary `-` on a float | `f64.neg` |
+| struct field resolution | annotation, struct literal, or the inferred type of the local (`let q = p`) |
+| un-annotated parameters | included in the signature with their inferred type (previously dropped) |
 
-```python
-from svl.lto import WASMParser, LTOOptimizer, LTOConfig, check_lto_tools
+Before this, `let x = 1.5` emitted an **i32** local holding an `f64.const` — the text parsed
+but the module failed validation — and `x + y` on two floats emitted `i32.add`. The mapping
+is conservative: a type the checker cannot classify falls back to the previous `i32`
+behaviour, so a program the checker cannot classify compiles exactly as before.
 
-parser = WASMParser()
-module_a = parser.parse(wasm_text_a)
-module_b = parser.parse(wasm_text_b)
-opt = LTOOptimizer(config=LTOConfig(enabled=True, opt_level=2, thin_lto=True, inline_threshold=250))
-result = opt.optimize([module_a, module_b])        # merge + DCE + dedup + inline in one pass
-merged_text = parser.to_text(result)               # -> merged WASM text
-```
-
-- `check_lto_tools()` detects `wat2wasm`/`wasm-ld`; if absent, falls back to merge-only mode.
-- Lower-level passes are also exposed individually: `_merge_modules()` (renames funcs to `mod$func`, fixes call sites), `dead_code_elimination()` (reachability from exports), `merge_duplicate_functions()` (normalizes `$local_N`, compares bodies), `inline_functions()`.
-- **Pitfall**: function renaming must update every call site; module name extraction must handle `(module $name "name")` and bare `(module)`.
-
-### 13.7 AOT Compilation with Cranelift (H31)
-
-- Spike-verified: `wasmtime` available in the environment; AOT pipeline is a stub in `smt_theorem.py` for going straight to native code. Treat as **stub** — no production path yet.
-
-### 13.8 Hot Reloading with State Migration (H32)
-
-`svl/hot_reload.py` — hot-swap modules while migrating live state.
-
-```python
-from svl.hot_reload import TypeSchema, StateMigrator, HotReloadManager, MigrationPlan
-
-v1 = TypeSchema(name="Point", version=1, fields={"x": "int", "y": "int"}, field_order=["x", "y"])
-v2 = TypeSchema(name="Point", version=2, fields={"x": "int", "y": "int", "z": "int"}, field_order=["x", "y", "z"])
-v1.is_compatible_with(v2)          # True: only additions
-v1.get_migration_plan(v2)          # MigrationPlan: keep x/y, add z with default
-```
-
-- `HotReloadManager` coordinates per-type state migration; `StateMigrator` applies keep/transform/remove/add.
-- **Pitfall**: extract per-type state with `old_state.get(type_name, {})` before migrating or you get `None` fields.
+**Rule:** a module that cannot change the compiled artifact, and is documented as if it
+does, is deleted rather than relabelled. Do not re-add one without wiring it into
+`compile_file_to_wasm` and verifying the effect by assembling and **running** the output.
 
 ---
 
-## 14. Build & Tooling Ecosystem (H33–H35, H41–H49)
+## 14. Build & Tooling Ecosystem (H33–H35, H41–H48)
 
 ### 14.1 LSP with Tree-sitter Grammar (H33)
 
@@ -1516,21 +1510,6 @@ python3 -m svl.jupyter_kernel          # or use launch_kernel()
 
 - `SVLKernel.do_execute` / `do_complete` / `do_inspect` implement the messaging protocol; `SVLKernelConfig` controls verification-on-execute.
 
-### 14.11 Self-Optimizing Compiler (RL) (H49)
-
-`svl/rl_compiler.py` — Q-learning pass selection with replay buffer.
-
-```python
-from svl.rl_compiler import RLAgent, ReplayBuffer, SelfOptimizingCompiler
-
-agent = RLAgent(...)                     # linear Q-network: Q(s,a) = w_a^T * phi(s)
-compiler = SelfOptimizingCompiler(agent)
-compiler.train(steps=100)                # reward = log(speedup)*w + size_reduction*w - penalties
-wasm = compiler.compile(source)          # agent picks passes
-```
-
-- **Pitfall**: `ReplayBuffer.push` must build the tuple before appending (`buffer.append((s,a,r,s2,d))`, never `append(None)`).
-
 ### 14.12 Verified Raft Consensus (H50)
 
 `svl/raft.py` + `svl/raft_test.py` — deterministic Raft with leader election, log replication, verification.
@@ -1561,15 +1540,15 @@ check = cluster.verify_cluster()                  # {'all_verified': True, ...}
 
 Run: `python -m svl.spike_runner` (from the repo root)
 
-**Current (2026-11-11): 48/50 PASS (96%)**
+**Current (2026-11-12): 41 / 43 PASS (95.3%).** The set is 43 after the dead-optimization
+removals; the two failures are the self-declared unimplemented stubs.
 
 | Status | Spikes |
 |--------|--------|
-| ✅ PASS | H1–H35 (all parser/engine/runtime features) |
-| ✅ PASS | H38–H49 (property testing, semantic diff, component model, WIT, registry, incremental, distributed build, LSIF, docs, Jupyter, RL) |
-| ✅ PASS | H50 (Raft, after import fix) |
+| ✅ PASS | H1–H24, H27 (real backend TCO), H31 (documented stub), H33–H35, H38–H48, H50 |
 | ❌ NOT IMPLEMENTED | H36 Visual AST/Type Explorer |
 | ❌ NOT IMPLEMENTED | H37 AI-Assisted Proof Search |
+| ➖ REMOVED | H25, H26, H28, H29, H30, H32, H49 — dead libraries, deleted (see §13.3) |
 
 H36 and H37 fail because they are genuinely unimplemented (spike notes: "Visual explorer not implemented" / "AI proof search not implemented") — not because of a bug.
 

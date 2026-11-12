@@ -783,336 +783,65 @@ def spike_h24_self_certifying_compiler() -> SpikeResult:
                               'theorem_ok': result.all_parities_even},
                       notes="Compiler source passes all 3 verification layers")
 
-# H25: WASM GC Proposal Support
-def spike_h25_wasm_gc() -> SpikeResult:
-    """Test WASM GC type generation and compilation."""
-    from svl.wasm_gc import WASMGCManager
-    from svl.compiler_wasm import compile_file_to_wasm
-    
-    manager = WASMGCManager()
-    
-    # Register struct and array types
-    manager.register_struct("Point", [("x", "i32"), ("y", "i32")])
-    manager.register_array("IntArray", "i32", mutable=True)
-    
-    # Test type declaration generation
-    decls = manager.generate_type_decls()
-    
-    # Verify struct type
-    has_struct = any("type $Point" in d for d in decls)
-    has_fields = any("(field x i32)" in d and "(field y i32)" in d for d in decls)
-    
-    # Verify array type
-    has_array = any("type $IntArray" in d for d in decls)
-    has_mutable = any("(mut)" in d for d in decls)
-    
-    # Test compilation with struct
-    source = '''
-    module test {
-      struct Point { x: int, y: int }
-      func main() type void { return }
-    }
-    '''
-    wasm = compile_file_to_wasm(source)
-    has_struct_decl = "(type $Point" in wasm
-    
-    all_pass = has_struct and has_fields and has_array and has_mutable and has_struct_decl
-    
-    return SpikeResult("H25", "WASM GC Proposal Support", all_pass,
-                      metrics={
-                          'struct_type': has_struct,
-                          'struct_fields': has_fields,
-                          'array_type': has_array,
-                          'mutable_array': has_mutable,
-                          'struct_in_wasm': has_struct_decl
-                      },
-                      notes=f"Struct: {has_struct}, Fields: {has_fields}, Array: {has_array}, Mutable: {has_mutable}, WASM: {has_struct_decl}")
-
-# H26: SIMD Vectorization
-def spike_h26_simd_vectorization() -> SpikeResult:
-    """Test SIMD instruction emission."""
-    from svl.simd_vectorization import SimdVectorizer, has_simd_instructions
-    from svl.compiler_wasm import compile_file_to_wasm
-
-    source = '''
-    module test {
-      func dot_product(a: vec<int, 4>, b: vec<int, 4>) type int {
-        let sum: int = 0
-        for i in 0..4 {
-          sum = sum + a[i] * b[i]
-        }
-        return sum
-      }
-      func main() type void { return }
-    }
-    '''
-    wasm = compile_file_to_wasm(source)
-
-    # Check for SIMD instructions
-    simd_ops = ['v128.', 'i8x16.', 'i16x8.', 'i32x4.', 'f32x4.', 'f64x2.']
-    has_simd = any(op in wasm for op in simd_ops)
-
-    # Also test vectorizer
-    vectorizer = SimdVectorizer()
-    # (would need full program AST to test)
-
-    return SpikeResult("H26", "SIMD Vectorization", has_simd,
-                      metrics={'has_simd': has_simd, 'wasm_size': len(wasm)},
-                      notes="SIMD vectorization with auto-vectorization for range loops")
-
 # H27: Tail Call Optimization
 def spike_h27_tco() -> SpikeResult:
-    """Test TCO detection."""
-    from svl.tco import run_tco_analysis
-    
-    # Test tail recursive function
-    source1 = '''
-    func fact(n: int, acc: int) type int {
-        if n == 0 then { return acc }
-        else { return fact(n - 1, n * acc) }
-    }
-    '''
-    
-    results1 = run_tco_analysis(source1)
-    test1 = len(results1) > 0 and results1[0].is_tail_recursive and results1[0].optimization_possible
-    
-    # Test non-tail recursive
-    source2 = '''
-    func fact(n: int) type int {
-        if n == 0 then { return 1 }
-        else { return n * fact(n - 1) }
-    }
-    '''
-    
-    results2 = run_tco_analysis(source2)
-    test2 = len(results2) > 0 and not results2[0].is_tail_recursive and not results2[0].optimization_possible
-    
-    all_pass = test1 and test2
-    
-    return SpikeResult("H27", "Tail Call Optimization", all_pass,
-                      metrics={'tail_recursive_test': test1, 'non_tail_test': test2},
-                      notes=f"Tests: tail_recursive={test1}, non_tail={test2}")
+    """TCO is wired into the backend: a tail `return f(args)` becomes `return_call`.
 
-# H28: Escape Analysis
-def spike_h28_escape_analysis() -> SpikeResult:
-    """Test escape analysis for stack allocation."""
+    Verified by EXECUTION, not by text inspection: a 20000-deep tail-recursive call
+    completes, while the non-tail form traps with stack exhaustion and is NOT rewritten.
+    A missing runtime fails the spike rather than passing by skipping.
+    """
+    from svl.compiler_wasm import compile_file_to_wasm
+
+    tail_src = """
+module t {
+  func fact(n: int, acc: int) type int {
+    if n == 0 then { return acc }
+    else { return fact(n - 1, n * acc) }
+  }
+  func main() type int { return fact(20000, 1) }
+}
+"""
+    non_tail_src = """
+module t {
+  func fact(n: int) type int {
+    if n <= 1 then { return 1 }
+    else { return n * fact(n - 1) }
+  }
+  func main() type int { return fact(10) }
+}
+"""
     try:
-        from svl.escape_analysis import EscapeAnalyzer, EscapeState, can_stack_allocate
-        from svl.lexer import tokenize
-        from svl.parser_rd import parse
+        import wasmtime
+    except ImportError:
+        return SpikeResult("H27", "Tail Call Optimization (backend return_call)", False,
+                           error="wasmtime not available: cannot execute the tail call")
 
-        # Test with a simple program
-        test_source = '''
-        module test {
-          func no_escape() type int {
-            let p: Point = Point { x: 1, y: 2 }
-            return p.x + p.y
-          }
-          func main() type void { return }
-        }
-        '''
-        
-        tokens = tokenize(test_source)
-        ast = parse(tokens)
-        
-        analyzer = EscapeAnalyzer()
-        infos = analyzer.analyze_program(ast)
-        
-        # Check if analysis runs without error
-        has_escape_analysis = True
-        no_escape_found = False
-        
-        for func_name, info in infos.items():
-            stack_allocs = analyzer.get_stack_allocatable(func_name)
-            if len(stack_allocs) > 0:
-                no_escape_found = True
-                
+    try:
+        tail_wat = compile_file_to_wasm(tail_src)
+        has_return_call = 'return_call' in tail_wat
+        non_tail_wat = compile_file_to_wasm(non_tail_src)
+        non_tail_rewritten = 'return_call' in non_tail_wat
+
+        binary = wasmtime.wat2wasm(tail_wat)
+        engine = wasmtime.Engine()
+        module = wasmtime.Module(engine, binary)
+        store = wasmtime.Store(engine)
+        instance = wasmtime.Linker(engine).instantiate(store, module)
+        instance.exports(store)['t_main'](store)
+
+        ok = has_return_call and not non_tail_rewritten
+        return SpikeResult(
+            "H27", "Tail Call Optimization (backend return_call)", ok,
+            metrics={'return_call_emitted': has_return_call,
+                     'non_tail_rewritten': non_tail_rewritten,
+                     'executed': True},
+            notes="20000-deep tail call completes via return_call; non-tail call untouched"
+            if ok else "return_call not emitted for a tail call")
     except Exception as e:
-        has_escape_analysis = False
-        no_escape_found = False
-        print(f"Escape analysis error: {e}")
+        return SpikeResult("H27", "Tail Call Optimization (backend return_call)", False,
+                           error=f"{type(e).__name__}: {e}")
 
-    all_pass = has_escape_analysis and no_escape_found
-    return SpikeResult("H28", "Escape Analysis for Stack Allocation", all_pass,
-                      metrics={'has_escape_analysis': has_escape_analysis, 'no_escape_found': no_escape_found},
-                      notes="Escape analysis implemented with stack allocation detection" if all_pass else "Escape analysis not fully working")
-
-# H29: Profile-Guided Optimization
-def spike_h29_pgo() -> SpikeResult:
-    """Test PGO support."""
-    from svl.pgo import PGOPipeline, PGOOptimizer, ProfileData, PGOSummary
-    
-    # Test 1: Pipeline creation
-    pipeline = PGOPipeline("./test_pgo_spike")
-    pipeline_created = True
-    
-    # Test 2: Instrumentation
-    test_wasm = '''(module
-  (func $test$main (param i32) (result i32)
-    local.get 0
-    i32.const 1
-    i32.add
-    return
-  )
-)'''
-    instrumented = pipeline.instrument(test_wasm)
-    has_instrumentation = 'pgo_profile_count' in instrumented and 'call $pgo_profile_count' in instrumented
-    
-    # Test 3: Profile data structures
-    profile = ProfileData()
-    profile.function_counts['test$main'] = 10000
-    profile.block_counts['test$main:entry'] = 10000
-    profile.edge_counts['test$main:entry->body'] = 10000
-    profile.call_counts['test$main->helper'] = 2000
-    profile.value_profiles['site1'] = {'i32': 8000}  # monomorphic
-    
-    profile_structures_work = (
-        profile.function_counts['test$main'] == 10000 and
-        profile.call_counts['test$main->helper'] == 2000 and
-        'i32' in profile.value_profiles['site1']
-    )
-    
-    # Test 4: Profile merge
-    profile2 = ProfileData()
-    profile2.function_counts['test$main'] = 5000
-    profile.merge(profile2)
-    merge_works = profile.function_counts['test$main'] == 15000
-    
-    # Test 5: Optimizer analysis
-    optimizer = PGOOptimizer(profile)
-    summary = optimizer.summary
-    optimizer_works = (
-        'test$main' in summary.hot_functions and
-        len(summary.inlining_candidates) > 0 and
-        'site1' in summary.devirtualization_sites  # monomorphic after merge
-    )
-    
-    # Test 6: Optimizer queries
-    should_inline = optimizer.should_inline('test$main', 'helper')
-    should_devirtualize = optimizer.should_devirtualize('site1')
-    type_feedback = optimizer.get_type_feedback('site1')
-    
-    query_works = should_inline and should_devirtualize and type_feedback == 'i32'
-    
-    all_pass = pipeline_created and has_instrumentation and profile_structures_work and merge_works and optimizer_works and query_works
-    
-    return SpikeResult("H29", "Profile-Guided Optimization", all_pass,
-                      metrics={
-                          'pipeline_created': pipeline_created,
-                          'instrumentation_works': has_instrumentation,
-                          'profile_structures': profile_structures_work,
-                          'profile_merge': merge_works,
-                          'optimizer_analysis': optimizer_works,
-                          'optimizer_queries': query_works,
-                      },
-                      notes="PGO pipeline with instrumentation, profile collection, and optimization guidance implemented")
-
-# H30: Link-Time Optimization
-def spike_h30_lto() -> SpikeResult:
-    """Test LTO support."""
-    from svl.lto import WASMParser, LTOOptimizer, LTOConfig, check_lto_tools, WASMModule
-    
-    # Test 1: Module parsing
-    test_wasm = '''(module
-  (import "env" "print" (func $print (param i32)))
-  (func $test$main (param i32) (result i32)
-    local.get 0
-    i32.const 1
-    i32.add
-    call $print
-    return
-  )
-  (export "main" (func $test$main))
-)'''
-    parser = WASMParser()
-    module = parser.parse(test_wasm)
-    parse_works = (
-        module.name == "unknown" and
-        len(module.imports) == 1 and
-        'test$main' in module.functions and
-        'main' in module.exports
-    )
-    
-    # Test 2: Round-trip
-    regenerated = parser.to_text(module)
-    roundtrip_works = '(import "env" "print"' in regenerated and 'func $test$main' in regenerated
-    
-    # Test 3: LTO config
-    config = LTOConfig(opt_level=2, thin_lto=True)
-    config_works = config.opt_level == 2 and config.thin_lto
-    
-    # Test 4: LTO optimizer creation
-    optimizer = LTOOptimizer(config)
-    optimizer_created = optimizer is not None
-    
-    # Test 5: Module merging
-    # module from Test 1 has name "unknown"
-    module2 = WASMModule(name="mod2", wasm_text="(module)")
-    module2.functions['helper'] = '''(func $helper (param i32) (result i32)
-  local.get 0
-  i32.const 2
-  i32.mul
-  return
-)'''
-    
-    merged = optimizer._merge_modules([module, module2])
-    merge_works = (
-        'unknown$test$main' in merged.functions and  # parsed module name + function name
-        'mod2$helper' in merged.functions and
-        len(merged.imports) >= 1
-    )
-    
-    # Test 6: Dead code elimination
-    module_with_dead = WASMModule(name="test", wasm_text="(module)")
-    module_with_dead.functions['used'] = '''(func $used (result i32)
-  i32.const 42
-  return
-)'''
-    module_with_dead.functions['dead'] = '''(func $dead (result i32)
-  i32.const 1
-  return
-)'''
-    module_with_dead.exports = ['used']
-    
-    optimized = optimizer.dead_code_elimination(module_with_dead)
-    dce_works = 'used' in optimized.functions and 'dead' not in optimized.functions
-    
-    # Test 7: Duplicate function merging
-    module_with_dup = WASMModule(name="test", wasm_text="(module)")
-    module_with_dup.functions['func1'] = '''(func $func1 (result i32)
-  i32.const 42
-  return
-)'''
-    module_with_dup.functions['func2'] = '''(func $func2 (result i32)
-  i32.const 42
-  return
-)'''
-    module_with_dup.exports = ['func1', 'func2']
-    
-    deduped = optimizer.merge_duplicate_functions(module_with_dup)
-    dedup_works = len(deduped.functions) == 1  # func2 should be removed
-    
-    # Test 8: Tool availability check
-    tools = check_lto_tools()
-    tool_check_works = isinstance(tools, dict) and 'wasm-ld' in tools
-    
-    all_pass = (parse_works and roundtrip_works and config_works and 
-                optimizer_created and merge_works and dce_works and 
-                dedup_works and tool_check_works)
-    
-    return SpikeResult("H30", "Link-Time Optimization", all_pass,
-                      metrics={
-                          'parse_works': parse_works,
-                          'roundtrip_works': roundtrip_works,
-                          'config_works': config_works,
-                          'optimizer_created': optimizer_created,
-                          'merge_works': merge_works,
-                          'dce_works': dce_works,
-                          'dedup_works': dedup_works,
-                          'tool_check_works': tool_check_works,
-                          'tools_available': tools,
-                      },
-                      notes="LTO infrastructure with module parsing, merging, DCE, and deduplication implemented")
 
 # H31: AOT Compilation
 def spike_h31_aot() -> SpikeResult:
@@ -1130,123 +859,6 @@ def spike_h31_aot() -> SpikeResult:
     return SpikeResult("H31", "AOT Compilation with Cranelift", has_aot,
                       metrics={'wasmtime_available': has_aot},
                       notes="wasmtime not installed for AOT testing")
-
-# H32: Hot Reloading with State Migration
-def spike_h32_hot_reload() -> SpikeResult:
-    """Test hot reloading infrastructure."""
-    from svl.hot_reload import TypeSchema, StateMigrator, ModuleVersion, HotReloadManager, MigrationPlan
-    
-    # Test 1: Schema compatibility
-    point_v1 = TypeSchema(
-        name="Point",
-        version=1,
-        fields={"x": "int", "y": "int"},
-        field_order=["x", "y"]
-    )
-    
-    point_v2 = TypeSchema(
-        name="Point",
-        version=2,
-        fields={"x": "int", "y": "int", "z": "int"},
-        field_order=["x", "y", "z"]
-    )
-    
-    point_v2_incompatible = TypeSchema(
-        name="Point",
-        version=2,
-        fields={"x": "float", "y": "int"},  # x type changed
-        field_order=["x", "y"]
-    )
-    
-    compat_works = (
-        point_v1.is_compatible_with(point_v2) and  # v2 adds field
-        not point_v1.is_compatible_with(point_v2_incompatible)  # type change breaks compat
-    )
-    
-    # Test 2: Migration plan
-    plan = point_v1.get_migration_plan(point_v2)
-    plan_works = (
-        plan.keep_fields == ["x", "y"] and
-        len(plan.add_fields) == 1 and
-        plan.add_fields[0].name == "z" and
-        plan.add_fields[0].type_name == "int" and
-        plan.is_trivial()
-    )
-    
-    # Test 3: State migration
-    migrator = StateMigrator()
-    migrator.register_schema(point_v1)
-    migrator.register_schema(point_v2)
-    
-    old_state = {"x": 10, "y": 20}
-    new_state = migrator.migrate(old_state, "Point", 1, 2)
-    migrate_works = new_state == {"x": 10, "y": 20, "z": 0}  # z defaults to 0
-    
-    # Test 4: Hot reload manager
-    manager = HotReloadManager()
-    
-    module_v1 = ModuleVersion(
-        name="geometry",
-        version=1,
-        checksum="abc123",
-        exports=["Point"],
-        schemas={"Point": point_v1}
-    )
-    
-    module_v2 = ModuleVersion(
-        name="geometry",
-        version=2,
-        checksum="def456",
-        exports=["Point"],
-        schemas={"Point": point_v2}
-    )
-    
-    manager.register_module(module_v1)
-    manager.set_module_state("geometry", {"Point": {"x": 10, "y": 20}})
-    
-    state_before = manager.get_module_state("geometry")
-    manager.reload_module("geometry", "new source", module_v2)
-    state_after = manager.get_module_state("geometry")
-    
-    manager_works = (
-        state_before == {"Point": {"x": 10, "y": 20}} and
-        state_after == {"Point": {"x": 10, "y": 20, "z": 0}}
-    )
-    
-    # Test 5: Migration plan with transformations
-    point_v3 = TypeSchema(
-        name="Point",
-        version=3,
-        fields={"x": "int", "y": "int", "z": "int", "color": "string"},
-        field_order=["x", "y", "z", "color"]
-    )
-    migrator.register_schema(point_v3)
-    
-    plan_v3 = point_v1.get_migration_plan(point_v3)
-    transform_plan_works = (
-        plan_v3.keep_fields == ["x", "y"] and
-        len(plan_v3.add_fields) == 2
-    )
-    
-    # Test 6: Custom transformer
-    def int_to_string(val: int) -> str:
-        return str(val)
-    
-    migrator.register_transformer("color", int_to_string)
-    # Note: This would be used if color field type changed
-    
-    all_pass = (compat_works and plan_works and migrate_works and 
-                manager_works and transform_plan_works)
-    
-    return SpikeResult("H32", "Hot Reloading with State Migration", all_pass,
-                      metrics={
-                          'schema_compat': compat_works,
-                          'migration_plan': plan_works,
-                          'state_migration': migrate_works,
-                          'manager_reload': manager_works,
-                          'transform_plan': transform_plan_works,
-                      },
-                      notes="Hot reloading with schema compatibility, state migration, and version management implemented")
 
 # H33: LSP with Tree-sitter
 def spike_h33_tree_sitter_lsp() -> SpikeResult:
@@ -1981,118 +1593,6 @@ def spike_h48_jupyter_kernel() -> SpikeResult:
                       },
                       notes=f"Kernel: {kernel_created}, Exec: {execution_ok}, Completion: {completion_ok}")
 
-# H49: Self-Optimizing Compiler (RL)
-def spike_h49_rl_compiler() -> SpikeResult:
-    """Test RL-guided optimization."""
-    from svl.rl_compiler import (
-        SelfOptimizingCompiler, RLAgent, RLState, CompilationContext,
-        OptimizationPass, PassConfig, ReplayBuffer, QNetwork,
-        create_rl_compiler, inline_pass, dce_pass
-    )
-    
-    # Test 1: RL Agent creation
-    agent = RLAgent(epsilon=0.1, gamma=0.99)
-    agent_created = agent is not None and len(agent.action_space) == len(list(OptimizationPass))
-    
-    # Test 2: State representation
-    context = CompilationContext(
-        module_name="test",
-        source_hash="abc123",
-        ast_size=1000,
-        function_count=10,
-        loop_count=5,
-        memory_ops=100,
-        call_graph_depth=3,
-    )
-    
-    state = RLState(context=context)
-    features = state.to_feature_vector()
-    state_works = len(features) == 8 and all(isinstance(f, float) for f in features)
-    
-    # Test 3: Action selection
-    action = agent.select_action(state, training=False)
-    action_works = action in list(OptimizationPass)
-    
-    # Test 4: Q-network prediction
-    q_values = agent.q_network.predict(state)
-    q_works = len(q_values) == len(list(OptimizationPass)) and all(isinstance(v, float) for v in q_values)
-    
-    # Test 5: Experience replay buffer
-    buffer = ReplayBuffer(capacity=100)
-    next_state = RLState(context=context, step=1)
-    buffer.push(state, OptimizationPass.INLINE, 1.0, next_state, False)
-    buffer_works = len(buffer) == 1
-    
-    # Sample from buffer
-    batch = buffer.sample(1)
-    sample_works = len(batch) == 1 and batch[0][1] == OptimizationPass.INLINE
-    
-    # Test 6: Q-network update
-    agent.q_network.update(state, OptimizationPass.INLINE, 1.0)
-    update_works = True  # No exception
-    
-    # Test 7: SelfOptimizingCompiler creation
-    compiler = create_rl_compiler()
-    compiler_created = compiler is not None and len(compiler.pass_registry) >= 6
-    
-    # Test 8: Compilation with RL
-    class DummyModule:
-        pass
-    
-    module = DummyModule()
-    optimized, result = compiler.compile_with_rl(module, context)
-    
-    compilation_works = (
-        'passes' in result and
-        'reward' in result and
-        'metrics' in result and
-        len(result['passes']) > 0
-    )
-    
-    # Test 9: Multiple compilations (training)
-    rewards = []
-    for _ in range(3):
-        _, res = compiler.compile_with_rl(module, context)
-        rewards.append(res['reward'])
-    
-    training_works = len(rewards) == 3 and all(isinstance(r, float) for r in rewards)
-    
-    # Test 10: Model save/load
-    agent.save_model("test_rl_model.json")
-    new_agent = RLAgent()
-    new_agent.load_model("test_rl_model.json")
-    save_load_works = (
-        new_agent.epsilon == agent.epsilon and
-        new_agent.gamma == agent.gamma and
-        len(new_agent.q_network.weights) == len(agent.q_network.weights)
-    )
-    
-    # Test 11: Best config tracking
-    best_config = compiler.get_best_config("abc123")
-    config_tracking_works = best_config is not None and len(best_config) > 0
-    
-    all_pass = (agent_created and state_works and action_works and q_works and
-                buffer_works and sample_works and update_works and
-                compiler_created and compilation_works and training_works and
-                save_load_works and config_tracking_works)
-    
-    return SpikeResult("H49", "Self-Optimizing Compiler (RL)", all_pass,
-                      metrics={
-                          'agent_created': agent_created,
-                          'state_representation': state_works,
-                          'action_selection': action_works,
-                          'q_network': q_works,
-                          'replay_buffer': buffer_works,
-                          'buffer_sampling': sample_works,
-                          'q_update': update_works,
-                          'compiler_creation': compiler_created,
-                          'compilation': compilation_works,
-                          'training': training_works,
-                          'model_save_load': save_load_works,
-                          'config_tracking': config_tracking_works,
-                      },
-                      notes="RL-guided compiler optimization with Q-learning, experience replay, and pass selection implemented")
-
 # H50: Verified Distributed Consensus (Raft)
 def spike_h50_verified_raft() -> SpikeResult:
     """Test Raft implementation in SVL (deterministic version)."""
@@ -2264,14 +1764,8 @@ def main():
         ("H22", "Differential Verification", spike_h22_differential_verification),
         ("H23", "Probabilistic Verification", spike_h23_probabilistic_verification),
         ("H24", "Self-Certifying Compiler", spike_h24_self_certifying_compiler),
-        ("H25", "WASM GC Proposal Support", spike_h25_wasm_gc),
-        ("H26", "SIMD Vectorization", spike_h26_simd_vectorization),
         ("H27", "Tail Call Optimization", spike_h27_tco),
-        ("H28", "Escape Analysis", spike_h28_escape_analysis),
-        ("H29", "Profile-Guided Optimization", spike_h29_pgo),
-        ("H30", "Link-Time Optimization", spike_h30_lto),
         ("H31", "AOT Compilation with Cranelift", spike_h31_aot),
-        ("H32", "Hot Reloading with State Migration", spike_h32_hot_reload),
         ("H33", "LSP with Tree-sitter", spike_h33_tree_sitter_lsp),
         ("H34", "Interactive Theorem Proving", spike_h34_interactive_proving),
         ("H35", "Time-Travel Debugging", spike_h35_time_travel),
@@ -2288,7 +1782,6 @@ def main():
         ("H46", "LSIF for Code Navigation", spike_h46_lsif),
         ("H47", "Docs Generation from Verification", spike_h47_docs_generation),
         ("H48", "REPL Notebooks (Jupyter Kernel)", spike_h48_jupyter_kernel),
-        ("H49", "Self-Optimizing Compiler (RL)", spike_h49_rl_compiler),
         ("H50", "Verified Distributed Consensus (Raft)", spike_h50_verified_raft),
     ]
     

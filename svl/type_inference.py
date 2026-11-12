@@ -37,9 +37,14 @@ BUILTIN_SIGNATURES = {
 }
 
 
+def _is_float(t: Any) -> bool:
+    """True when `t` is the primitive `float` type (not a type variable)."""
+    return (t is not None and isinstance(t, Type) and not isinstance(t, TypeVar)
+            and t.kind == 'prim' and bool(t.args) and t.args[0] == 'float')
+
+
 class Type:
     """Unified type representation for inference."""
-
     def __init__(self, kind: str, **kwargs):
         self.kind = kind
         self.args = kwargs.get('args', [])
@@ -483,7 +488,11 @@ class TypeInferencer:
         if op == '.':
             return Type.prim('int')          # every struct field is an i32 slot
         if op in ('+', '-', '*', '/', '%'):
-            # Numeric operations
+            # Numeric operations. The type must PROPAGATE: returning a hard-coded `int`
+            # here made `1.5 + 2.5` infer `int`, so type-directed lowering could never
+            # see a float through arithmetic and emitted `i32.add` for two doubles.
+            if _is_float(left_type) or _is_float(right_type):
+                return Type.prim('float')
             return Type.prim('int')
         elif op in ('<<', '>>', '&', '|', '^'):
             # Bitwise and shift operations
@@ -634,6 +643,14 @@ class TypeChecker:
         self.inferencer = TypeInferencer()
         self.env = TypeEnv()
         self.errors: List[str] = []
+        # Recording of inferred types for type-directed lowering (see svl/type_lowering.py).
+        # Populated only while `infer_program` is running, so `check_program` alone is
+        # unchanged.
+        self._recording = False
+        self._current_func: Optional[str] = None
+        self.recorded_locals: Dict[Tuple[str, str], Type] = {}
+        self.recorded_exprs: Dict[int, Type] = {}
+        self.recorded_funcs: Dict[str, Type] = {}
     
     def check_program(self, ast: Any) -> Tuple[bool, List[str]]:
         """Type check entire program."""
@@ -650,6 +667,49 @@ class TypeChecker:
         except Exception as e:
             self.errors.append(f"Type checking error: {e}")
             return False, self.errors
+
+    def infer_program(self, ast: Any):
+        """Type check the program and return every inferred type, for codegen.
+
+        Identical checking to `check_program` (it calls it), plus a recording wrapper on
+        `TypeInferencer.synthesize` so every expression the checker actually typed is
+        captured with the environment it was typed in. Returns an `InferredTypes`.
+        """
+        from svl.type_lowering import InferredTypes
+
+        self._recording = True
+        self._current_func = None
+        self.recorded_locals = {}
+        self.recorded_exprs = {}
+        self.recorded_funcs = {}
+
+        original_synthesize = self.inferencer.synthesize
+
+        def recording_synthesize(expr, env, expected=None):
+            # `original_synthesize` is the BOUND method (self already applied), so it
+            # takes exactly (expr, env); `expected` is accepted only to match the call
+            # shape of `TypeInferencer.synthesize`.
+            t = original_synthesize(expr, env)
+            try:
+                self.recorded_exprs[id(expr)] = t
+            except Exception:                                        # noqa: BLE001
+                pass
+            return t
+
+        self.inferencer.synthesize = recording_synthesize
+        try:
+            ok, errors = self.check_program(ast)
+        finally:
+            self.inferencer.synthesize = original_synthesize
+            self._recording = False
+
+        return InferredTypes(
+            ok=ok,
+            errors=list(errors),
+            local_types=dict(self.recorded_locals),
+            expr_types=dict(self.recorded_exprs),
+            func_types=dict(self.recorded_funcs),
+        )
     
     def _init_env(self):
         """Initialize environment with primitive types and the runtime's builtins.
@@ -726,6 +786,9 @@ class TypeChecker:
         
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
+
+        if self._recording:
+            self.recorded_locals[(self._current_func, stmt.name)] = value_type
 
     @staticmethod
     def _handle_annotation_ok(expected: Any, actual: Any) -> bool:
@@ -820,6 +883,9 @@ class TypeChecker:
     def _check_func_decl(self, stmt: Any):
         # Create new environment for function body
         func_env = TypeEnv(parent=self.env)
+        prev_func = self._current_func
+        if self._recording:
+            self._current_func = stmt.name
         
         # Add parameter bindings
         param_types = []
@@ -827,6 +893,8 @@ class TypeChecker:
             param_type = self._type_ann_to_type(param.type_ann, self.env) if param.type_ann else Type.var()
             param_types.append(param_type)
             func_env = func_env.extend(param.name, TypeScheme(vars=[], body=param_type))
+            if self._recording:
+                self.recorded_locals[(stmt.name, param.name)] = param_type
         
         # Check function body
         old_env = self.env
@@ -834,6 +902,7 @@ class TypeChecker:
         for body_stmt in stmt.body.statements:
             self._check_stmt(body_stmt)
         self.env = old_env
+        self._current_func = prev_func
         
         # Add function to environment
         if stmt.return_type:
@@ -844,6 +913,8 @@ class TypeChecker:
         func_type = Type.func(param_types, return_type)
         scheme = self.env.generalize(func_type, set())
         self.env = self.env.extend(stmt.name, scheme)
+        if self._recording:
+            self.recorded_funcs[stmt.name] = func_type
     
     def _check_struct_decl(self, stmt: Any):
         """Add struct to environment with field types."""
@@ -867,7 +938,9 @@ class TypeChecker:
         
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
-    
+        if self._recording:
+            self.recorded_locals[(self._current_func, stmt.name)] = value_type
+
     def _check_var_decl(self, stmt: Any):
         value_type = self.inferencer.synthesize(stmt.value, self.env)
         if stmt.type_ann:
@@ -879,7 +952,9 @@ class TypeChecker:
         
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
-    
+        if self._recording:
+            self.recorded_locals[(self._current_func, stmt.name)] = value_type
+
     def _check_type_alias(self, stmt: Any):
         # Type aliases are transparent
         pass

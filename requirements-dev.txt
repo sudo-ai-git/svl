@@ -1,0 +1,19 @@
+# SVL test/CI dependencies.
+#
+# The backend and the SMT layer are only fully exercisable with both runtimes:
+#   z3-solver    : SMT theorem layer (tests/test_svl_smt.py, spikes H17/H19)
+#   wasmtime     : assemble + RUN every compiled module (tests/test_svl_*.py, H27/H31)
+#
+# The remaining packages are hard module-level imports in the SVL package, so a missing
+# one breaks collection rather than skipping a test. Measured 2026-11-12 in a clean venv:
+# with only pytest+z3-solver+wasmtime the suite is 6 collection errors and the spike run
+# is 29/43 (exit 14); with the full set below it is 61/61 pytest and 41/43 spikes
+# (exit 2 = the two self-declared unimplemented stubs H36/H37).
+numpy>=1.24           # svl/gate231.py (231-gate checksums)
+msgpack>=1.0          # svl/serialization.py (AST round-trip)
+hypothesis>=6.0       # H38 property-based testing spike
+ipykernel>=6.0        # H48 Jupyter kernel spike (pulls traitlets)
+cryptography>=41.0    # svl/package_registry.py (H43 attestations)
+z3-solver>=4.8
+wasmtime>=20.0
+pytest>=7.0
