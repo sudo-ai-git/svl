@@ -3,7 +3,7 @@
 > **SUPERSEDED (2026-11-12).** This file is an early-session snapshot and is kept for
 > history only. Its headline ("8/50 spikes passing") and its H24 "self-certifying compiler"
 > claim are **wrong**: the self-hosting claim is retracted, and the current measured state is
-> **41/43 spikes**, pytest 61/61, probe suite 26 PASS / 0 FAIL / 4 INFO.
+> **41/43 spikes**, pytest 61/61, probe suite 30 PASS / 0 FAIL / 3 INFO.
 > For the current state see `README.md` (mirror) and `SVL_FORMAL_RATING.md` (workspace).
 
 ## Completed Work (8/50 Spikes Passing) — historical, see banner above
