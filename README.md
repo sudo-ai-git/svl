@@ -50,7 +50,10 @@ examples/               # Example SVL programs
 
 1. `python -m svl.spike_s9_bpsw` — BPSW all primes pass
 2. `python -m svl.spike_s10_self_verify` — 3-stage bootstrap bit-identical + mutations detected
-3. `python -m svl.spike_runner` — no spike regressions (48/50, H36/H37 unimplemented)
+3. `python -m svl.spike_runner` — no spike regressions (48/50, H36/H37 unimplemented). Note the runner
+   **exits non-zero (2)** when any spike fails — that is deliberate: a gate that cannot fail is not a gate.
+   On a clean checkout expect `Total: 50 | Passed: 48 | Failed: 2` and exit code **2**; the two failures are
+   the self-declared unimplemented stubs, not a broken environment.
 4. Golden refs: `python -c "from svl.golden_refs import verify_all_golden_refs; print(verify_all_golden_refs())"`
 5. `python -m svl.spike_s17_wasm_determinism` — **assembles** the compiler's output with the wasmtime
    module. A skipped/absent runtime reports FAIL, not success, and a text-level "determinism" check cannot
