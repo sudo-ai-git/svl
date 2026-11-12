@@ -1,7 +1,7 @@
 # SVL — Self-Verifying Language
 ## Pitch Deck · v1.0 · 2026-11-11
 
-> *Every fact marked ✅ in this deck is execution-verified on the current codebase (48/50 spike suite, golden refs, bootstrap determinism — all re-run this session). Anything not yet measured is labeled plainly.*
+> *Every fact marked ✅ in this deck is execution-verified on the current codebase (41/43 spike suite, golden refs, bootstrap determinism — all re-run this session). Anything not yet measured is labeled plainly.*
 
 ---
 
@@ -15,7 +15,7 @@ Three layers of proof run automatically on every compile:
 |-------|---------------|-----|
 | **L1 · Syntax** | The program is structurally intact — no corruption, no tampering, no accidental or malicious mutation | 231-gate checksums (SUM / LINEAR / PRODUCT mod 231) + AST guard |
 | **L2 · Types** | The program is type-sound under a dual-stream semantic + structural type system | Mod-5 buckets + Z/2 negation, 100% unique signatures |
-| **L3 · Theorem** | The program's hash is cryptographically anchored to a verified primality/monodromy theorem | SHA-256 + BPSW over primes {37, 73, 17}, optional SMT/Z3 |
+| **L3 · Theorem** | The program's hash is checked for primality/monodromy parity — **informational only, not a program proof** | SHA-256 + BPSW over primes {37, 73, 17}; the real prover is the opt-in Z3 SMT layer |
 
 **Result:** you get proofs as a build artifact, not as a religion. Rust gives you memory safety. SVL gives you *meaning* safety — and ships it to the browser, Node, wasmtime, or wasmer as WASM.
 
@@ -29,7 +29,7 @@ Three layers of proof run automatically on every compile:
 - **WASM-native languages** (AssemblyScript, Grain, C→WASM toolchains) have *no* verification story at all. Ship it, hope for the best.
 - **Package ecosystems** (npm, crates.io, PyPI) verify *identity*, not *content* — anyone can push a package that does something different from what its checksum says.
 
-**The gap:** nobody has a language where the verification pipeline is (a) automatic, (b) self-hosting, (c) shipped inside the artifact, and (d) cheap enough for every build.
+**The gap:** nobody has a language where the verification pipeline is (a) automatic, (b) shipped inside the artifact, and (c) cheap enough for every build.
 
 SVL closes exactly that gap.
 
@@ -41,21 +41,21 @@ SVL closes exactly that gap.
 
 - **L1 231-gate syntax checksums:** the full program is fingerprinted through three independent channels (SUM, LINEAR, PRODUCT mod 231). Joint signatures are **469/484 unique** on canonical corpora — a single-letter tamper breaks the fingerprint. ✅
 - **L2 Mod-5 dual-stream types:** every type maps to one of five buckets with a Z/2 negation involution (B0↔B4, B1↔B3, B2 fixed). The semantic stream + structural stream together give **100% unique signatures** (484/484) — no two distinct programs collide. ✅
-- **L3 BPSW monodromy theorem layer:** the program hash is reduced mod primes {37, 73, 17} and checked with Miller–Rabin + Lucas sequences; parity patterns encode a monodromy invariant. **No other language embeds a primality-theoretic proof in its compiler.** ✅
+- **L3 BPSW monodromy layer — demoted, honestly.** The hash is reduced mod {37, 73, 17} and checked with Miller–Rabin + Lucas, but the tested value is always below 73, so the layer is **constant-true** (0/60 programs fail it). It is reported as `bpsw_status="informational"`, is **not** part of `passed`, and is not evidence. The real prover is the Z3 SMT layer (tri-state: `proven` / `counterexample` / `unverified`). ✅
 
 **No other language does any of this automatically. In SVL it's the default path — not an opt-in tool.**
 
 ### 3.2 Self-hosting, deterministic, mutation-proof compiler ✅
 
-- The SVL compiler is **written in SVL** and bootstraps in **3 stages** to a bit-identical WASM artifact. ✅
+- ~~The SVL compiler is **written in SVL** and bootstraps in **3 stages** to a bit-identical WASM artifact.~~ **RETRACTED**: `svl/compiler_svl.svl` is a stub whose `main()` assigns constants and `assert true` — it compiles nothing. There is no self-hosted compiler. ✅
 - Compilation is **deterministic**: same source → same WASM bytes, every run, every machine. ✅ (verified `WASM determinism: True`)
 - **Mutation detection:** any mutation of the compiler/standard library flips the monodromy result — verified that mutations are *caught by comparison of (MR, Lucas) tuples per prime*, not merely pass/fail. ✅
 - **Golden references** against canonical texts (Psalm 119 Aleph, Genesis 1:1 — 2701 = 37×73) pass. ✅
 
 ### 3.3 Proof-carrying code (PCC) for WASM ✅
 
-- Verification proofs are **embedded as custom sections inside the .wasm file** (`PCCWasmGenerator` → `to_wasm_with_proofs()`).
-- The receiver can **re-verify the shipped artifact** against the source without the original toolchain: `verify_pcc_wasm(wasm_text, source)`.
+- Verification proofs are **embedded as a standard binary custom section inside the .wasm file** (`PCCWasmGenerator` → `to_wasm_bytes_with_proofs()`; the old WAT-text form is deprecated — wat2wasm has no custom-section syntax).
+- The receiver can **re-verify the shipped artifact** against the source without the original toolchain: `verify_pcc_wasm(bytes, source)` / `extract_proofs_from_wasm_bytes(bytes)`.
 - This is *authentic code signing*: you can prove not just "signed by X" but "this artifact still satisfies the source's verification layers."
 
 ### 3.4 Differential verification + semantic diff ✅
@@ -97,6 +97,20 @@ Compare: Lean has dependent types but no effects rows or WASM target. Rust has l
   WASM valtypes (`int`→`i32`, `float`→`f64`) and select `f64.*` vs `i32.*` for arithmetic
   and comparisons; un-annotated parameters and `let q = p` struct copies are typed by
   inference. ✅ execution-verified.
+- **Scope-aware alpha-renaming** — ON THE COMPILE PATH (`svl/scope.py`). Every `let` /
+  `for` / `catch` binding gets a unique name, so an inner binding can no longer overwrite
+  an outer one. ✅ execution-verified: `let x=1; if 1==1 then { let x=99 } else {}; return x`
+  returns **1**, not 99.
+- **Array `for-in`** — ON THE COMPILE PATH. `for x in <array>` scans the `[len, e0..]`
+  layout directly instead of the (broken) iterator protocol. ✅ returns 6 for `[1,2,3]`.
+- **Short-circuit `&&` / `||`** — ON THE COMPILE PATH, and the interval analyser is
+  short-circuit-aware so it no longer reports a false division-by-zero. ✅ execution-verified.
+- **`memory.grow` + heap reset** — ON THE COMPILE PATH. The allocator grows linear memory
+  and `$heap_reset` runs at the entry point, so an allocating program is re-runnable in one
+  Store instead of trapping past a fixed 1 MiB. ✅ execution-verified.
+- **`try` / `catch` / `throw`** — ON THE COMPILE PATH, via a per-try error flag (WASM MVP
+  has no exceptions). ✅ throw lands in the catch; a normal exit skips it.
+- **`print` type dispatch** and **import linking** — ON THE COMPILE PATH.
 - **SIMD, escape analysis, WASM GC, PGO, LTO, hot reloading, RL pass selection** —
   ❌ **removed** (2026-11-12). They were standalone libraries the compiler never called;
   several were stubs that emitted invalid WAT while their spikes passed on text checks.
@@ -104,14 +118,15 @@ Compare: Lean has dependent types but no effects rows or WASM target. Rust has l
   Detail: KB §13.3.
 - **AOT via Cranelift** — stub; no production path.
 
-**The honest sentence:** SVL ships one execution-verified compiler optimization (TCO)
-plus type-directed lowering, and says so.
+**The honest sentence:** SVL ships the lowerings above, each execution-verified, and says so.
 
 ### 3.7 A complete tooling ecosystem around a verified core ✅
 
 | Tool | What it does |
 |---|---|
-| **LSP server** w/ tree-sitter grammar + semantic highlighting | IDE-grade editing |
+| **`svlc` CLI** (`build` / `run` / `check` / `corpus`) | installable entry point (`pyproject.toml`) — ✅ `pip install -e .` then `svlc run <file>` |
+| **LSP server** w/ tree-sitter grammar + semantic highlighting | IDE-grade editing — ✅ boots and registers all handlers (2026-11-12) |
+| **REPL** | evaluates a block and prints the result — ✅ (2026-11-12) |
 | **Interactive theorem prover** (tactics: intro, apply, rewrite, induction…) | Proofs as a REPL, not a research project |
 | **Time-travel debugger** + deterministic replay | Step backward, `find_bug(predicate)` |
 | **Component-model FFI** + WIT generation | C/Rust interop with generated bindings |
@@ -124,6 +139,7 @@ plus type-directed lowering, and says so.
 | **Verified Raft consensus** | leader election, log replication, partition recovery — as a *language library* with property verifiers ✅ |
 
 **No language VM ships this toolbox. SVL's is attached to a proof-producing compiler.**
+Known gaps, plainly: REPL state does not persist across blocks; non-array iterators still error.
 
 ---
 

@@ -31,17 +31,20 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 |-------|------|------------|---------|
 | **L1** | Syntax | 231-Gate Checksums | Structural integrity via SUM/LINEAR/PRODUCT mod 231 |
 | **L2** | Types | Mod-5 Dual-Stream | Mod-5 buckets + Z/2 negation + structural checksums |
-| **L3** | Theorem | BPSW Monodromy | Cryptographic verification via SHA256 + BPSW on primes {37,73,17} |
+| **L3** | Theorem | BPSW Monodromy — **informational only** | hash-primality parity via SHA256 + BPSW on primes {37,73,17}; constant-true (0/60 programs fail it), **not** part of `passed` |
+| **L3+** | SMT (opt-in) | Z3 theorem layer | the real prover: tri-state `proven` / `counterexample` / `unverified` |
 
 ### Key Properties
 - **22 tokens** mapped to Hebrew alphabet (א-ת)
 - **Deterministic compilation** - bit-identical WASM output across runs
-- **Self-hosting** - compiler written in SVL, bootstraps in 3 stages
-- **Probabilistic theorem layer** - Genesis 1:1 (2701 = 37×73) passes by mathematical coincidence
+- **Real prover** - the interval analyser proves out-of-bounds / division-by-zero and
+  refuses them; the Z3 SMT layer discharges every `assert` (opt-in)
+- **No self-hosting** - `svl/compiler_svl.svl` is a stub; the claim is retracted (2026-11-12)
 
 ### Target Platform
 - **WASM (WebAssembly)** - runs in browsers, Node.js, wasmtime, wasmer
-- **Linear memory model** - bump allocator, manual memory management
+- **Linear memory model** - bump allocator with `memory.grow` and a heap reset at the entry
+  point, so allocating programs are re-runnable
 - **Host ABI** - `env.print`, `env.malloc`, `env.await` imports
 
 ---
@@ -298,6 +301,10 @@ svl> save <file>             # Save buffer
 - **Line-by-line**: After each complete statement
 - **Block**: On blank line (executes block)
 - **Full**: `verify` command runs all 3 layers
+
+**Executes (2026-11-12):** the buffer is wrapped in `module repl { func main() ... }` before
+verification and then compiled and run, so a block prints its result. Known gap: definitions
+do not persist across blocks (each block is independent).
 
 **Example Session**:
 ```
@@ -702,7 +709,7 @@ module svl_compiler {
 
 ## 11. Extended Syntax (H2–H16)
 
-> **Status note**: All H2–H16 extensions are **parser-verified** (48/50 spike suite, 2026-11-11). Call them "syntax-level" — the type-checker/compiler backends for most are partial. Where a dedicated engine exists it is listed; where not, treat the feature as parse-only until the engine lands.
+> **Status note**: All H2–H16 extensions are **parser-verified** (41/43 spike suite, 2026-11-12). Call them "syntax-level" — the type-checker/compiler backends for most are partial. Where a dedicated engine exists it is listed; where not, treat the feature as parse-only until the engine lands.
 
 ### 11.1 Effect System with Row Polymorphism (H2)
 
@@ -1071,6 +1078,18 @@ behaviour, so a program the checker cannot classify compiles exactly as before.
 does, is deleted rather than relabelled. Do not re-add one without wiring it into
 `compile_file_to_wasm` and verifying the effect by assembling and **running** the output.
 
+### 13.5 Lowerings added 2026-11-12 (panel-driven fixes)
+
+| Lowering | Where | Effect |
+|---|---|---|
+| Scope-aware alpha-renaming | `svl/scope.py`, called from `compile_to_wasm` | every `let`/`for`/`catch` binding gets a unique local; an inner binding no longer overwrites an outer one |
+| Array `for-in` | `_compile_for_stmt` | scans the `[len, e0..]` layout directly instead of the broken iterator protocol |
+| Short-circuit `&&`/`||` | `_compile_binary_expr` | the right operand runs only when the left does not decide the result; the interval AI is short-circuit-aware |
+| `memory.grow` + heap reset | `_generate_wasm_module` | allocating programs are re-runnable in one Store instead of trapping past a fixed 1 MiB |
+| `try`/`catch`/`throw` | `_compile_try_stmt` / `_compile_throw_stmt` | error-flag lowering (WASM MVP has no exceptions) |
+| `print` type dispatch | `_compile_call_expr` | `int`/`bool` → `print_int`; a string expression → `(ptr, len)` |
+| Import linking | `compile_file_to_wasm(base_dir=...)` | resolves and links imported files; an inline `import` is rejected |
+
 ---
 
 ## 14. Build & Tooling Ecosystem (H33–H35, H41–H48)
@@ -1079,6 +1098,9 @@ does, is deleted rather than relabelled. Do not re-add one without wiring it int
 
 - `svl/tree_sitter_grammar.py`: `save_grammar_to_file()` writes `svl_grammar.json`; `generate_highlight_queries()` writes highlight queries. Works alongside the hand-written `lsp_server.py`.
 - Regenerate after grammar changes: `python3 -m svl.tree_sitter_grammar` (exposes `save_grammar_to_file`).
+- **Boot fix (2026-11-12):** handlers must be registered as the **unbound** functions
+  (`server.feature(X)(SVLLanguageServer.method)`). Passing `server.method` gave
+  `AttributeError: 'method' object has no attribute 'reg_name'` and the server died on boot.
 
 ### 14.2 Interactive Theorem Proving / Tactics (H34)
 
@@ -1318,4 +1340,4 @@ as                  # Cast (gradual typing, H5)
 
 ---
 
-*SVL Knowledge Base v0.2.0 | Generated from BUILD_PLAN_2_SELF_VERIFYING_LANGUAGE.md | Spike suite 48/50 PASS (2026-11-11)*
+*SVL Knowledge Base v0.2.1 | Generated from BUILD_PLAN_2_SELF_VERIFYING_LANGUAGE.md | Spike suite 41/43 PASS (2026-11-12)*
