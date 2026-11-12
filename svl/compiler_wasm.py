@@ -760,7 +760,20 @@ class WasmCompiler:
         for arg in expr.arguments:
             self._compile_expr(arg)
         func = self.state.current_function
-        func.body.append(f'call ${expr.callee}')
+        func.body.append(f'call {self._resolve_callee(expr.callee)}')
+
+    def _resolve_callee(self, callee: str) -> str:
+        """
+        A CallExpr carries the bare name (`fib`) while definitions are keyed by the
+        module-qualified name (`svl_payload$fib`) — emit the qualified one, and fall back
+        to the bare name for host imports (print / malloc / iterator_next / await).
+        """
+        if callee in self.state.functions:
+            return f'${callee}'
+        for name in self.state.sorted_functions:
+            if name == callee or name.endswith(f'${callee}'):
+                return f'${name}'
+        return f'${callee}'
     
     def _compile_match_expr(self, expr: MatchExpr):
         # Simplified: compile as if-else chain
@@ -899,40 +912,24 @@ class WasmCompiler:
         
         lines.append('(module')
         
-        # Memory
-        lines.append(f'  (memory (export "memory") {self.state.memory_pages})')
+        # Module fields must appear in the canonical WAT order:
+        #   type, import, func, memory, global, export, data
+        # The memory and data blocks are emitted further down, after the imports and the
+        # function bodies, because a memory declared before an import makes the module
+        # invalid ("import after memory").
         
-        # Data section for string literals
-        if self.state.string_data:
-            lines.append('  (data')
-            for string_val, offset in self.state.string_data:
-                # Length-prefixed UTF-8
-                encoded = string_val.encode('utf-8')
-                length = len(encoded)
-                # Write length as 4-byte little-endian
-                length_bytes = length.to_bytes(4, 'little')
-                data = length_bytes + encoded
-                hex_data = ' '.join(f'{b:02x}' for b in data)
-                lines.append(f'    (i32.const {offset})')
-                lines.append(f'    "{hex_data}"')
-            lines.append('  )')
-        
-        # Function types
+        # Function types — one declaration per distinct signature (a second `(type $tN ...)`
+        # with the same identifier is rejected as a duplicate).
         type_map = {}
         for func_name in self.state.sorted_functions:
             func = self.state.functions[func_name]
             type_sig = self._func_type_to_string(func.func_type)
-            if type_sig not in type_map:
-                type_map[type_sig] = len(type_map)
+            if type_sig in type_map:
+                continue
+            type_map[type_sig] = len(type_map)
             lines.append(f'  (type $t{type_map[type_sig]} (func {type_sig}))')
         
-        # Imports
-        lines.append('  (import "env" "print" (func $print (param i32 i32)))')
-        lines.append('  (import "env" "malloc" (func $malloc (param i32) (result i32)))')
-        lines.append('  (import "env" "iterator_next" (func $iterator_next (param i32) (result i32)))')
-        lines.append('  (import "env" "await" (func $await (param i32) (result i32)))')
-        
-        # GC Struct types (H25)
+        # GC Struct types (H25) — `type` fields come before imports.
         for struct_name in self.state.sorted_structs:
             layout = self.state.struct_layouts.get(struct_name, {})
             if layout:
@@ -942,14 +939,23 @@ class WasmCompiler:
                 if fields:
                     lines.append(f"  (type ${struct_name} (struct\n{chr(10).join(fields)}\n))")
         
-        # Globals
-        for name, global_def in self.state.globals.items():
-            lines.append(f'  (global ${name} ({global_def.val_type.value}) ({global_def.mutability.value} {global_def.init_expr}))')
+        # Imports
+        lines.append('  (import "env" "print" (func $print (param i32 i32)))')
+        lines.append('  (import "env" "malloc" (func $malloc (param i32) (result i32)))')
+        lines.append('  (import "env" "iterator_next" (func $iterator_next (param i32) (result i32)))')
+        lines.append('  (import "env" "await" (func $await (param i32) (result i32)))')
         
-        # Functions
+        # Functions (function definitions come before memory in the canonical field order)
         for func_name in self.state.sorted_functions:
             func = self.state.functions[func_name]
             lines.append(self._generate_wasm_function(func, type_map))
+        
+        # Memory (declared after imports and functions; exported separately below)
+        lines.append(f'  (memory {self.state.memory_pages})')
+        
+        # Globals
+        for name, global_def in self.state.globals.items():
+            lines.append(f'  (global ${name} ({global_def.val_type.value}) ({global_def.mutability.value} {global_def.init_expr}))')
         
         # Exports
         for func_name in self.state.sorted_functions:
@@ -960,6 +966,15 @@ class WasmCompiler:
         
         # Memory export
         lines.append('  (export "memory" (memory 0))')
+        
+        # Data section for string literals: ONE `(data ...)` per literal — a data segment
+        # carries exactly one offset+bytes pair, so stacking pairs inside a single
+        # `(data ...)` emits invalid WAT as soon as a program has two string literals.
+        for string_val, offset in self.state.string_data:
+            encoded = string_val.encode('utf-8')
+            length_bytes = len(encoded).to_bytes(4, 'little')
+            hex_data = ' '.join(f'{b:02x}' for b in (length_bytes + encoded))
+            lines.append(f'  (data (i32.const {offset}) "{hex_data}")')
         
         lines.append(')')
         return '\n'.join(lines)
@@ -976,18 +991,32 @@ class WasmCompiler:
         type_sig = self._func_type_to_string(func.func_type)
         type_idx = type_map[type_sig]
         
-        lines.append(f'  (func ${func.name} (type $t{type_idx})')
+        # Named parameters must be declared inline: function bodies address them as
+        # `local.get $name`, which only resolves if the header carries `(param $name <t>)`.
+        # An inline signature must also repeat the results, otherwise the function is
+        # declared with no results and no longer matches its type reference.
+        param_sig = ' '.join(f'(param ${n} {t.value})' for n, t in func.params)
+        res_sig = ' '.join(t.value for t in func.func_type.results)
+        header = f'  (func ${func.name} (type $t{type_idx})'
+        if param_sig:
+            header += f' {param_sig}'
+        if res_sig:
+            header += f' (result {res_sig})'
+        lines.append(header)
         
-        # Locals
+        # Locals — one declaration per NAME.
+        # `let x = ...` appends a fresh entry per occurrence, but every access is emitted as
+        # `local.get/set $x`, so grouping duplicates into `(local $x $x i32)` emits invalid
+        # WAT (duplicate identifier). Deduplicate by name, keeping the first type seen.
         if func.locals:
-            local_decls = {}
+            param_names = {n for n, _t in func.params}
+            seen_locals = {}
             for name, val_type in func.locals:
-                if val_type not in local_decls:
-                    local_decls[val_type] = []
-                local_decls[val_type].append(name)
-            
-            for val_type, names in local_decls.items():
-                lines.append(f'    (local {" ".join(f"${n}" for n in names)} {val_type.value})')
+                if name in param_names:
+                    continue                     # a param and a local cannot share a name
+                seen_locals.setdefault(name, val_type)
+            for name, val_type in seen_locals.items():
+                lines.append(f'    (local ${name} {val_type.value})')
         
         # Body
         for instr in func.body:
