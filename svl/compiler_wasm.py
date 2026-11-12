@@ -1077,12 +1077,24 @@ class WasmCompiler:
                 if fields:
                     lines.append(f"  (type ${struct_name} (struct\n{chr(10).join(fields)}\n))")
         
-        # Imports
-        lines.append('  (import "env" "print" (func $print (param i32 i32)))')
-        lines.append('  (import "env" "print_int" (func $print_int (param i32)))')
-        lines.append('  (import "env" "malloc" (func $malloc (param i32) (result i32)))')
-        lines.append('  (import "env" "iterator_next" (func $iterator_next (param i32) (result i32)))')
-        lines.append('  (import "env" "await" (func $await (param i32) (result i32)))')
+        # Imports — emit ONLY the host functions the module actually calls. An unused
+        # import is still an import: the host must supply it or instantiation fails, so
+        # adding one unconditionally breaks every existing host.
+        host_sigs = {
+            'print': '(func $print (param i32 i32))',
+            'print_int': '(func $print_int (param i32))',
+            'malloc': '(func $malloc (param i32) (result i32))',
+            'iterator_next': '(func $iterator_next (param i32) (result i32))',
+            'await': '(func $await (param i32) (result i32))',
+        }
+        called_hosts = set()
+        for func_name in self.state.sorted_functions:
+            for instr in self.state.functions[func_name].body:
+                if instr.startswith('call $'):
+                    called_hosts.add(instr[len('call $'):])
+        for host_name, host_sig in host_sigs.items():
+            if host_name in called_hosts:
+                lines.append(f'  (import "env" "{host_name}" {host_sig})')
         
         # Functions (function definitions come before memory in the canonical field order)
         for func_name in self.state.sorted_functions:
