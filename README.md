@@ -128,7 +128,7 @@ module prog {
   **and runs** every construct; the 32-row probe suite is **29 PASS / 0 FAIL / 3 INFO**
   (`svl-rating/probes.py`).
 - **Command line** — `pip install -e .` then `svlc build|run|check|corpus` (`svl/cli.py`,
-  console script in `pyproject.toml`).
+  console script in `pyproject.toml`). First tagged release: **`v0.1.0`**.
 - ~~**Self-hosting compiler** — bootstraps in 3 stages~~ **RETRACTED**: `svl/compiler_svl.svl` is a
   540-byte stub whose `main()` assigns integer constants and `assert true` — it compiles nothing. There
   is no self-hosted compiler.
