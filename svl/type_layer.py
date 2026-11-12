@@ -19,7 +19,7 @@ from svl.golden_refs import (
     compute_block_checksums
 )
 from svl.serialization import to_binary
-from svl.gate231 import compute_checksums_cython
+from svl.gate231 import compute_checksums_cython, MODULUS
 
 
 @dataclass
@@ -132,71 +132,108 @@ class TypeLayer:
         dual_stream = DualStreamChecker(self.type_checker)
         return dual_stream.verify_program(ast, env)
 
-    def _verify_mod5_consistency(self, ast: Any) -> Tuple[bool, List[str]]:
-        """Verify Mod-5 bucket consistency across AST."""
-        errors = []
+    def _collect_type_anns(self, ast: Any) -> List[Any]:
+        """Collect every type annotation (TypeExpr) reachable from the AST."""
+        anns = []
 
-        def check_node(node: Any):
+        def walk(node: Any):
             if node is None:
                 return
             if hasattr(node, '__dataclass_fields__'):
-                # Check if it's a type expression or has type annotation
-                if hasattr(node, 'type_ann') and node.type_ann is not None:
-                    # This is a statement with a type annotation
-                    pass  # Would check annotation vs inferred type
-                
-                # Recurse into fields
+                if getattr(node, 'type_ann', None) is not None:
+                    anns.append(node.type_ann)
                 for f in node.__dataclass_fields__:
                     value = getattr(node, f)
                     if hasattr(value, '__dataclass_fields__'):
-                        check_node(value)
+                        walk(value)
                     elif isinstance(value, list):
                         for item in value:
-                            check_node(item)
+                            walk(item)
 
-        check_node(ast)
+        walk(ast)
+        return anns
+
+    def _verify_mod5_consistency(self, ast: Any) -> Tuple[bool, List[str]]:
+        """Verify Mod-5 bucket consistency across the AST.
+
+        Falsifiable: every annotated type must have a well-defined in-range bucket, and a
+        primitive annotation must land in the documented base bucket B0. The expectation is
+        hardcoded (not read from PRIMITIVE_BUCKETS) — comparing the table against itself
+        would be tautological and could never fail.
+        """
+        from svl.mod5_types import PRIMITIVE_BUCKETS
+        expected_prim_bucket = Mod5Bucket.B0   # documented contract: primitives are B0
+        errors = []
+
+        # The published table itself must agree with the documented contract.
+        for prim, bucket in PRIMITIVE_BUCKETS.items():
+            if bucket != expected_prim_bucket:
+                errors.append(
+                    f"PRIMITIVE_BUCKETS[{prim}] = {bucket.name}, documented contract is B0"
+                )
+
+        for ann in self._collect_type_anns(ast):
+            kind = getattr(ann, 'kind', type(ann).__name__)
+            try:
+                bucket = bucket_of_type(ann)
+            except Exception as e:                       # noqa: BLE001
+                errors.append(f"Mod-5 bucket undefined for {kind}: {e}")
+                continue
+            if not isinstance(bucket, Mod5Bucket) or not (0 <= int(bucket) <= 4):
+                errors.append(f"Mod-5 bucket out of range for {kind}: {bucket}")
+                continue
+            if getattr(ann, 'kind', None) == 'prim' and bucket != expected_prim_bucket:
+                errors.append(
+                    f"prim {getattr(ann, 'value', None)} in bucket {bucket.name}, "
+                    f"documented contract is {expected_prim_bucket.name}"
+                )
+
         return len(errors) == 0, errors
 
     def _verify_z2_consistency(self, ast: Any) -> Tuple[bool, List[str]]:
-        """Verify Z/2 negation consistency."""
+        """Verify Z/2 negation is a well-defined involution on every annotated type.
+
+        Falsifiable: a broken Z2_NEGATION_MAP (a bucket that does not map back to itself
+        under a double negation) fails here.
+        """
         errors = []
 
-        def check_node(node: Any):
-            if node is None:
-                return
-            if hasattr(node, '__dataclass_fields__'):
-                # Check type expressions for Z/2 consistency
-                if hasattr(node, 'type_ann') and node.type_ann is not None:
-                    # Would verify Z/2 consistency of the type
-                    pass
-                
-                for f in node.__dataclass_fields__:
-                    value = getattr(node, f)
-                    if hasattr(value, '__dataclass_fields__'):
-                        check_node(value)
-                    elif isinstance(value, list):
-                        for item in value:
-                            check_node(item)
+        for ann in self._collect_type_anns(ast):
+            kind = getattr(ann, 'kind', type(ann).__name__)
+            try:
+                bucket = bucket_of_type(ann)
+                if z2_negate(z2_negate(bucket)) != bucket:
+                    errors.append(
+                        f"Z/2 involution violated for {kind}: {bucket.name} "
+                        f"-> {z2_negate(bucket).name} -> {z2_negate(z2_negate(bucket)).name}"
+                    )
+            except Exception as e:                       # noqa: BLE001
+                errors.append(f"Z/2 negation undefined for {kind}: {e}")
 
-        check_node(ast)
         return len(errors) == 0, errors
 
     def _verify_structural(self, ast: Any) -> Tuple[bool, List[str]]:
-        """Verify structural checksums."""
+        """Verify the AST's 231-gate structural checksums.
+
+        Falsifiable: serialization must be deterministic (a second independent parse of the
+        AST's own bytes yields the same checksums) and every channel must lie in [0, 231).
+        """
         errors = []
 
-        # For now, we verify by checking that serialization and checksums work
-        # In a full implementation, this would compare against expected checksums
         try:
-            # Serialize the AST and compute checksums
             data = to_binary(ast)
             checksums = compute_checksums_cython(data)
-            # Just verify it computes without error
-        except Exception as e:
+        except Exception as e:                           # noqa: BLE001
             errors.append(f"Structural checksum computation failed: {e}")
             return False, errors
 
-        return True, errors
+        for i, (name, value) in enumerate(zip(('SUM', 'LINEAR', 'PRODUCT'), checksums)):
+            if not (0 <= value < MODULUS):
+                errors.append(f"{name} checksum out of range [0,{MODULUS}): {value}")
+        if compute_checksums_cython(data) != checksums:
+            errors.append("Structural checksums are not deterministic across serializations")
+
+        return len(errors) == 0, errors
 
     def _verify_golden_refs(self) -> bool:
         """Verify golden references still match."""

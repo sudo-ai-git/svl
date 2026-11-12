@@ -1199,7 +1199,7 @@ class Parser:
         )
 
     def parse_if_stmt(self) -> IfStmt:
-        condition = self.parse_expr()
+        condition = self.parse_expr_no_struct_lit()
         self.expect(TokenType.THEN)
         then_branch = self.parse_block()
         else_branch = None
@@ -1214,7 +1214,7 @@ class Parser:
         )
 
     def parse_while_stmt(self) -> WhileStmt:
-        condition = self.parse_expr()
+        condition = self.parse_expr_no_struct_lit()
         body = self.parse_block()
         return WhileStmt(
             type=NodeType.WHILE_STMT,
@@ -1575,8 +1575,12 @@ class Parser:
 
         # Identifiers / Hebrew tokens
         # Struct literal check must come BEFORE generic IDENT match
-        # because struct literal starts with IDENT followed by LBRACE
-        if self.current and self.current.type == TokenType.IDENT and self.peek() and self.peek().type == TokenType.LBRACE:
+        # because struct literal starts with IDENT followed by LBRACE.
+        # It must also be suppressed inside contexts that disable it (loop/if conditions,
+        # for-loop iterables) — otherwise `while i < n {` steals `n {` as a struct literal.
+        if (getattr(self, '_allow_struct_lit', True)
+                and self.current and self.current.type == TokenType.IDENT
+                and self.peek() and self.peek().type == TokenType.LBRACE):
             return self.parse_struct_lit()
 
         if self.match(TokenType.IDENT):

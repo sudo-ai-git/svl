@@ -128,22 +128,28 @@ class SemanticStream:
         return True
 
     def _verify_z2_consistency(self, t: Any) -> bool:
-        """Verify Z/2 negation consistency."""
+        """Verify Z/2 negation consistency.
+
+        Falsifiable: the negation must be an involution (checked) AND must preserve the
+        variance class (covariant B1<->B3, invariant B0<->B4, B2 fixed). If VARIANCE_MAP
+        disagrees with Z2_NEGATION_MAP, this returns False.
+        """
         from svl.mod5_types import z2_negate, Mod5Bucket, get_variance
 
         bucket = bucket_of_type(t)
         negated = z2_negate(bucket)
-        double_negated = z2_negate(negated)
 
-        # Involution property
-        if double_negated != bucket:
+        # Involution property: a double negation must return the original bucket.
+        if z2_negate(negated) != bucket:
             return False
 
-        # Check variance consistency
+        # Variance must be preserved across negation (B0<->B4 invariant, B1<->B3
+        # covariant, B2 contravariant/fixed).
         orig_variance = get_variance(bucket)
         neg_variance = get_variance(negated)
+        if orig_variance != neg_variance:
+            return False
 
-        # B0<->B4 (invariant<->invariant), B1<->B3 (covariant<->covariant), B2 fixed
         expected_variance_map = {
             Mod5Bucket.B0: 'invariant',
             Mod5Bucket.B4: 'invariant',
@@ -347,15 +353,15 @@ class DualStreamChecker:
         return sem_result, struct_result
 
     def _check_agreement(self, semantic: TypeStreamResult, structural: TypeStreamResult) -> bool:
-        """Check cross-stream agreement."""
-        # Both streams must agree on pass/fail
+        """Check cross-stream agreement.
+
+        Honest scope: the semantic stream yields a Mod-5 bucket and the structural stream
+        yields mod-(37,73,11) checksums, with no defined bridge between them, so agreement
+        can only be a pass/pass comparison. It IS falsifiable — a stream that fails while the
+        other passes returns False — but it is not a stronger invariant than that.
+        """
         if semantic.passed != structural.passed:
             return False
-
-        # If both passed, check that semantic bucket is consistent with structural checksum
-        if semantic.passed and structural.passed:
-            # Both streams agree on the type structure
-            pass
 
         return True
 

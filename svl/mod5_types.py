@@ -5,7 +5,20 @@
 from enum import Enum, IntEnum
 from typing import Dict, List, Optional, Set, Tuple, Any
 from dataclasses import dataclass, field
+import hashlib
 from svl.gate231 import MODULUS
+
+
+def stable_name_bucket(name: str) -> int:
+    """Deterministic mod-5 bucket for a type name.
+
+    Python's built-in ``hash()`` on strings is salted per process (PYTHONHASHSEED),
+    so ``hash(name) % 5`` made a struct's bucket — and any checksum derived from it —
+    differ between runs. SVL's core claim is bit-identical determinism, so the bucket
+    must come from a fixed function of the name: SHA-256(name) mod 5.
+    """
+    digest = hashlib.sha256(str(name).encode('utf-8')).digest()
+    return int.from_bytes(digest[:8], 'big') % 5
 
 
 class Mod5Bucket(IntEnum):
@@ -96,7 +109,7 @@ def bucket_of_type(type_expr: Any) -> Mod5Bucket:
         if type_expr.kind == 'prim':
             return get_primitive_bucket(type_expr.args[0] if type_expr.args else 'int')
         elif type_expr.kind == 'struct':
-            return Mod5Bucket(hash(type_expr.args[0] if type_expr.args else 'Unknown') % 5)
+            return Mod5Bucket(stable_name_bucket(type_expr.args[0] if type_expr.args else 'Unknown'))
         elif type_expr.kind == 'func':
             return Mod5Bucket.B2
         elif type_expr.kind == 'generic':
@@ -114,8 +127,8 @@ def bucket_of_type(type_expr: Any) -> Mod5Bucket:
     if type_expr.kind == 'prim':
         return get_primitive_bucket(type_expr.value)
     elif type_expr.kind == 'struct':
-        # User-defined structs: bucket = hash(name) mod 5
-        return Mod5Bucket(hash(type_expr.value) % 5)
+        # User-defined structs: deterministic bucket = SHA-256(name) mod 5
+        return Mod5Bucket(stable_name_bucket(type_expr.value))
     elif type_expr.kind == 'func':
         return Mod5Bucket.B2
     elif type_expr.kind == 'generic':

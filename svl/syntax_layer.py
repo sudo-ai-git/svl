@@ -62,119 +62,28 @@ class SyntaxVerifier:
             violations = self.ast_guard.check(ast)
             violation_messages = [str(v) for v in violations]
 
-            # 4. 231-gate checksum verification
+            # 4. 231-gate checksum verification.
+            #    `checksums_match` compares the gate's independent implementations on the
+            #    SAME bytes: it is a real (falsifiable) check — a numpy overflow or a bug in
+            #    one implementation fails here. The old code compared a program's checksums
+            #    against themselves, so the gate could never fail.
             data = to_binary(ast)
-            if self.config.use_cython:
-                checksums = compute_block_checksums(data, self.config.block_size)
-            else:
-                from svl.gate231 import compute_checksums
-                checksums = compute_checksums(data)
+            bs = self.config.block_size
+            block = data[:bs] if len(data) >= bs else data + b'\x00' * (bs - len(data))
+            checksums = compute_block_checksums(data, bs)
+            checksums_match = (compute_checksums_cython(block) == compute_checksums(block))
 
-            # Expected checksums are the checksums of the program itself
+            # `meta_match` requires the AST to serialize bit-identically after an
+            # independent re-parse of the same source. This is the guard that catches a
+            # process-salted value (e.g. Python `hash()`) leaking into the AST/serialization.
+            try:
+                reparse_data = to_binary(parse(tokenize(source)))
+                meta_match = (reparse_data == data)
+            except Exception:
+                meta_match = False
+
             expected_checksums = checksums
             expected_meta = (checksums[0] ^ checksums[1] ^ checksums[2]) % 231
-
-            checksums_match = True  # Always true since we compare against self
-            meta_match = True  # Always true since we compute from same data
-
-            # Find viable start
-            viable_start = None
-            if expected_checksums is not None:
-                viable_start = find_viable_start(
-                    bytes(data), expected_checksums, expected_meta
-                )
-
-            # 5. Golden reference validation
-            golden_ref_match = True
-            if self.config.verify_golden_refs:
-                from svl.golden_refs import verify_all_golden_refs
-                ref_results = verify_all_golden_refs()
-                golden_ref_match = all(ref_results.values())
-
-            # 6. Mutation testing
-            corruption_detected = False
-            if self.config.run_mutation_tests:
-                from svl.mutation_testing import run_spike_s5
-                if expected_checksums is not None:
-                    # Create test data with embedded reference
-                    from svl.golden_refs import get_golden_ref
-                    ref = get_golden_ref('psalm119_aleph')
-                    test_data = bytearray(b'\x00' * 1024)
-                    ref_tokens = tokenize(ref.source)
-                    ref_ast = parse(ref_tokens)
-                    # Use module-level to_binary import
-                    ref_data = to_binary(ref_ast)
-                    block_size = self.config.block_size
-                    ref_bytes = ref_data[:block_size]
-                    if len(ref_bytes) < block_size:
-                        ref_bytes = ref_bytes + b'\x00' * (block_size - len(ref_bytes))
-                    test_data[100:100 + block_size] = ref_bytes
-
-                    # Run mutation tests
-                    try:
-                        mutation_success = run_spike_s5(
-                            bytes(test_data), expected_checksums, expected_meta
-                        )
-                        if not mutation_success:
-                            corruption_detected = True
-                    except Exception as e:
-                        pass  # Mutation test failed
-
-            return VerifyResult(
-                passed=checksums_match and meta_match and len(violations) == 0,
-                viable_start=viable_start,
-                checksums_match=checksums_match,
-                meta_match=meta_match,
-                ast_guard_violations=violation_messages,
-                golden_ref_match=golden_ref_match,
-                corruption_detected=corruption_detected
-            )
-
-        except ASTGuardViolation as e:
-            return VerifyResult(
-                passed=False,
-                viable_start=None,
-                checksums_match=False,
-                meta_match=False,
-                ast_guard_violations=[str(e)],
-                error_message=str(e)
-            )
-        except Exception as e:
-            return VerifyResult(
-                passed=False,
-                viable_start=None,
-                checksums_match=False,
-                meta_match=False,
-                error_message=f"Verification error: {e}"
-            )
-
-    def _verify_syntax_core(self, source: str) -> VerifyResult:
-        """Core syntax verification without type checking."""
-        try:
-            # 1. Lexical analysis
-            tokens = tokenize(source)
-
-            # 2. Parsing
-            ast = parse(tokens)
-
-            # 3. AST Guard
-            violations = self.ast_guard.check(ast)
-            violation_messages = [str(v) for v in violations]
-
-            # 4. 231-gate checksum verification
-            data = to_binary(ast)
-            if self.config.use_cython:
-                checksums = compute_block_checksums(data, self.config.block_size)
-            else:
-                from svl.gate231 import compute_checksums
-                checksums = compute_checksums(data)
-
-            # Expected checksums are the checksums of the program itself
-            expected_checksums = checksums
-            expected_meta = (checksums[0] ^ checksums[1] ^ checksums[2]) % 231
-
-            checksums_match = True  # Always true since we compare against self
-            meta_match = True  # Always true since we compute from same data
 
             # Find viable start
             viable_start = None
