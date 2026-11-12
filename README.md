@@ -22,11 +22,49 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 # Full spike suite (48/50 — the 2 failures are H36/H37, genuinely unimplemented)
 python -m svl.spike_runner
 
+# Write and RUN a program (compiles to WASM, executes in wasmtime, prints its output)
+python3 examples/run_example.py examples/bubble_sort.svl   # sorted=1 sum=28 cmps=15 swaps=8 odds=6
+python3 examples/run_example.py examples/sieve.svl         # pi(10)=4 pi(40)=12 pi(70)=19 pi(100)=25
+
 # REPL
 python -m svl.repl
 
 # Interactive LSP server
 python -m svl.lsp_server
+```
+
+A complete program (see `examples/`):
+
+```svl
+module prog {
+  struct Stats { comparisons: int  swaps: int }
+
+  func sort(a: int, n: int) type Stats {
+    let st: Stats = Stats{comparisons: 0, swaps: 0}
+    let i: int = 0
+    while i < n - 1 {
+      let j: int = 0
+      while j < n - 1 - i {
+        st.comparisons += 1
+        if a[j] > a[j + 1] then {
+          let t: int = a[j]
+          a[j] = a[j + 1]
+          a[j + 1] = t
+          st.swaps += 1
+        } else { }
+        j += 1
+      }
+      i += 1
+    }
+    return st
+  }
+
+  func main() type int {
+    let a: int = [5, 3, 9, 1, 7, 3]
+    sort(a, len(a))
+    return a[0] * 100 + len(a)
+  }
+}
 ```
 
 ## Features
@@ -35,10 +73,13 @@ python -m svl.lsp_server
 - **Deterministic compilation** — bit-identical WASM output across runs, with no `PYTHONHASHSEED`
   pinning required (every value that feeds a checksum, a serialised AST or a program hash is a fixed
   function of its input)
-- **A WASM backend that actually executes** — `while` (incl. nested), `for i in a..b`, `if`/`else`,
-  `if…then…else` *expressions*, top-level `const`/`var`, `assert`, `print`/`print_int`, `void` returns,
-  **recursion**, arithmetic (`+ - * / %`), **bitwise** (`& | ^ << >>`, unary `~`) and unary `-`/`!`. Measured
-  against a 27-construct matrix: 21 run correctly (`svl/compiler_wasm.py`).
+- **A WASM backend you can write programs in** — mutable variables (`x = v`, `x += v`), **arrays**
+  (literals, `a[i]` read/write with bounds checks, `len`, `zeros(n)`), **structs** (declaration, literals,
+  field read/write, pass to functions), **`match`** (`case <lit> => e`, `case _ => e`), `while` (incl.
+  nested), `for i in a..b`, `if`/`else`, `if…then…else` *expressions*, `const`/`var`, `assert`,
+  `print`/`print_int`, `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
+  unary `-`/`!`. Measured against a 38-construct matrix: **35 run correctly, 0 wrong answers**
+  (`svl/compiler_wasm.py`).
 - **Self-hosting compiler** — bootstraps in 3 stages
 - **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types
 - **Verification extensions** — SMT/Z3, incremental 231-gate checksums, proof-carrying code, abstract interpretation, differential verification, property-based testing

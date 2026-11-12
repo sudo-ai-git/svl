@@ -12,7 +12,7 @@ from svl.parser_rd import (
     ForStmt, ReturnStmt, AssertStmt, TryStmt, ExprStmt, ConstDecl, VarDecl,
     BinaryExpr, UnaryExpr, CallExpr, MatchExpr, AwaitExpr, LambdaExpr,
     StructLit, ArrayLit, Ident, Literal, FieldAccess, IndexExpr, TernaryExpr,
-    TypeExpr, Param, Field, NodeType
+    AssignExpr, TypeExpr, Param, Field, NodeType
 )
 from svl.serialization import to_binary
 from svl.simd_vectorization import SimdVectorizer, SimdType, LoopInfo
@@ -204,9 +204,10 @@ class CompilerState:
     functions: Dict[str, 'WasmFunction'] = field(default_factory=dict)
     globals: Dict[str, WasmGlobal] = field(default_factory=dict)
     struct_layouts: Dict[str, Dict[str, Tuple[int, WasmValType]]] = field(default_factory=dict)
+    struct_sizes: Dict[str, int] = field(default_factory=dict)
     string_literals: Dict[str, int] = field(default_factory=dict)
     next_string_offset: int = 0
-    memory_pages: int = 1  # 64KB pages
+    memory_pages: int = 1  # 64KB; the emitter grows this when a program needs a heap
     function_index: int = 0
     type_index: int = 0
     current_function: Optional['WasmFunction'] = None
@@ -260,10 +261,18 @@ class WasmCompiler:
         self._non_const_globals = set()
         # Names resolvable as `local.get $name` in the function being compiled.
         self._known_locals = None
+        self._uses_heap = False
+        self._local_struct_types = {}
+        self._temp_counter = 0
+        self._heap_base = 0
     
     def compile(self, program: Program) -> str:
         """Compile full SVL program to WASM text format."""
         self._non_const_globals = set()
+        # Set when the program needs heap allocation (arrays / struct literals).
+        self._uses_heap = False
+        # (function name, local name) -> struct type name, for field-offset resolution.
+        self._local_struct_types = {}
         # Phase 1: Collect all declarations
         self._collect_declarations(program)
         
@@ -358,6 +367,18 @@ class WasmCompiler:
         else:
             self.state.sorted_functions = list(self.state.functions.keys())
     
+    def _temp_local(self, func: 'WasmFunction', prefix: str) -> str:
+        """Declare a fresh i32 scratch local and return its name.
+
+        Memory codegen needs to hold an address (or an index) while other expressions are
+        evaluated. The old code used a `$tmp_ptr` local that was never declared, so every
+        array/struct construct produced `unknown local: failed to find name $tmp_ptr`.
+        """
+        name = f"__{prefix}{self._temp_counter}"
+        self._temp_counter += 1
+        func.locals.append((name, WasmValType.I32))
+        return name
+
     def _compute_struct_layouts(self, program: Program):
         """Compute memory layout for structs."""
         for module in program.modules:
@@ -373,6 +394,8 @@ class WasmCompiler:
                         layout[field.name] = (offset, field_type)
                         offset += 4 if field_type in (WasmValType.I32, WasmValType.F32) else 8
                     self.state.struct_layouts[item.name] = layout
+                    # Round the size up to 4 bytes so consecutive allocations stay aligned.
+                    self.state.struct_sizes[item.name] = (offset + 3) // 4 * 4
     
     def _compile_functions(self, program: Program):
         """Compile all function bodies."""
@@ -381,6 +404,13 @@ class WasmCompiler:
                 if isinstance(item, FuncDecl):
                     func_name = f"{module.name}${item.name}"
                     func = self.state.functions[func_name]
+                    # Record struct-typed params (layouts exist by now) so `p.field`
+                    # resolves inside the body.
+                    for p in item.params:
+                        if (p.type_ann is not None
+                                and getattr(p.type_ann, 'kind', None) == 'struct'
+                                and p.type_ann.value in self.state.struct_layouts):
+                            self._local_struct_types[(func_name, p.name)] = p.type_ann.value
                     self.state.current_function = func
                     self.state.local_counter = len(func.params)
                     self.state.label_counter = 0
@@ -470,6 +500,8 @@ class WasmCompiler:
 
     def _expr_yields_value(self, expr) -> bool:
         """True if evaluating `expr` leaves exactly one value (i32) on the stack."""
+        if isinstance(expr, AssignExpr):
+            return False          # assignments are statements: they leave nothing behind
         if isinstance(expr, CallExpr):
             return self._callee_yields_value(expr.callee)
         return True
@@ -496,6 +528,19 @@ class WasmCompiler:
         func = self.state.current_function
         func.locals.append((stmt.name, lower_type_to_wasm(stmt.type_ann) if stmt.type_ann else WasmValType.I32))
         func.body.append(f'local.set ${stmt.name}')
+        
+        # Track the struct type of this local so `p.field` can be resolved later. A named
+        # type in annotation position parses as kind='struct' for *any* identifier (including
+        # `int`), so only names that are declared structs count.
+        struct_name = None
+        if stmt.type_ann is not None and getattr(stmt.type_ann, 'kind', None) == 'struct':
+            cand = stmt.type_ann.value
+            if cand in self.state.struct_layouts:
+                struct_name = cand
+        if struct_name is None and isinstance(stmt.value, StructLit):
+            struct_name = stmt.value.name
+        if struct_name:
+            self._local_struct_types[(func.name, stmt.name)] = struct_name
     
     def _compile_if_stmt(self, stmt: IfStmt):
         """Compile if statement."""
@@ -806,18 +851,17 @@ class WasmCompiler:
         func.body.append('end')
     
     def _compile_try_stmt(self, stmt: TryStmt):
-        """Compile try-catch (using WASM exception handling proposal)."""
-        func = self.state.current_function
-        
-        # Try block
-        func.body.append('try')
-        self._compile_block(stmt.try_block)
-        
-        # Catch
-        func.body.append(f'catch {stmt.catch_var}')
-        self._compile_block(stmt.catch_block)
-        
-        func.body.append('end')
+        """`try`/`catch` is not lowered yet.
+
+        The old code emitted `try ... catch <var> ... end`, which is not valid WASM
+        (legacy `catch` needs a tag and the whole block was malformed), so the module failed
+        to assemble. Fail at compile time with a clear message instead of emitting junk.
+        """
+        raise SyntaxError(
+            f"`try`/`catch` is not supported by the WASM backend yet "
+            f"(at line {getattr(stmt, 'line', '?')}) — use a sentinel return value or an "
+            f"out-parameter to signal failure"
+        )
     
     def _compile_expr(self, expr) -> None:
         """Compile expression."""
@@ -847,6 +891,79 @@ class WasmCompiler:
             self._compile_index_expr(expr)
         elif isinstance(expr, TernaryExpr):
             self._compile_ternary_expr(expr)
+        elif isinstance(expr, AssignExpr):
+            self._compile_assign(expr)
+
+    def _compile_assign(self, expr: 'AssignExpr'):
+        """Compile `x = v`, `x += v`, `a[i] = v`, `p.f = v`. Leaves NO value on the stack.
+
+        Assignments are how a program mutates state; before this existed, `x = 5` emitted
+        nothing and then an ExprStmt `drop`, so the module did not validate at all.
+        """
+        func = self.state.current_function
+        op = expr.operator
+        compound_ops = {
+            '+=': 'i32.add', '-=': 'i32.sub', '*=': 'i32.mul', '/=': 'i32.div_s',
+            '%=': 'i32.rem_s', '&=': 'i32.and', '|=': 'i32.or', '^=': 'i32.xor',
+            '<<=': 'i32.shl', '>>=': 'i32.shr_s',
+        }
+        if op == '=':
+            compound = None
+        else:
+            compound = compound_ops.get(op)
+            if compound is None:
+                raise SyntaxError(
+                    f"unsupported assignment operator '{op}' at line {getattr(expr, 'line', '?')}"
+                )
+        target = expr.target
+
+        if isinstance(target, Ident):
+            known = getattr(self, '_known_locals', None)
+            if known is not None and target.name not in known and target.name not in self.state.globals:
+                raise SyntaxError(
+                    f"assignment to unknown name '{target.name}' "
+                    f"at line {getattr(target, 'line', '?')}"
+                )
+            if compound:
+                func.body.append(f'local.get ${target.name}')
+                self._compile_expr(expr.value)
+                func.body.append(compound)
+            else:
+                self._compile_expr(expr.value)
+            func.body.append(f'local.set ${target.name}')
+            return
+
+        if isinstance(target, IndexExpr):
+            addr = self._temp_local(func, 'lval')
+            self._emit_element_addr(target)
+            func.body.append(f'local.set ${addr}')
+            self._emit_store(addr, compound, expr.value, 0)
+            return
+
+        if isinstance(target, FieldAccess):
+            offset, _ftype = self._field_offset(target)
+            addr = self._temp_local(func, 'lval')
+            self._compile_expr(target.left)
+            func.body.append(f'local.set ${addr}')
+            self._emit_store(addr, compound, expr.value, offset)
+            return
+
+        raise SyntaxError(f"invalid assignment target at line {getattr(expr, 'line', '?')}")
+
+    def _emit_store(self, addr_local: str, compound: Optional[str], value_expr, offset: int = 0):
+        """Emit `[addr, value] i32.store` for a memory target whose address is in a local."""
+        func = self.state.current_function
+        load = f'i32.load offset={offset}' if offset else 'i32.load'
+        store = f'i32.store offset={offset}' if offset else 'i32.store'
+        func.body.append(f'local.get ${addr_local}')
+        if compound:
+            func.body.append(f'local.get ${addr_local}')
+            func.body.append(load)
+            self._compile_expr(value_expr)
+            func.body.append(compound)
+        else:
+            self._compile_expr(value_expr)
+        func.body.append(store)
     
     def _compile_ternary_expr(self, expr: TernaryExpr):
         """Compile `if c then a else b` / `c ? a : b` to a WASM value-producing `if`.
@@ -911,6 +1028,49 @@ class WasmCompiler:
             )
     
     def _compile_call_expr(self, expr: CallExpr):
+        # `len(x)` — a builtin, not a host import: word 0 of an array or string holds its
+        # length, so this works uniformly for both.
+        if expr.callee == 'len':
+            if len(expr.arguments) != 1:
+                raise SyntaxError(
+                    f"len() takes exactly 1 argument (line {getattr(expr, 'line', '?')})"
+                )
+            self._compile_expr(expr.arguments[0])
+            self.state.current_function.body.append('i32.load')
+            return
+        # `zeros(n)` — a fresh length-n array of zeros on the heap (pairs with `$$alloc`).
+        # Real programs need to build an array at runtime, not just from a literal.
+        if expr.callee == 'zeros':
+            if len(expr.arguments) != 1:
+                raise SyntaxError(
+                    f"zeros() takes exactly 1 argument (line {getattr(expr, 'line', '?')})"
+                )
+            func = self.state.current_function
+            self._uses_heap = True
+            n_loc = self._temp_local(func, 'n')
+            ptr = self._temp_local(func, 'arr')
+            self._compile_expr(expr.arguments[0])
+            func.body.append(f'local.set ${n_loc}')
+            func.body.append('i32.const 4')                 # 4 (length word) + n*4
+            func.body.append(f'local.get ${n_loc}')
+            func.body.append('i32.const 4')
+            func.body.append('i32.mul')
+            func.body.append('i32.add')
+            func.body.append('call $alloc')
+            func.body.append(f'local.set ${ptr}')
+            func.body.append(f'local.get ${ptr}')
+            func.body.append(f'local.get ${n_loc}')
+            func.body.append('i32.store')                   # length word
+            func.body.append(f'local.get ${ptr}')           # memory.fill(dest, val, size)
+            func.body.append('i32.const 4')
+            func.body.append('i32.add')
+            func.body.append('i32.const 0')
+            func.body.append(f'local.get ${n_loc}')
+            func.body.append('i32.const 4')
+            func.body.append('i32.mul')
+            func.body.append('memory.fill')
+            func.body.append(f'local.get ${ptr}')
+            return
         callee = self._resolve_callee(expr.callee, getattr(expr, 'line', '?'))
         # `print` is a host import taking (ptr: i32, len: i32). A lone string-literal
         # argument is therefore expanded into its (ptr, len) pair — pushing only the
@@ -920,6 +1080,11 @@ class WasmCompiler:
             if isinstance(arg, Literal) and arg.literal_type == 'string':
                 func = self.state.current_function
                 self._compile_expr(arg)                                   # -> ptr
+                # The string's data word 0 is its length (so `len(s)` works), so the text
+                # itself starts 4 bytes in. Passing the raw pointer would print the four
+                # length bytes as garbage before the text.
+                func.body.append('i32.const 4')
+                func.body.append('i32.add')
                 func.body.append(f'i32.const {len(arg.value.encode("utf-8"))}')  # -> len
                 func.body.append(f'call {callee}')
                 return
@@ -945,18 +1110,51 @@ class WasmCompiler:
         raise SyntaxError(f"call to undefined function '{callee}' at line {line}")
     
     def _compile_match_expr(self, expr: MatchExpr):
-        # Simplified: compile as if-else chain
+        """Compile `match x { case <lit> => e  case _ => e }` to a chain of value-`if`s.
+
+        Every arm must produce the same type (i32 here). A match that falls off the end
+        (no wildcard arm and no literal matches at runtime) traps — silently yielding 0
+        would be a wrong answer, which is the defect class this backend keeps hitting.
+        """
         func = self.state.current_function
+        subj = self._temp_local(func, 'match')
         self._compile_expr(expr.subject)
-        
-        for i, case in enumerate(expr.cases):
-            # This is a simplified pattern match - real implementation would be more complex
-            func.body.append(f'local.set $match_subject_{i}')
-            func.body.append(f'if')
-            # Pattern matching logic would go here
-            func.body.append(f'local.get $match_subject_{i}')
+        func.body.append(f'local.set ${subj}')
+
+        def emit_case(i: int):
+            if i >= len(expr.cases):
+                func.body.append('unreachable')
+                return
+            case = expr.cases[i]
+            pat = case.pattern
+            if pat.kind in ('wildcard', 'ident'):
+                self._compile_expr(case.body)
+                return
+            func.body.append(f'local.get ${subj}')
+            self._emit_pattern_const(pat)
+            func.body.append('i32.eq')
+            func.body.append('if (result i32)')
             self._compile_expr(case.body)
+            func.body.append('else')
+            emit_case(i + 1)
             func.body.append('end')
+
+        emit_case(0)
+
+    def _emit_pattern_const(self, pat):
+        """Push the constant that a literal pattern compares against."""
+        func = self.state.current_function
+        if pat.kind == 'int':
+            func.body.append(f'i32.const {int(pat.value)}')
+        elif pat.kind == 'bool':
+            func.body.append(f'i32.const {1 if pat.value else 0}')
+        elif pat.kind == 'null':
+            func.body.append('i32.const 0')
+        else:
+            raise SyntaxError(
+                f"unsupported match pattern (kind '{pat.kind}') at line "
+                f"{getattr(pat, 'line', '?')} — supported: integer/bool literals and `_`"
+            )
     
     def _compile_await_expr(self, expr: AwaitExpr):
         self._compile_expr(expr.expression)
@@ -970,52 +1168,63 @@ class WasmCompiler:
         func.body.append('i32.const 0')  # placeholder
     
     def _compile_struct_lit(self, expr: StructLit):
+        """Allocate the struct on the heap, store every field, leave the base pointer.
+
+        All fields of the declaration must be present: a missing field would leave the slot
+        holding whatever the previous allocation put there (a silent wrong value), so it is
+        a compile error.
+        """
         func = self.state.current_function
-        # Allocate struct in linear memory
-        struct_size = sum(
-            4 if ft in (WasmValType.I32, WasmValType.F32) else 8
-            for _, ft in self.state.struct_layouts.get(expr.name, {}).values()
-        )
-        func.body.append(f'i32.const {struct_size}')
-        func.body.append('call $malloc')
-        
-        # Initialize fields
-        layout = self.state.struct_layouts.get(expr.name, {})
+        if expr.name not in self.state.struct_layouts:
+            raise SyntaxError(f"unknown struct '{expr.name}' at line {getattr(expr, 'line', '?')}")
+        self._uses_heap = True
+        layout = self.state.struct_layouts[expr.name]
+        size = self.state.struct_sizes.get(expr.name, 4 * len(layout))
+        ptr = self._temp_local(func, 'st')
+        func.body.append(f'i32.const {size}')
+        func.body.append('call $alloc')
+        func.body.append(f'local.set ${ptr}')
+        provided = set()
         for field_init in expr.fields:
-            func.body.append('local.set $tmp_ptr')  # Save pointer
+            if field_init.name not in layout:
+                raise SyntaxError(
+                    f"struct '{expr.name}' has no field '{field_init.name}' "
+                    f"(at line {getattr(field_init, 'line', '?')})"
+                )
+            offset, _ftype = layout[field_init.name]
+            func.body.append(f'local.get ${ptr}')
             self._compile_expr(field_init.value)
-            offset, field_type = layout.get(field_init.name, (0, WasmValType.I32))
-            func.body.append('local.get $tmp_ptr')
-            func.body.append(f'i32.const {offset}')
-            func.body.append('i32.add')
-            if field_type == WasmValType.I32:
-                func.body.append('i32.store')
-            elif field_type == WasmValType.F64:
-                func.body.append('f64.store')
-        func.body.append('local.get $tmp_ptr')
+            func.body.append(f'i32.store offset={offset}' if offset else 'i32.store')
+            provided.add(field_init.name)
+        missing = [n for n in layout if n not in provided]
+        if missing:
+            raise SyntaxError(
+                f"struct literal '{expr.name}' is missing field(s): {', '.join(missing)} "
+                f"(at line {getattr(expr, 'line', '?')})"
+            )
+        func.body.append(f'local.get ${ptr}')
     
     def _compile_array_lit(self, expr: ArrayLit):
+        """Allocate `[len, e0, e1, ...]` on the heap and leave the base pointer.
+
+        Layout: word 0 holds the element count, then one 4-byte word per element. `len()`
+        reads word 0 and `a[i]` reads word 1+i, so the two agree by construction.
+        """
         func = self.state.current_function
-        # Allocate array: header (length) + elements
-        elem_count = len(expr.elements)
-        func.body.append(f'i32.const {4 + elem_count * 4}')  # header + elements
-        func.body.append('call $malloc')
-        func.body.append('local.set $tmp_ptr')
-        
-        # Store length
-        func.body.append('local.get $tmp_ptr')
-        func.body.append(f'i32.const {elem_count}')
+        self._uses_heap = True
+        n = len(expr.elements)
+        ptr = self._temp_local(func, 'arr')
+        func.body.append(f'i32.const {4 + n * 4}')
+        func.body.append('call $alloc')
+        func.body.append(f'local.set ${ptr}')
+        func.body.append(f'local.get ${ptr}')
+        func.body.append(f'i32.const {n}')
         func.body.append('i32.store')
-        
-        # Store elements
         for i, elem in enumerate(expr.elements):
-            func.body.append('local.get $tmp_ptr')
-            func.body.append(f'i32.const {4 + i * 4}')
-            func.body.append('i32.add')
+            func.body.append(f'local.get ${ptr}')
             self._compile_expr(elem)
-            func.body.append('i32.store')
-        
-        func.body.append('local.get $tmp_ptr')
+            func.body.append(f'i32.store offset={4 + i * 4}')
+        func.body.append(f'local.get ${ptr}')
     
     def _compile_ident(self, expr: Ident):
         func = self.state.current_function
@@ -1068,43 +1277,90 @@ class WasmCompiler:
         elif expr.literal_type == 'null':
             func.body.append('i32.const 0')
     
-    def _compile_field_access(self, expr: FieldAccess):
-        self._compile_expr(expr.left)
-        func = self.state.current_function
-        func.body.append('local.set $tmp_ptr')
-        
-        # Get struct name from left expression (simplified)
-        # In real implementation, would need type info
-        struct_name = 'Unknown'
-        if isinstance(expr.left, Ident):
-            struct_name = expr.left.name
-        
+    def _struct_type_of(self, node) -> Optional[str]:
+        """Best-effort struct type name of an expression, or None."""
+        if isinstance(node, Ident):
+            return self._local_struct_types.get((self.state.current_function.name, node.name))
+        if isinstance(node, StructLit):
+            return node.name
+        return None
+
+    def _field_offset(self, node: FieldAccess):
+        """(offset, valtype) of `node.right` inside the struct value `node.left`.
+
+        The struct type must be knowable. The old code guessed it from the *variable name*
+        (so `p.x` looked up a layout called "p") and silently used offset 0 on a miss,
+        which reads the wrong field rather than failing.
+        """
+        struct_name = self._struct_type_of(node.left)
+        if struct_name is None:
+            raise SyntaxError(
+                f"cannot resolve the struct type of '{getattr(node.left, 'name', type(node.left).__name__)}' "
+                f"to read field '{node.right.name}' (line {getattr(node, 'line', '?')}) — "
+                f"annotate the local with a struct type or initialise it from a struct literal"
+            )
         layout = self.state.struct_layouts.get(struct_name, {})
-        offset, field_type = layout.get(expr.right.name, (0, WasmValType.I32))
-        
-        func.body.append('local.get $tmp_ptr')
-        func.body.append(f'i32.const {offset}')
-        func.body.append('i32.add')
-        if field_type == WasmValType.I32:
-            func.body.append('i32.load')
-        elif field_type == WasmValType.F64:
-            func.body.append('f64.load')
-    
-    def _compile_index_expr(self, expr: IndexExpr):
-        self._compile_expr(expr.left)
-        self._compile_expr(expr.right)
+        if node.right.name not in layout:
+            raise SyntaxError(
+                f"struct '{struct_name}' has no field '{node.right.name}' "
+                f"(at line {getattr(node, 'line', '?')})"
+            )
+        return layout[node.right.name]
+
+    def _emit_element_addr(self, node: IndexExpr):
+        """Leave the address of `node`'s element on the stack, after a bounds check.
+
+        Out-of-range indexes trap instead of silently reading a neighbouring allocation.
+        """
         func = self.state.current_function
-        
-        # Array access: base + 4 (header) + index * 4
+        base = self._temp_local(func, 'base')
+        idx = self._temp_local(func, 'idx')
+        self._compile_expr(node.left)
+        func.body.append(f'local.set ${base}')
+        self._compile_expr(node.right)
+        func.body.append(f'local.set ${idx}')
+        # idx < 0 -> trap
+        func.body.append(f'local.get ${idx}')
+        func.body.append('i32.const 0')
+        func.body.append('i32.lt_s')
+        func.body.append('if')
+        func.body.append('unreachable')
+        func.body.append('end')
+        # idx >= len -> trap
+        func.body.append(f'local.get ${idx}')
+        func.body.append(f'local.get ${base}')
+        func.body.append('i32.load')
+        func.body.append('i32.ge_s')
+        func.body.append('if')
+        func.body.append('unreachable')
+        func.body.append('end')
+        # base + 4 + idx*4
+        func.body.append(f'local.get ${base}')
         func.body.append('i32.const 4')
         func.body.append('i32.add')
+        func.body.append(f'local.get ${idx}')
         func.body.append('i32.const 4')
         func.body.append('i32.mul')
         func.body.append('i32.add')
-        func.body.append('i32.load')
+
+    def _compile_field_access(self, expr: FieldAccess):
+        """Read `p.field`."""
+        offset, _ftype = self._field_offset(expr)
+        self._compile_expr(expr.left)
+        self.state.current_function.body.append(
+            f'i32.load offset={offset}' if offset else 'i32.load'
+        )
+    
+    def _compile_index_expr(self, expr: IndexExpr):
+        """Read `a[i]` (bounds-checked)."""
+        self._emit_element_addr(expr)
+        self.state.current_function.body.append('i32.load')
     
     def _generate_wasm_module(self) -> str:
         """Generate WASM text format module."""
+        # The heap must start above the static string data so allocations never overlap
+        # the data segments.
+        self._heap_base = (self.state.next_string_offset + 7) // 8 * 8
         lines = []
         
         lines.append('(module')
@@ -1127,12 +1383,13 @@ class WasmCompiler:
             lines.append(f'  (type $t{type_map[type_sig]} (func {type_sig}))')
         
         # GC Struct types (H25) — `type` fields come before imports.
+        # Field names need a `$` sigil: `(field x i32)` is invalid ("expected valtype").
         for struct_name in self.state.sorted_structs:
             layout = self.state.struct_layouts.get(struct_name, {})
             if layout:
                 fields = []
                 for field_name, (offset, field_type) in layout.items():
-                    fields.append(f"  (field {field_name} {field_type.value})")
+                    fields.append(f"    (field ${field_name} {field_type.value})")
                 if fields:
                     lines.append(f"  (type ${struct_name} (struct\n{chr(10).join(fields)}\n))")
         
@@ -1154,8 +1411,32 @@ class WasmCompiler:
             func = self.state.functions[func_name]
             lines.append(self._generate_wasm_function(func, type_map))
         
-        # Memory (declared after imports and functions; exported separately below)
-        lines.append(f'  (memory {self.state.memory_pages})')
+        # Internal bump allocator — emitted ONLY when the program allocates (an array or
+        # struct literal), so programs that don't allocate keep byte-identical output.
+        # It replaces the old `call $malloc` (a host import), which made every allocation
+        # the host's problem and collided when the host returned a constant.
+        if self._uses_heap:
+            lines.append('  (func $alloc (param $n i32) (result i32)')
+            lines.append('    (local $p i32)')
+            lines.append('    global.get $heap')
+            lines.append('    local.set $p')
+            lines.append('    global.get $heap')
+            lines.append('    local.get $n')
+            lines.append('    i32.add')
+            lines.append('    global.set $heap')
+            lines.append('    local.get $p')
+            lines.append('  )')
+        
+        # Memory (declared after imports and functions; exported separately below).
+        # Only programs that allocate get a larger memory, so non-allocating programs keep
+        # byte-identical output.
+        pages = max(self.state.memory_pages, 16) if self._uses_heap else self.state.memory_pages
+        lines.append(f'  (memory {pages})')
+        
+        # Heap pointer, initialised past the static string data so allocations never
+        # overlap the data segments.
+        if self._uses_heap:
+            lines.append(f'  (global $heap (mut i32) (i32.const {self._heap_base}))')
         
         # Globals — canonical WAT: `(global $n <type> (<init>))` when immutable,
         # `(global $n (mut <type>) (<init>))` when mutable. The old form wrapped the type
@@ -1180,10 +1461,13 @@ class WasmCompiler:
         # Data section for string literals: ONE `(data ...)` per literal — a data segment
         # carries exactly one offset+bytes pair, so stacking pairs inside a single
         # `(data ...)` emits invalid WAT as soon as a program has two string literals.
+        # Bytes must be written as `\XX` escapes: a plain `"05 00 00 00"` string literal is
+        # the ASCII TEXT "05 00 00 00", not four bytes — which silently corrupted every
+        # string literal (print emitted hex text and len(s) returned garbage).
         for string_val, offset in self.state.string_data:
             encoded = string_val.encode('utf-8')
-            length_bytes = len(encoded).to_bytes(4, 'little')
-            hex_data = ' '.join(f'{b:02x}' for b in (length_bytes + encoded))
+            payload = len(encoded).to_bytes(4, 'little') + encoded
+            hex_data = ''.join(f'\\{b:02x}' for b in payload)
             lines.append(f'  (data (i32.const {offset}) "{hex_data}")')
         
         lines.append(')')

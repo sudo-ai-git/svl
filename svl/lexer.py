@@ -156,6 +156,10 @@ class TokenType(Enum):
     # Range operator
     RANGE = auto()           # ..
 
+    # Match / pattern tokens
+    CASE = auto()            # case
+    UNDERSCORE = auto()      # _ (wildcard pattern)
+
     # Special
     EOF = auto()
     ERROR = auto()
@@ -288,6 +292,14 @@ class Lexer:
             self._scan_string(start_pos, start_line, start_col)
             return
 
+        # Wildcard `_` — a lone underscore is the match wildcard pattern, but `_foo`
+        # is still an ordinary identifier.
+        if ch == '_':
+            nxt = self.source[self.pos + 1] if self.pos + 1 < self.length else ''
+            if not (nxt.isalnum() or nxt == '_'):
+                self._emit(TokenType.UNDERSCORE, '_', 1, start_pos, start_line, start_col)
+                return
+
         # Identifiers and keywords (ASCII)
         if ch.isalpha() or ch == '_':
             self._scan_identifier(start_pos, start_line, start_col)
@@ -369,6 +381,7 @@ class Lexer:
             'class': TokenType.CLASS_KW, 'instance': TokenType.INSTANCE_KW, 'where': TokenType.WHERE_KW,
             'forall': TokenType.FORALL, 'implies': TokenType.IMPLIES,
             'box': TokenType.BOX, 'diamond': TokenType.DIAMOND,
+            'case': TokenType.CASE,
             'true': TokenType.BOOL, 'false': TokenType.BOOL, 'null': TokenType.NULL,
             'int': TokenType.IDENT, 'float': TokenType.IDENT, 'string': TokenType.IDENT,
             'bool': TokenType.IDENT, 'void': TokenType.IDENT, 'never': TokenType.IDENT,

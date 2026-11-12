@@ -366,33 +366,63 @@ verify_wasm_determinism(source, runs=5)  # Returns True/False
 mis-executing loop, so verify by assembling (`wasmtime.wat2wasm` then `wasmtime.Module` — the `Module` is
 what validates) and invoking the export (`<module>_main`).
 
-Measured against a 27-construct matrix: **21 run correctly**, 3 assemble-fail, 2 compile-error,
-1 runtime error. Verified to assemble **and run**:
+Measured against a 38-construct matrix: **35 run correctly, 0 wrong answers** (1 compile-error,
+2 parse-level). Verified to assemble **and run**:
 
 | Feature | Probe | Result |
 |---|---|---|
+| mutable variables | `let x=1  x = 5` / `x += 2` / `s += a[i]` in a loop | 5 / 3 / correct |
+| arrays — literal, read, write | `let a=[1,2,3]  a[1] = 42  return a[1]` | 42 |
+| arrays — `len`, element `+=` | `len([1,2,3,4])` → 4; `a[0] += 9` | 4 / correct |
+| arrays — runtime allocation | `zeros(n)` (length-n zeroed array) | correct |
+| **bounds checking** | `a[9]` on a length-3 array | **traps** (no silent OOB read) |
+| structs — literal + field read | `struct P{x:int y:int}  P{x:1,y:2}.x` | correct |
+| structs — field write, passed to a func | `p.x = 7`; `g(p: P)` reading `p.y` | 74 / 9 |
+| **`match`** | `match x { case 1 => 10  case _ => 20 }` | 10 |
 | `while` (incl. nested) | `while i<=5 { s+=i; i+=1 }` | 15 |
 | `for` over a range (fixed or computed bound) | `for i in 0..n { s+=i }` | correct |
-| `if…then…else` **expression** | `let r = if c then 10 else 20` with `c=0` | 20 |
-| `? :` ternary | `c ? 10 : 20` with `c=1` | 10 |
+| `if…then…else` **expression** / `? :` | `if c then 10 else 20` with `c=0` | 20 |
 | top-level `const`/`var` | `const one=1 const seven=7  return one+seven` | 8 |
-| **recursion** | `fib(10)` with `if n<2 then { return n } else { … }` | 55 |
+| **recursion** (incl. over arrays) | `fib(10)`; `go(a, i)` summing an array | 55 / 10 |
 | early `return` from inside `if`/`while` | — | runs cleanly |
 | `assert` | `assert x==5` with `x=5` | no trap — and it **must** trap when false |
-| `print` / `print_int` | `print("hi")` | assembles + calls the host |
-| arithmetic `+ - * / %` | `2 + 3*4 - 6%4` | 12 |
-| **bitwise** `& | ^ << >>` and unary `~` | `(12 & 10) + (1 | 2)` | 11 |
-| unary `-`, `!` | `-5 + (1 - !0)` | -5 |
+| `print` / `print_int` | `print("hi")` | correct bytes on the host's stdout |
+| arithmetic / bitwise / unary | `2+3*4-6%4`; `(12 & 10) + (1 | 2)`; `-5 + (1 - !0)` | 12 / 11 / -5 |
 | `void` returns, helper calls, comparisons, `&& \|\|` | — | correct |
 
-**Not** in the executable subset: closures/`lambda`, `match` expressions, struct/array literals + field/
-index access (no real layout), `try`/`catch`, `async`/`await`, SIMD for general loops, GC structs, and
-generics at runtime. These fail loudly (assemble error or a clear compile error) rather than silently.
+**Not** in the executable subset: closures/`lambda`, `try`/`catch`, `async`/`await`, SIMD for general
+loops, GC structs, generics at runtime, and non-exhaustive `match` at runtime. These now fail **loudly**
+(clear compile error or a trap) rather than emitting invalid WAT or a wrong answer.
+
+**End-to-end proof**: `examples/bubble_sort.svl` and `examples/sieve.svl` in this repo compile, execute, and
+their printed output plus return value match an independent Python implementation exactly
+(`sorted=1 sum=28 cmps=15 swaps=8 odds=6`; `pi(10)=4 pi(40)=12 pi(70)=19 pi(100)=25`).
+
+### Memory model
+
+- **Allocator**: a bump allocator (`$alloc`) plus a `$heap` global, emitted **only** when a program
+  allocates. The heap starts above the static string data. Programs that don't allocate keep
+  byte-identical output. Memory is grown to 1MB for allocating programs; out-of-bounds access traps.
+- **Array layout**: `[len, e0, e1, …]` — word 0 is the element count, then one 4-byte word per element.
+  `len(x)` reads word 0, `a[i]` reads word `1+i` (with a bounds check), so the two agree by construction.
+- **Struct layout**: fields in declaration order, 4-byte aligned, 4 bytes each. Field access uses the
+  load/store `offset=` immediate. The struct type of a local comes from its **type annotation** or from the
+  struct literal it is initialised with; if it cannot be resolved, reading/writing a field is a **compile
+  error** (the old code guessed the type from the variable *name* and silently used offset 0 — the wrong
+  field). A struct literal must supply every declared field.
+- **`try`/`catch`** has no lowering (WASM exception handling is a separate proposal) and raises at compile
+  time rather than emitting a malformed `try` block.
 
 **Pitfalls confirmed by execution**
+- String literals live in the data section as `[len][bytes]`. `print("…")` passes `ptr + 4` with the byte
+  length; `len("…")` reads word 0. The bytes are emitted as `\XX` escapes — a plain WAT string
+  `"05 00 00 00"` is the ASCII *text* "05 00 00 00", not four bytes, which silently corrupted every string
+  literal (print emitted hex text, `len(s)` returned garbage).
 - `%` is WASM's **truncated remainder (sign of the dividend)**, not Python's floor modulo: `(-1) % 256` is
   `-1`, not `255`. Keep the operand non-negative, or you get a self-failing `assert`.
 - `int` is **i32**: an out-of-range literal is a compile error, not a wrap.
+- `a[i]` and `p.field` require a *resolvable* type: annotate the local with the struct type or initialise it
+  from a struct literal, otherwise it is a compile error rather than a silent wrong read.
 
 ### 5.3.2 What the three verification layers do — and do NOT — verify
 

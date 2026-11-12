@@ -1,0 +1,65 @@
+// Bubble sort with in-place array swaps, nested loops, struct field mutation,
+// a match expression and string output.
+//
+//   python3 examples/run_example.py examples/bubble_sort.svl
+//
+// Expected: sorted=1 sum=28 cmps=15 swaps=8 odds=6
+module prog {
+  struct Stats { comparisons: int  swaps: int }
+
+  func classify(x: int) type int {
+    return match x % 2 { case 0 => 0  case _ => 1 }
+  }
+
+  func sort(a: int, n: int) type Stats {
+    let st: Stats = Stats{comparisons: 0, swaps: 0}
+    let i: int = 0
+    while i < n - 1 {
+      let j: int = 0
+      while j < n - 1 - i {
+        st.comparisons += 1
+        if a[j] > a[j + 1] then {
+          let t: int = a[j]
+          a[j] = a[j + 1]
+          a[j + 1] = t
+          st.swaps += 1
+        } else { }
+        j += 1
+      }
+      i += 1
+    }
+    return st
+  }
+
+  func main() type int {
+    let a: int = [5, 3, 9, 1, 7, 3]
+    let n: int = len(a)
+    let st: Stats = sort(a, n)
+
+    let i: int = 0
+    let sum: int = 0
+    let oddbits: int = 0
+    let sorted: int = 1
+    while i < n {
+      if i > 0 then {
+        if a[i - 1] > a[i] then { sorted = 0 } else { }
+      } else { }
+      sum += a[i]
+      oddbits += classify(a[i])
+      i += 1
+    }
+
+    print("sorted=")
+    print_int(sorted)
+    print(" sum=")
+    print_int(sum)
+    print(" cmps=")
+    print_int(st.comparisons)
+    print(" swaps=")
+    print_int(st.swaps)
+    print(" odds=")
+    print_int(oddbits)
+    print("\n")
+    return sorted * 1000000 + sum * 100 + st.swaps
+  }
+}

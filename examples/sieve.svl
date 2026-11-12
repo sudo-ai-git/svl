@@ -1,0 +1,46 @@
+// Sieve of Eratosthenes: dynamic allocation with `zeros(n)`, in-place marking,
+// nested loops, a helper function and string output.
+//
+//   python3 examples/run_example.py examples/sieve.svl
+//
+// Expected: pi(10)=4 pi(40)=12 pi(70)=19 pi(100)=25
+module sieve {
+  func sieve_count(n: int) type int {
+    let is_composite: int = zeros(n + 1)
+    let i: int = 2
+    while i * i <= n {
+      if is_composite[i] == 0 then {
+        let k: int = i * i
+        while k <= n {
+          is_composite[k] = 1
+          k += i
+        }
+      } else { }
+      i += 1
+    }
+    let count: int = 0
+    let p: int = 2
+    while p <= n {
+      if is_composite[p] == 0 then { count += 1 } else { }
+      p += 1
+    }
+    return count
+  }
+
+  func main() type int {
+    let total: int = 0
+    let n: int = 10
+    while n <= 100 {
+      let c: int = sieve_count(n)
+      print("pi(")
+      print_int(n)
+      print(")=")
+      print_int(c)
+      print(" ")
+      total += c
+      n += 30
+    }
+    print("\n")
+    return total
+  }
+}
