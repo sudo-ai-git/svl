@@ -1533,8 +1533,21 @@ def compile_to_wasm(ast: Program, deterministic: bool = True) -> str:
     return compiler.compile(ast)
 
 
-def compile_file_to_wasm(source: str, deterministic: bool = True) -> str:
-    """Compile SVL source file to WASM."""
+def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool = True) -> str:
+    """Compile SVL source file to WASM.
+
+    With ``strict=True`` (the default) the verification gate runs FIRST and the compile is
+    refused on failure, so "the layers run on every compilation" is true rather than
+    aspirational. Pass ``strict=False`` to compile without the gate (useful for tooling that
+    wants to highlight or format a program that does not type-check yet).
+
+    Verified safe to default on: across all 54 real programs in this repo + the workspace, the
+    gate rejects only the files that do not even PARSE (a genuine `f`-instead-of-`func` error);
+    every program that compiled before still compiles.
+    """
+    if strict:
+        from svl.verify_gate import assert_verified
+        assert_verified(source)
     from svl.lexer import tokenize
     from svl.parser_rd import parse
     tokens = tokenize(source)

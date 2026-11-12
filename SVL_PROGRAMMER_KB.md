@@ -452,9 +452,50 @@ essentially any well-formed program (its parity is even unless exactly one of MR
 Treat the 231-gate value as the thing you pin and compare. Do not advertise the layers as proving
 correctness.
 
-**Also note**: the layers verify the **AST**. Compilation has no layer — a program can pass all three and
-still have produced invalid or wrong WASM (that was true of this backend until 2026-11-12). Assembling and
-running is the only check that covers the emitter; `python -m svl.spike_s17_wasm_determinism` does it.
+**Also note**: the layers verify the **AST**. Until 2026-11-12 compilation was covered by no layer at
+all, so a program could pass all three and still emit invalid or wrong WASM. It now IS covered:
+
+### 5.3.3 The compile-time gate and self-attestation (added 2026-11-12)
+
+**`svl/verify_gate.py`** — `compile_file_to_wasm(source, strict=True)` now runs a gate and **refuses to
+compile** on failure: the AST guard plus the type checker. `strict=False` bypasses it.
+
+What the gate deliberately excludes, and why:
+- **231-gate / viable-start**: an artifact-integrity check over serialised bytes, not a correctness
+  check — and `find_viable_start` is super-linear (measured ~16.9 s of 17.2 s at 100 statements), so it
+  would make every compile slow for no correctness gain. It belongs at package/attestation time.
+- **The BPSW "theorem" layer**: constant-true (see §5.3.2), so running it would only imply a guarantee
+  it does not provide.
+
+Cost: ~0.45 ms per statement, linear (measured 5.4 ms at 3 `let`s, 55 ms at 120).
+
+Flipping the gate on was measured first, not assumed: across 54 real programs the gate rejects only the
+files that do not even parse. Getting to that point required fixing three genuine checker defects —
+the env did not know the builtins (`len(a)` inferred `void`), `a[i]`/`s.x` had no inference rule (the
+cases were commented out as "not yet in parser"), and array literals typed as `List<int>` while the
+backend represents them as an `int` handle.
+
+**`svl/attest.py`** — turns the deterministic-compilation property into a *checkable* attestation.
+`attest(source, wat)` assembles, hashes the artifact **with all custom sections stripped**, and re-emits
+the module carrying a `svl.attest` custom section with that `content_sha256`, the 231-gate triple and the
+AST hash. `verify_attestation(binary)` reads the section, strips every custom section from the artifact it
+was handed, re-hashes and compares — so any change to the code (or to any non-custom section) fails.
+Try it: `python3 examples/attest.py examples/sieve.svl` then `--verify`.
+
+This is deliberately unlike `svl/pcc_wasm.py`, whose "proof" is a boolean produced by the same process
+that produced the artifact (and whose WAT does not assemble) — that checks nothing.
+
+### 5.3.4 Layer retractions (measured, do not cite the old claims)
+
+| Claim | Measured reality |
+|---|---|
+| "231-gate = three channels" | **PRODUCT is 0 for every real program** (300/300 sampled; unchanged across 150 single-byte flips) — because `prod(b+1) mod 231` collapses once a byte hits a multiple of 3·7·11. Effective gate is 2 channels, **with a 2-byte collision**: `+3` at byte 0 and `-3` at byte 77 of the serialised AST leave all three checksums identical. |
+| "L3 theorem layer" | **Constant-true.** Parity is 0 for every residue of {17,37,73} (all residues are below 2047, the first base-2 pseudoprime): 0 failures in 200 random programs and 20 000 random blocks. |
+| "SMT/Z3 verification" | **Encodes nothing.** `_extract_arithmetic_constraints` returns `[]` for every input, including a literal false assertion → `smt_verified=True`, 0 ms. |
+| "Proof-carrying code" | Embeds a self-declared boolean; the emitted WAT does not assemble. Use `svl/attest.py` instead. |
+| "Self-hosting, 3-stage bootstrap" | `compiler_svl.svl` is a 540-byte stub (`assert true`); it compiles nothing. |
+| "Six compiler optimizations wired" | Only SIMD is referenced by `compiler_wasm.py` — and it currently breaks the shape it targets (`unknown local $sum`). |
+| "Registry with cryptographic attestations" | Had an **authentication bypass**: `verify_package` loaded the registered key then overwrote it with `attestation.public_key` (the party being verified). **Fixed 2026-11-12** and proven load-bearing: a copy with the old line restored accepts a self-signed package under a trusted verifier's name; the fixed tree rejects it. `publish` self-attesting as `verifier_id=metadata.author` remains by design, so only registered verifiers should ever be passed to `verify_package`. |
 
 ### 5.4 Package Manager
 
@@ -1031,9 +1072,21 @@ from svl.abstract_interpretation import AbstractInterpreter, IntervalDomain, Con
 from svl.abstract_interpretation import create_type_analysis_domain, analyze_type_bounds
 ```
 
-- Domains: `Interval` (overflow/div-by-zero), `Congruence` (modular invariants), `ProductDomain` (combined).
-- Entry points: `analyze_type_bounds(ast)` (warning dict for bounds/overflow/div-zero), `AbstractInterpreter(domain).analyze_program(ast)`.
-- **Pitfall**: both entry points take a **parsed AST** (`Program`), not source text.
+- Domains: `Interval` (`[lo, hi]` with `'-inf'`/`'+inf'` bounds), `Congruence` (`x ≡ r mod m`),
+  `ProductDomain` (component-wise).
+- Entry points (both take a **parsed AST**, not source text):
+  - `analyze_program(ast) -> AnalysisResult` — `.findings`, `.internal_errors`, `.state`, `.passed`.
+  - `analyze_type_bounds(ast) -> dict` — `{'state', 'findings', 'warnings', 'passed', 'internal_errors'}`.
+  - `AbstractInterpreter(domain=None).analyze_program(ast)` and
+    `.analyze_function(func_ast, param_state=None)`.
+- Finding kinds: `oob-index`, `div-zero`, `div-overflow` (all `severity='error'`).
+- Proved: `a[i]` where `i` is provably negative or `>= length(a)`; `/` and `%` by a provably zero
+  divisor (and the `/=` `%=` forms); `-2**31 / -1`.
+- Deliberately not tracked: call return values (a call evaluates to `top`), and array lengths for
+  anything not built from a literal, `zeros(n)`, `len(x)`, or another tracked path.
+- **Pitfall**: this is an over-approximation — it may miss a real bug but must never invent one; a
+  false positive rejects a correct program at compile time. `AnalysisResult.internal_errors` must be
+  empty, and `svl/verify_gate.py` refuses to compile when it is not.
 
 ### 12.5 Differential Verification (H22) & Semantic Diff (H39)
 

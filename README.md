@@ -8,13 +8,23 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 | **L2** | Types | Mod-5 Dual-Stream | Mod-5 buckets + Z/2 negation + structural checksums |
 | **L3** | Theorem | BPSW Monodromy | Cryptographic verification via SHA256 + BPSW on primes {37,73,17} |
 
-> **Scope of the layers (measured, don't skip this).** They verify **internal consistency and hash
-> properties** — the AST is well-formed, types are structurally consistent, the program hash has the expected
-> monodromy parity. They do **not** prove your program computes what you meant, and they verify the **AST, not
-> the emitted code**. Given four semantically different programs (`a + 2`, `a - 2`, `a * 2`), all three layers
-> pass on all of them — what changes is the recorded 231-gate value. Treat the gate as a *tamper/drift
-> detector against a recorded reference*: it catches a program that **changed**, not one that is **wrong**.
-> Compilation is covered by no layer, so assembling and running is a separate gate. See the KB §5.3.2.
+> **Scope of the layers (measured, don't skip this).**
+>
+> **What is now enforced:** `compile_file_to_wasm` runs a verification gate (AST guard + the type
+> checker + an interval abstract interpreter) and **refuses to compile** on failure, so
+> "verification runs on every compilation" is true for those checks. Pass `strict=False` to bypass it.
+>
+> **What they do not do:** they verify **internal consistency and hash properties** — the AST is
+> well-formed, types are structurally consistent, the program hash has the expected parity — not that
+> your program computes what you meant. Given semantically different programs (`a + 2`, `a - 2`,
+> `a * 2`), all layers pass on all of them; only the recorded 231-gate value differs. Treat the gate as
+> a *tamper/drift detector against a pinned reference*: it catches a program that **changed**, not one
+> that is **wrong**.
+>
+> **Two advertised layers carry no information and are documented as such** rather than quietly run:
+> the BPSW "theorem" layer is constant-true (0/200 random programs fail; every residue of {17,37,73}
+> parities even), the SMT layer never encodes a constraint (`smt_verified` is always True in 0 ms), and
+> the 231-gate's PRODUCT channel is 0 for every real program. See the KB §5.3.2 for the measurements.
 
 ## Quick Start
 
@@ -29,6 +39,15 @@ python3 examples/run_example.py examples/sieve.svl         # pi(10)=4 pi(40)=12 
 # A playable Snake, written in SVL (w a s d to steer, q to quit; --timeout for real-time)
 python3 examples/run_snake.py examples/snake.svl
 printf 'dddddsddddd' | python3 examples/run_snake.py examples/snake.svl   # scripted replay
+
+# Build a SELF-ATTESTED artifact and verify it independently
+python3 examples/attest.py examples/sieve.svl --out /tmp/sieve.wasm
+python3 examples/attest.py --verify /tmp/sieve.wasm     # recomputes the hash; tampering -> INVALID
+
+# The compile-time gate refuses a program it can PROVE is broken (strict=True is the default)
+python3 -c "from svl.compiler_wasm import compile_file_to_wasm; compile_file_to_wasm('''module t {
+  func main() type int { let a: int = [1, 2, 3]  let i: int = 5  return a[i] } }''')"
+# -> SVLVerificationError: provable out-of-bounds index on 'a': index [5, 5] is always >= length(a) = [3, 3]
 
 # REPL
 python -m svl.repl
@@ -84,10 +103,23 @@ module prog {
   `print`/`print_int`, `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
   unary `-`/`!`. Measured against a 38-construct matrix: **35 run correctly, 0 wrong answers**
   (`svl/compiler_wasm.py`).
-- **Self-hosting compiler** — bootstraps in 3 stages
-- **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types
-- **Verification extensions** — SMT/Z3, incremental 231-gate checksums, proof-carrying code, abstract interpretation, differential verification, property-based testing
-- **Compiler optimizations** — SIMD, tail-call optimization, escape analysis, WASM GC, PGO, LTO, hot reload
+- ~~**Self-hosting compiler** — bootstraps in 3 stages~~ **RETRACTED**: `svl/compiler_svl.svl` is a
+  540-byte stub whose `main()` assigns integer constants and `assert true` — it compiles nothing. There
+  is no self-hosted compiler.
+- **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types — **parse-level only.** The
+  qualifiers are parsed and then consumed by nothing: `grep "kind == 'linear'"` outside the parser
+  returns no engine, and `type_families._match_lhs` is `len(args) > 0` (it matches anything). See KB §11.
+- **Verification extensions** — SMT/Z3, incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: the SMT layer encodes no constraint, PCC embeds a self-declared boolean (and its WAT does not assemble). **One real addition here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256` — see below.
+- **Abstract interpretation that runs** — `svl/abstract_interpretation.py` performs a sound interval
+  analysis over the AST (i32-aware: intervals that leave `[-2**31, 2**31-1]` widen to `top` because WASM
+  wraps; array lengths tracked per lvalue path; loop fixpoints with widening; a bounded interprocedural
+  pass that binds parameters to the join of their call-site arguments). The compile-time gate refuses a
+  program it can **prove** contains an out-of-bounds `a[i]` or a division by a provably zero divisor —
+  turning two runtime traps into compile errors. It says nothing when it cannot decide: measured
+  **0 findings across all 42 compilable programs** in `examples/` + the workspace corpus, and both
+  defect classes caught on demand. Not done: call return values are `top` (no interprocedural value
+  summary), so `let n = f(x)` loses precision.
+- **Compiler optimizations** — ~~SIMD, tail-call optimization, escape analysis, WASM GC, PGO, LTO, hot reload~~ **six of the seven are standalone libraries the compiler never calls** (`grep` for `pgo`/`lto`/`tco`/`escape_analysis`/`hot_reload` in `svl/compiler_wasm.py` returns nothing). The one that *is* wired — SIMD — currently breaks the program shape it targets (`for i in 0..4 { s = s + a[i] * b[i] }` fails to assemble).
 - **Tooling** — tree-sitter grammar, tactic prover, time-travel debugger, component-model FFI/WIT, package registry with attestations, incremental compilation, distributed build cache, LSIF, docs generation, Jupyter kernel, RL-guided optimization
 
 ## Repository Layout
