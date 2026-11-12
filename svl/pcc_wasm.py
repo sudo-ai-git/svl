@@ -310,6 +310,11 @@ def verify_pcc_wasm(wasm, source: str) -> Tuple[bool, List[str]]:
     """Verify PCC WASM against source code.
 
     Accepts either WAT text (legacy) or binary bytes (the real artifact).
+
+    The embedded proof payload is treated as a CLAIM, not as evidence.  The verifier
+    re-derives the compile-time gate and the SMT verdict from ``source`` and refuses the
+    artifact when the re-derivation contradicts it — so a forged payload that claims
+    ``passed: true`` for a false assertion is rejected.
     """
     if isinstance(wasm, (bytes, bytearray)):
         proofs_data = extract_proofs_from_wasm_bytes(bytes(wasm))
@@ -325,7 +330,31 @@ def verify_pcc_wasm(wasm, source: str) -> Tuple[bool, List[str]]:
     if proofs_data.get('source_hash') != source_hash:
         errors.append(f"Source hash mismatch: expected {source_hash}, got {proofs_data.get('source_hash')}")
 
-    # Verify each proof
+    # Re-derive the compile-time gate from the source (AST guard + type layer + interval AI).
+    try:
+        from svl.verify_gate import verify_program
+        problems = verify_program(source)
+    except Exception as exc:                                          # noqa: BLE001
+        problems = [f"re-derivation raised {type(exc).__name__}: {exc}"]
+    if problems:
+        errors.append("re-derived gate verdict: FAIL\n  - " + "\n  - ".join(problems))
+
+    # Re-derive the SMT verdict from the source.  A counterexample means the artifact
+    # claims a passing build for a program whose assertions are false.
+    try:
+        from svl.smt_theorem import verify_with_smt
+        smt_result = verify_with_smt(source)
+        if smt_result.status == 'counterexample':
+            errors.append(
+                "re-derived SMT verdict: counterexample"
+                + (f" ({smt_result.error_message})" if smt_result.error_message else "")
+            )
+    except ImportError:
+        pass
+    except Exception as exc:                                          # noqa: BLE001
+        errors.append(f"re-derived SMT verdict: could not re-derive ({type(exc).__name__}: {exc})")
+
+    # The embedded claims must not contradict the re-derivation.
     for proof in proofs_data.get('proofs', []):
         if not proof.get('passed', False):
             errors.append(f"Proof for layer '{proof['layer']}' did not pass")

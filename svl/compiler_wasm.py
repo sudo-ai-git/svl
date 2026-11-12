@@ -1837,53 +1837,67 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     raw compile stays byte-identical and artifacts already pinned elsewhere remain valid; use
     `svl.attest.compile_attested` when producing a shipped artifact.
     """
-    if strict:
-        from svl.verify_gate import assert_verified
-        assert_verified(source)
     from svl.lexer import tokenize
     from svl.parser_rd import parse
     tokens = tokenize(source)
     ast = parse(tokens)
+    linked_sources: List[Tuple[str, str]] = []
     if base_dir:
-        _link_imports(ast, base_dir)
+        linked_sources = _link_imports(ast, base_dir)
     elif ast.imports:
         raise SyntaxError(
             f"cannot resolve import '{ast.imports[0].path}': no base_dir given "
             f"(pass base_dir=... to compile_file_to_wasm)"
         )
+
+    # The gate runs AFTER linking. Verifying only the raw source let every imported
+    # module bypass the AST guard, the type checker and the interval analyser.
+    if strict:
+        from svl.verify_gate import assert_verified, SVLVerificationError
+        assert_verified(source)
+        for path, sub_source in linked_sources:
+            try:
+                assert_verified(sub_source)
+            except SVLVerificationError as exc:
+                raise SVLVerificationError(f"imported module '{path}': {exc}") from exc
+
     wat = compile_to_wasm(ast, deterministic)
     if prove:
         from svl.smt_theorem import verify_with_smt
         from svl.verify_gate import SVLVerificationError
-        result = verify_with_smt(source)
-        if result.status == "counterexample":
-            raise SVLVerificationError(
-                "SMT counterexample: an assertion was refuted"
-                + (f" ({result.error_message})" if result.error_message else "")
-            )
+        for label, src in [("<main>", source)] + linked_sources:
+            result = verify_with_smt(src)
+            if result.status == "counterexample":
+                raise SVLVerificationError(
+                    f"SMT counterexample in {label}: an assertion was refuted"
+                    + (f" ({result.error_message})" if result.error_message else "")
+                )
     if attest:
         from svl.attest import attest_wat
         wat, _payload = attest_wat(source, wat)
     return wat
 
 
-def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) -> None:
+def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) -> List[Tuple[str, str]]:
     """Resolve top-level imports relative to ``base_dir`` and link their modules/items.
 
     The imported file is parsed and its declarations appended; cross-module calls resolve
     through the existing ``module$func`` namespacing.  Cycles are detected via the real
     path of each file.
+
+    Returns the ``(import_path, source_text)`` of every file linked, so the caller can
+    run the verification gate on the imported modules too (otherwise they bypass it).
     """
     if _seen is None:
         _seen = set()
     if not program.imports:
-        return
+        return []
     import os
 
     from svl.lexer import tokenize
     from svl.parser_rd import parse
 
-    added_modules, added_items = [], []
+    added_modules, added_items, linked = [], [], []
     for imp in program.imports:
         path = os.path.join(base_dir, imp.path)
         real = os.path.realpath(path)
@@ -1895,14 +1909,17 @@ def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) 
             )
         _seen.add(real)
         with open(path, encoding='utf-8') as fh:
-            sub = parse(tokenize(fh.read()))
-        _link_imports(sub, os.path.dirname(path), _seen)
+            text = fh.read()
+        linked.append((imp.path, text))
+        sub = parse(tokenize(text))
+        linked.extend(_link_imports(sub, os.path.dirname(path), _seen))
         added_modules.extend(sub.modules)
         added_items.extend(sub.items)
 
     program.modules.extend(added_modules)
     program.items.extend(added_items)
     program.imports = []
+    return linked
 
 
 def verify_wasm_determinism(source: str, runs: int = 3) -> bool:
