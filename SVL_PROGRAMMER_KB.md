@@ -555,7 +555,7 @@ useless as a reproducible-build cache key. `svl.serialization.to_canonical_binar
 position fields, and `svl.attest.ast_fingerprint(source)` exposes the result:
 `{ast_sha256, gate231, source_sha256, ast_bytes}`. Measured: ASCII, Hebrew, re-indented, blank-line and
 commented variants of one program all give the **same** `ast_sha256` and `gate231`; `to_binary` gave five
-different values. Canonical bytes are one-way (the deserializer is a stub — see §5.3.4).
+different values. Canonical bytes are one-way by design (see §5.3.5).
 
 **Self-framing resync.** The `svl.attest` payload (version 2) also carries a `sync` word — the 231-gate
 triple of the artifact's leading 512-byte block. `svl.attest.locate_sync(stream, sync)` finds that block
@@ -598,6 +598,32 @@ that produced the artifact (and whose WAT does not assemble) — that checks not
 | "Self-hosting, 3-stage bootstrap" | `compiler_svl.svl` is a 540-byte stub (`assert true`); it compiles nothing. |
 | "Six compiler optimizations wired" | Only SIMD is referenced by `compiler_wasm.py` — and it currently breaks the shape it targets (`unknown local $sum`). |
 | "Registry with cryptographic attestations" | Had an **authentication bypass**: `verify_package` loaded the registered key then overwrote it with `attestation.public_key` (the party being verified). **Fixed 2026-11-12** and proven load-bearing: a copy with the old line restored accepts a self-signed package under a trusted verifier's name; the fixed tree rejects it. **Changed again 2026-11-12**: `publish_package` no longer sets `VERIFIED` unconditionally — a compiled SVL artifact is `VERIFIED` only when its own `svl.attest` section checks out; anything else is published and signed but recorded `UNVERIFIED`. `publish` self-attests as `verifier_id=metadata.author` by design, so only registered verifiers should ever be passed to `verify_package`. |
+
+### 5.3.5 The binary deserializer is real (added 2026-11-12)
+
+`ASTBinaryDeserializer._deserialize_node` was a stub that returned `{'_type': ..., '_tag': ...}`,
+so `from_binary(to_binary(ast)) != ast` (measured 4212 bytes -> 21 bytes).  It is now a full
+reader, and `test_roundtrip()` asserts structural equality **and** byte-stable re-serialisation.
+
+**The format is not self-describing**, and that drove the design: the writer emits primitives
+with no type tag, so an int in 1..5, a bool and a string of length 1..5 all begin with the same
+byte.  The reader therefore uses the *declared field type* — the same information the writer had.
+Three fields have unions too wide for that alone (`Literal.value`, `Pattern.value`,
+`TypeExpr.value`); each is disambiguated by a sibling discriminator the writer emitted earlier in
+the same node (`literal_type` / `kind`), and `Type.args` by `Type.kind`.  A field whose value is
+`None` is still *written* (as `0x00`), so it must be consumed even when the kind already implies
+`None` — missing that desynchronises the whole stream.
+
+`to_binary` is **unchanged and byte-identical**, so nothing that hashes it (the 231-gate over a
+serialised AST, the golden references, the bootstrap) is affected.  The reader raises rather than
+guessing when a bare primitive has no type context.
+
+Verified: all 46 corpus programs round-trip exactly; all 42 `NODE_TAGS` types round-trip
+individually; every `Literal`/`Pattern`/`TypeExpr` discriminator path; `Type` and `TypeVar`;
+corruption detected; truncation rejected.
+
+**Known gap:** `CastExpr` is not in `NODE_TAGS`, so the *serialiser* rejects it
+(`ValueError: Unknown node type: CastExpr`).  It has never been serialisable.
 
 ### 5.4 Package Manager
 
