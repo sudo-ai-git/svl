@@ -23,6 +23,7 @@ class TokenType(Enum):
     MODULE = auto()   # ל
     IMPORT = auto()   # מ
     EXPORT = auto()   # נ
+    EXTERN = auto()   # extern "c" func — host import declaration
     CONST = auto()    # ס
     VAR = auto()      # ע
     ASSERT = auto()   # פ
@@ -364,7 +365,8 @@ class Lexer:
             'else': TokenType.ELSE, 'while': TokenType.WHILE, 'for': TokenType.FOR,
             'func': TokenType.FUNC, 'return': TokenType.RETURN, 'match': TokenType.MATCH,
             'type': TokenType.TYPE, 'struct': TokenType.STRUCT, 'module': TokenType.MODULE,
-            'import': TokenType.IMPORT, 'export': TokenType.EXPORT, 'const': TokenType.CONST,
+            'import': TokenType.IMPORT, 'export': TokenType.EXPORT, 'extern': TokenType.EXTERN,
+            'const': TokenType.CONST,
             'var': TokenType.VAR, 'assert': TokenType.ASSERT, 'try': TokenType.TRY,
             'catch': TokenType.CATCH, 'throw': TokenType.THROW, 'async': TokenType.ASYNC,
             'await': TokenType.AWAIT,

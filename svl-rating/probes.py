@@ -201,6 +201,37 @@ def probe_semantics():
         record("P32", "free() reclaims a same-size allocation", "FAIL",
                f"{type(exc).__name__}: {str(exc)[:80]}")
 
+    # P33 extern host import (FFI)
+    extern_src = ('extern "c" func host_add(a: int, b: int) type int'
+                  ' module m { func main() type int { return host_add(2, 3) } }')
+    try:
+        wat = compile_ok(extern_src)
+        binary = wasmtime.wat2wasm(wat)
+        engine = wasmtime.Engine()
+        module = wasmtime.Module(engine, binary)
+        store = wasmtime.Store(engine)
+        linker = wasmtime.Linker(engine)
+        i32 = wasmtime.ValType.i32()
+        linker.define_func("env", "host_add", wasmtime.FuncType([i32, i32], [i32]),
+                           lambda a, b: a + b)
+        for nm, sig, f in [
+            ("print", wasmtime.FuncType([i32, i32], []), lambda a, b: None),
+            ("print_int", wasmtime.FuncType([i32], []), lambda v: None),
+            ("putc", wasmtime.FuncType([i32], []), lambda c: None),
+            ("clear", wasmtime.FuncType([], []), lambda: None),
+            ("malloc", wasmtime.FuncType([i32], [i32]), lambda n: 1 << 20),
+            ("iterator_next", wasmtime.FuncType([i32], [i32]), lambda h: 0),
+            ("await", wasmtime.FuncType([i32], [i32]), lambda x: x),
+        ]:
+            linker.define_func("env", nm, sig, f)
+        inst = linker.instantiate(store, module)
+        rv = inst.exports(store)["m_main"](store)
+        record("P33", "extern host import is callable", "PASS" if rv == 5 else "FAIL",
+               f"host_add(2, 3) = {rv} (correct 5)")
+    except Exception as exc:
+        record("P33", "extern host import is callable", "FAIL",
+               f"{type(exc).__name__}: {str(exc)[:90]}")
+
 
 def probe_type_soundness():
     cases = [

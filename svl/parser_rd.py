@@ -15,6 +15,7 @@ class NodeType(Enum):
     MODULE = "Module"
     IMPORT = "Import"
     EXPORT = "Export"
+    EXTERN_DECL = "ExternDecl"
     FUNC_DECL = "FuncDecl"
     STRUCT_DECL = "StructDecl"
     TYPE_ALIAS = "TypeAlias"
@@ -140,6 +141,19 @@ class Module(ASTNode):
 class Import(ASTNode):
     path: str
     version_constraint: Optional['VersionConstraint'] = None
+
+
+@dataclass
+class ExternDecl(ASTNode):
+    """`extern "c" func name(params) type ret` — a host import declaration.
+
+    The function has no body; the compiler emits an `(import "env" "name" ...)`
+    and calls resolve to it.  This is the language's FFI surface.
+    """
+    name: str
+    params: List['Param']
+    return_type: Optional['TypeExpr']
+    abi: str = "c"
 
 
 @dataclass
@@ -975,6 +989,8 @@ class Parser:
     def parse_top_level(self) -> TopLevelItem:
         if self.match_any(TokenType.FUNC, TokenType.FUNC):
             return self.parse_func_decl()
+        elif self.match(TokenType.EXTERN):
+            return self.parse_extern_decl()
         elif self.match_any(TokenType.STRUCT, TokenType.STRUCT):
             return self.parse_struct_decl()
         elif self.match_any(TokenType.TYPE, TokenType.TYPE):
@@ -1015,6 +1031,24 @@ class Parser:
             type=NodeType.FUNC_DECL,
             line=name_tok.line, column=name_tok.column, offset=name_tok.offset,
             name=name, params=params, return_type=return_type, body=body, effects=effects
+        )
+
+    def parse_extern_decl(self) -> ExternDecl:
+        """`extern "c" func name(params) type ret` — a host import with no body."""
+        abi = 'c'
+        if self.match(TokenType.STRING):
+            abi = self.tokens[self.pos - 1].value
+        self.expect(TokenType.FUNC)
+        name_tok = self.expect(TokenType.IDENT)
+        self.expect(TokenType.LPAREN)
+        params = self.parse_params()
+        return_type = None
+        if self.match(TokenType.TYPE):
+            return_type = self.parse_type_expr()
+        return ExternDecl(
+            type=NodeType.EXTERN_DECL,
+            line=name_tok.line, column=name_tok.column, offset=name_tok.offset,
+            name=name_tok.value, params=params, return_type=return_type, abi=abi
         )
 
     def parse_effect_row(self) -> 'EffectRow':
@@ -1155,10 +1189,13 @@ class Parser:
     def parse_stmt(self) -> Stmt:
         if self.current and self.current.type == TokenType.LBRACE:
             return self.parse_block()
-        if self.current and self.current.type in (TokenType.FUNC, TokenType.STRUCT, TokenType.TYPE, TokenType.CONST, TokenType.VAR):
+        if self.current and self.current.type in (TokenType.FUNC, TokenType.STRUCT, TokenType.TYPE, TokenType.CONST, TokenType.VAR, TokenType.EXTERN):
             if self.current.type == TokenType.FUNC:
                 self.advance()
                 return self.parse_func_decl()
+            elif self.current.type == TokenType.EXTERN:
+                self.advance()
+                return self.parse_extern_decl()
             elif self.current.type == TokenType.STRUCT:
                 self.advance()
                 return self.parse_struct_decl()

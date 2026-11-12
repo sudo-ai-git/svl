@@ -9,6 +9,25 @@ description = "SVL — Self-Verifying Language: deterministic WASM compilation w
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+keywords = ["svl", "wasm", "verification", "compiler", "self-verifying", "formal-methods"]
+authors = [{ name = "sudo-ai-git" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/sudo-ai-git/svl"
+Repository = "https://github.com/sudo-ai-git/svl"
+Issues = "https://github.com/sudo-ai-git/svl/issues"
 
 # The hard module-level imports the package already requires (see requirements-dev.txt).
 dependencies = [

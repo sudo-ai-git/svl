@@ -176,6 +176,7 @@ class ASTBinarySerializer:
         'TernaryExpr': 0x29,
         'AssignExpr': 0x2A,
         'ThrowStmt': 0x2B,
+        'ExternDecl': 0x2C,
     }
 
     TAG_TO_NODE = {v: k for k, v in NODE_TAGS.items()}
