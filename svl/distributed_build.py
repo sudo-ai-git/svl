@@ -438,6 +438,22 @@ class SVLBuildActionGenerator:
     def __init__(self, cache: DistributedBuildCache):
         self.cache = cache
 
+    @staticmethod
+    def _input_hash(source: str) -> str:
+        """Cache key for a source file: its canonical AST fingerprint.
+
+        A reproducible build must map every source that parses to the same program onto the
+        same cache entry -- reformatting, comment changes, and the Hebrew vs ASCII keyword
+        spellings all qualify (measured: five such variants share one fingerprint).  A raw
+        text hash cannot do that.  An unparsable source falls back to a prefixed text hash so
+        the failure is still cacheable rather than recomputed.
+        """
+        try:
+            from svl.attest import ast_fingerprint
+            return ast_fingerprint(source)["ast_sha256"]
+        except Exception:                                              # noqa: BLE001
+            return "text:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
+
     def compile_module(self, source_path: str, output_path: str,
                        options: Dict[str, Any] = None) -> BuildAction:
         """Generate action to compile SVL module to WASM."""
@@ -447,7 +463,7 @@ class SVLBuildActionGenerator:
         with open(source_path, 'r') as f:
             source = f.read()
 
-        source_hash = hashlib.sha256(source.encode('utf-8')).hexdigest()
+        source_hash = self._input_hash(source)
 
         return BuildAction(
             command=['svl', 'compile', source_path, '-o', output_path],
@@ -464,7 +480,7 @@ class SVLBuildActionGenerator:
         with open(source_path, 'r') as f:
             source = f.read()
 
-        source_hash = hashlib.sha256(source.encode('utf-8')).hexdigest()
+        source_hash = self._input_hash(source)
 
         return BuildAction(
             command=['svl', 'verify', source_path],

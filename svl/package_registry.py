@@ -60,6 +60,11 @@ class VerificationAttestation:
     timestamp: float = field(default_factory=time.time)
     status: VerificationStatus = VerificationStatus.UNVERIFIED
     attestation_id: str = field(default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[:16])
+    # Reproducible-build identity, copied from the artifact's own `svl.attest` section when
+    # there is one.  `content_hash` binds the exact bytes; these bind the PROGRAM, so two
+    # builds of the same source from different layouts still compare equal.
+    ast_sha256: Optional[str] = None
+    gate231: Optional[List[int]] = None
 
 
 @dataclass
@@ -144,7 +149,9 @@ class PackageRegistry:
                     "public_key": a.public_key.hex(),
                     "timestamp": a.timestamp,
                     "status": a.status.value,
-                    "attestation_id": a.attestation_id
+                    "attestation_id": a.attestation_id,
+                    "ast_sha256": a.ast_sha256,
+                    "gate231": a.gate231
                 })
             package_list.append({
                 "metadata": {
@@ -198,13 +205,42 @@ class PackageRegistry:
 
     def publish_package(self, package_path: str, metadata: PackageMetadata,
                         content_hash: str, signer_key_pem: bytes) -> bool:
-        """Publish a package with self-attestation."""
+        """Publish a package with self-attestation.
+
+        The attestation is marked VERIFIED only when there is something to check: a compiled
+        SVL artifact (wasm magic) must carry a valid `svl.attest` section whose canonical hash
+        matches the bytes it is handed.  Any other content is still published and still
+        signed, but recorded as UNVERIFIED -- previously EVERY publish was marked VERIFIED
+        unconditionally, which made the status meaningless.
+
+        For a self-attesting artifact the canonical AST fingerprint (`ast_sha256`, `gate231`)
+        is copied off the artifact's own section onto the attestation, so the registry exposes
+        the reproducible-build identity and not only the byte hash.
+        """
         # Compute content hash
         with open(package_path, 'rb') as f:
             content = f.read()
             computed_hash = hashlib.sha256(content).hexdigest()
             if computed_hash != content_hash:
                 return False
+
+        # Decide the honest status, and harvest the artifact's own self-attestation.
+        ast_sha256: Optional[str] = None
+        gate231: Optional[List[int]] = None
+        status = VerificationStatus.UNVERIFIED
+        if content[:4] == b"\x00asm":
+            try:
+                from svl.attest import verify_attestation, extract_attestation
+                attested_ok, _details = verify_attestation(content)
+                payload = extract_attestation(content) or {}
+                if isinstance(payload.get("ast_sha256"), str):
+                    ast_sha256 = payload["ast_sha256"]
+                if isinstance(payload.get("gate231"), list):
+                    gate231 = [int(x) for x in payload["gate231"]]
+                if attested_ok:
+                    status = VerificationStatus.VERIFIED
+            except Exception:                                      # noqa: BLE001
+                status = VerificationStatus.UNVERIFIED
 
         # Sign the attestation
         try:
@@ -238,19 +274,24 @@ class PackageRegistry:
             verifier_id=metadata.author,  # Self-attestation by author
             signature=signature,
             public_key=public_key_der,
-            status=VerificationStatus.VERIFIED
+            status=status,
+            ast_sha256=ast_sha256,
+            gate231=gate231
         )
 
-        # Create or update package record
+        # Create or update package record.  `verified_content_hash` is a claim that something
+        # checked the bytes, so it is only set for an attestation that actually verified.
         if metadata.name in self.packages:
             record = self.packages[metadata.name]
             record.metadata = metadata
             record.attestations.append(attestation)
+            if status == VerificationStatus.VERIFIED:
+                record.verified_content_hash = content_hash
         else:
             record = PackageRecord(
                 metadata=metadata,
                 attestations=[attestation],
-                verified_content_hash=content_hash
+                verified_content_hash=content_hash if status == VerificationStatus.VERIFIED else None
             )
             self.packages[metadata.name] = record
 

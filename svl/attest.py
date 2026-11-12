@@ -23,8 +23,36 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 SECTION_NAME = "svl.attest"
-ATTEST_VERSION = 1
+ATTEST_VERSION = 2
 WASM_MAGIC = b"\x00asm"
+
+# The artifact's leading code block, used as a self-framing sync word by `locate_sync`.
+SYNC_BLOCK = 512
+
+
+def sync_checksums(plain_binary: bytes, block_size: int = SYNC_BLOCK) -> Dict[str, Any]:
+    """Checksums of the artifact's leading block -- its self-framing sync word."""
+    from svl.gate231 import compute_checksums_cython
+    block = plain_binary[:block_size]
+    s, l, p = compute_checksums_cython(block)
+    return {"block": len(block), "checksums": [s, l, p], "meta": (s ^ l ^ p) % 231}
+
+
+def locate_sync(data: bytes, sync: Dict[str, Any]) -> List[int]:
+    """Find the artifact's sync block inside `data` -- a larger stream, a shifted container.
+
+    This is the self-synchronising frame-code property: no external framing or offset table is
+    needed, the block locates itself.  Uses the O(n) rolling search (`svl.viable_start`).
+
+    **Read the result as a candidate list, not a unique answer.**  The PRODUCT channel is 0 for
+    essentially every block of this size (measured: 2000/2000 random 512-byte windows, because
+    a 512-byte window almost surely contains a byte b with b+1 divisible by 3, 7 or 11).  The
+    effective keyspace is therefore 231^2, not 231^3, and false syncs occur at ~1/53361 per
+    position -- measured 3 in an 8 KB stream and 6 in 128 KB.
+    """
+    from svl.viable_start import rolling_unique_viable_starts
+    block = int(sync.get("block", SYNC_BLOCK))
+    return rolling_unique_viable_starts(data, tuple(sync["checksums"]), int(sync["meta"]), block)
 
 
 # --------------------------------------------------------------------------- binary helpers
@@ -117,25 +145,69 @@ def _wat_escape(data: bytes) -> str:
     return "".join(f"\\{b:02x}" for b in data)
 
 
-def _gate_triple(source: str) -> Optional[List[int]]:
-    try:
-        from svl.gate231 import compute_checksums_cython
-        from svl.serialization import to_binary
-        from svl.lexer import tokenize
-        from svl.parser_rd import parse
-        return list(compute_checksums_cython(to_binary(parse(tokenize(source)))))
-    except Exception:                                              # noqa: BLE001
-        return None
+def ast_fingerprint(source: str) -> Dict[str, Any]:
+    """Deterministic, position-independent program identity for `source`.
+
+    Returns ``{'ast_sha256', 'gate231', 'source_sha256', 'ast_bytes'}`` where `ast_sha256` and
+    `gate231` are computed over `to_canonical_binary` -- the AST with source-position fields
+    omitted.  Two sources that parse to the same tree therefore give the SAME fingerprint:
+    different whitespace or comments, and the Hebrew vs ASCII spellings of the same keywords
+    (measured: five spellings/layouts of one program all give ast_sha256 6df5994c... and gate
+    [167, 10, 0]).  `source_sha256` is the raw-text hash and is NOT stable across reformatting.
+    """
+    from svl.gate231 import compute_checksums_cython
+    from svl.serialization import to_canonical_binary
+    from svl.lexer import tokenize
+    from svl.parser_rd import parse
+
+    blob = to_canonical_binary(parse(tokenize(source)))
+    return {
+        "ast_sha256": hashlib.sha256(blob).hexdigest(),
+        "gate231": list(compute_checksums_cython(blob)),
+        "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        "ast_bytes": len(blob),
+    }
 
 
-def _ast_hash(source: str) -> Optional[str]:
-    try:
-        from svl.serialization import to_binary
-        from svl.lexer import tokenize
-        from svl.parser_rd import parse
-        return hashlib.sha256(to_binary(parse(tokenize(source)))).hexdigest()
-    except Exception:                                              # noqa: BLE001
-        return None
+def _payload(source: str, plain_binary: bytes) -> Dict[str, Any]:
+    fp = ast_fingerprint(source)
+    return {
+        "v": ATTEST_VERSION,
+        "content_sha256": content_hash(plain_binary),
+        "gate231": fp["gate231"],
+        "ast_sha256": fp["ast_sha256"],
+        "source_sha256": fp["source_sha256"],
+        # The artifact's leading code block, as a self-framing sync word: `locate_sync` can
+        # find this block inside a larger or shifted stream without any external framing.
+        "sync": sync_checksums(plain_binary),
+        # The compile-time gate ran and refused to compile on failure (strict=True).
+        "layers": {"syntax": True, "types": True, "abstract": True},
+    }
+
+
+def _section_text(wat: str, payload: Dict[str, Any]) -> str:
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    text = wat.rstrip()
+    idx = text.rfind(")")
+    if idx < 0:
+        raise ValueError("WAT has no closing paren; cannot attach the attestation section")
+    return (text[:idx]
+            + f'  (@custom "{SECTION_NAME}" "{_wat_escape(blob)}")\n'
+            + text[idx:])
+
+
+def attest_wat(source: str, wat: str) -> Tuple[str, Dict[str, Any]]:
+    """Return ``(wat carrying the svl.attest section, payload)``, assembling once.
+
+    The section content is the canonical hash of the module with all custom sections
+    stripped, so the section itself does not change the hash it attests to -- and
+    re-attesting an already-attested module is idempotent.
+    """
+    import wasmtime
+
+    plain = wasmtime.wat2wasm(wat)
+    payload = _payload(source, plain)
+    return _section_text(wat, payload), payload
 
 
 def attest(source: str, wat: str) -> Tuple[bytes, Dict[str, Any]]:
@@ -145,24 +217,25 @@ def attest(source: str, wat: str) -> Tuple[bytes, Dict[str, Any]]:
     """
     import wasmtime
 
-    plain = wasmtime.wat2wasm(wat)
-    payload: Dict[str, Any] = {
-        "v": ATTEST_VERSION,
-        "content_sha256": content_hash(plain),
-        "gate231": _gate_triple(source),
-        "ast_sha256": _ast_hash(source),
-        "layers": {"syntax": True, "types": True},   # the gate ran (compile refuses otherwise)
-    }
+    attested_wat, payload = attest_wat(source, wat)
+    return wasmtime.wat2wasm(attested_wat), payload
 
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    text = wat.rstrip()
-    idx = text.rfind(")")
-    if idx < 0:
-        raise ValueError("WAT has no closing paren; cannot attach the attestation section")
-    text = (text[:idx]
-            + f'  (@custom "{SECTION_NAME}" "{_wat_escape(blob)}")\n'
-            + text[idx:])
-    return wasmtime.wat2wasm(text), payload
+
+def compile_attested(source: str, deterministic: bool = True, strict: bool = True
+                     ) -> Tuple[str, bytes, Dict[str, Any]]:
+    """Compile `source` and produce the self-attested artifact.
+
+    Returns ``(wat_with_section, attested_binary, payload)``.  This is the artifact-producing
+    entry point.  `compile_file_to_wasm` deliberately stays byte-identical so artifacts already
+    pinned elsewhere (the minted spike-102 payload checks the sha256 of its .wasm) remain
+    valid; the attestation is opt-in at the artifact boundary.
+    """
+    import wasmtime
+
+    from svl.compiler_wasm import compile_file_to_wasm
+    wat = compile_file_to_wasm(source, deterministic=deterministic, strict=strict)
+    attested_wat, payload = attest_wat(source, wat)
+    return attested_wat, wasmtime.wat2wasm(attested_wat), payload
 
 
 def verify_attestation(binary: bytes) -> Tuple[bool, Dict[str, Any]]:

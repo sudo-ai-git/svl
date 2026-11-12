@@ -283,8 +283,13 @@ class DualStreamChecker:
         all_semantic_passed = all(r.passed for r in semantic_results)
         all_structural_passed = all(r.passed for r in structural_results)
 
-        # Compute agreement across all statements
-        agreement = all_semantic_passed == all_structural_passed
+        # Per-statement agreement: the two streams must agree on EVERY statement, not merely
+        # on the overall verdict.  The previous `all_sem == all_struct` was True whenever both
+        # streams failed everything -- an "agreement" that meant nothing, and one that hid a
+        # statement where only one stream had passed.
+        agreement = (len(semantic_results) == len(structural_results)
+                     and all(s.passed == t.passed
+                             for s, t in zip(semantic_results, structural_results)))
 
         # Combined semantic result
         combined_semantic = TypeStreamResult(

@@ -187,8 +187,10 @@ class ASTBinarySerializer:
         'null': 0x05,
     }
 
-    def __init__(self):
+    def __init__(self, canonical: bool = False):
         self.serializer = BinarySerializer()
+        # canonical=True omits source-position fields, giving a *program identity* form.
+        self.canonical = canonical
 
     def serialize(self, node: Any) -> bytes:
         """Serialize AST node to binary."""
@@ -226,8 +228,11 @@ class ASTBinarySerializer:
 
         result = bytearray([tag])
 
-        # Serialize fields in deterministic order (sorted by field name)
+        # Serialize fields in deterministic order (sorted by field name).
+        # The canonical form omits source positions: they are layout, not program identity.
         for f in sorted(fields(node), key=lambda x: x.name):
+            if self.canonical and f.name in POSITION_FIELDS:
+                continue
             value = getattr(node, f.name)
             result.extend(self.serialize(value))
 
@@ -381,6 +386,29 @@ def to_binary(ast: Any) -> bytes:
     """Serialize AST to custom binary format."""
     serializer = ASTBinarySerializer()
     return serializer.serialize(ast)
+
+
+# Source-position fields on ASTNode.  They record WHERE a construct appeared, not WHAT it is,
+# so they must not participate in a program identity.
+POSITION_FIELDS = frozenset({'line', 'column', 'offset'})
+
+
+def to_canonical_binary(ast: Any) -> bytes:
+    """Serialize the AST into a position-independent *program identity* form.
+
+    Why this exists: `to_binary` writes every dataclass field, including `line`, `column` and
+    `offset`.  Two sources for the same program that differ only in indentation or comments
+    therefore produced DIFFERENT hashes and DIFFERENT 231-gate triples (measured: the same
+    function reformatted gave gate [38,170,0] vs [210,108,0]), and the Hebrew and ASCII
+    spellings of the same keywords differed too.  That made the "deterministic AST
+    fingerprint" a layout hash, useless as a reproducible-build cache key.
+
+    This form omits the position fields, so it is a function of the program alone.  It is
+    ONE-WAY: `ASTBinaryDeserializer._deserialize_node` is a stub that returns a dict, so no
+    binary form can currently be read back (`from_binary(to_binary(ast)) != ast`, measured).
+    Use this form for hashing and cache keys only.
+    """
+    return ASTBinarySerializer(canonical=True).serialize(ast)
 
 
 def from_binary(data: bytes) -> Any:

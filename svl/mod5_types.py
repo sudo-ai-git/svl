@@ -174,6 +174,74 @@ def mod5_mul(a: Mod5Bucket, b: Mod5Bucket) -> Mod5Bucket:
     return Mod5Bucket((a * b) % 5)
 
 
+# ============================================================================
+# THE LATTICE (this is NOT the ring above)
+# ============================================================================
+#
+# `mod5_add`/`mod5_mul` are the ring operations on Z/5: commutative and associative, but
+# NOT idempotent (`mod5_add(B1,B1) == B2 != B1`), so they are not a join/meet and the ring
+# is not a lattice.  Measured over all 25 pairs: 0 idempotent cases for either.
+#
+# The buckets DO carry a lattice, just not through those operations: the chain
+#     B0 < B1 < B2 < B3 < B4
+# with join = max and meet = min.  On this chain `z2_negate` is an order-reversing
+# involution -- a duality, not a complement (`B1 join B3 == B3 != B4`, so it is not a
+# Boolean negation).  These are the laws the functions below implement and
+# `verify_mod5_lattice()` checks exhaustively.
+
+def bucket_leq(a: Mod5Bucket, b: Mod5Bucket) -> bool:
+    """Lattice order: B0 < B1 < B2 < B3 < B4."""
+    return int(a) <= int(b)
+
+
+def bucket_join(a: Mod5Bucket, b: Mod5Bucket) -> Mod5Bucket:
+    """Least upper bound on the bucket chain."""
+    return Mod5Bucket(max(int(a), int(b)))
+
+
+def bucket_meet(a: Mod5Bucket, b: Mod5Bucket) -> Mod5Bucket:
+    """Greatest lower bound on the bucket chain."""
+    return Mod5Bucket(min(int(a), int(b)))
+
+
+def verify_mod5_lattice() -> Dict[str, bool]:
+    """Exhaustively check the lattice laws and the Z/2 duality.
+
+    This is the falsifiable core: every law is evaluated over all 125 triples, so a change
+    to the order, the negation map or the join/meet shows up here as a False.
+    """
+    buckets = list(Mod5Bucket)
+    res: Dict[str, bool] = {}
+    res['join_comm'] = all(bucket_join(a, b) == bucket_join(b, a)
+                           for a in buckets for b in buckets)
+    res['meet_comm'] = all(bucket_meet(a, b) == bucket_meet(b, a)
+                           for a in buckets for b in buckets)
+    res['join_assoc'] = all(bucket_join(bucket_join(a, b), c) == bucket_join(a, bucket_join(b, c))
+                            for a in buckets for b in buckets for c in buckets)
+    res['meet_assoc'] = all(bucket_meet(bucket_meet(a, b), c) == bucket_meet(a, bucket_meet(b, c))
+                            for a in buckets for b in buckets for c in buckets)
+    res['join_idem'] = all(bucket_join(a, a) == a for a in buckets)
+    res['meet_idem'] = all(bucket_meet(a, a) == a for a in buckets)
+    res['absorption'] = all(
+        bucket_join(a, bucket_meet(a, b)) == a and bucket_meet(a, bucket_join(a, b)) == a
+        for a in buckets for b in buckets)
+    res['bounded'] = all(bucket_join(a, Mod5Bucket.B4) == Mod5Bucket.B4
+                         and bucket_meet(a, Mod5Bucket.B0) == Mod5Bucket.B0
+                         for a in buckets)
+    res['leq_consistent'] = all(
+        bucket_leq(a, b) == (bucket_join(a, b) == b) == (bucket_meet(a, b) == a)
+        for a in buckets for b in buckets)
+    res['z2_involution'] = all(z2_negate(z2_negate(a)) == a for a in buckets)
+    # Order-reversing duality: negation swaps join and meet.
+    res['z2_antitone_join'] = all(
+        z2_negate(bucket_join(a, b)) == bucket_meet(z2_negate(a), z2_negate(b))
+        for a in buckets for b in buckets)
+    res['z2_antitone_meet'] = all(
+        z2_negate(bucket_meet(a, b)) == bucket_join(z2_negate(a), z2_negate(b))
+        for a in buckets for b in buckets)
+    return res
+
+
 # Variance under Z/2 Negation
 VARIANCE_MAP = {
     # Covariant types: negation preserves variance
