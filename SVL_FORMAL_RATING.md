@@ -386,10 +386,11 @@ compile-latency measurement), not failures.
 
 - **No garbage collection.** Reclamation is `free` or the entry-point reset; a long-running
   loop that allocates without freeing still grows memory.
-- **No real C/Rust FFI.** WIT/component-model *generation* exists, but no component-model
-  runtime is wired, so cross-language calls are not callable today.
-- **No releases beyond `0.1.0`.** `v0.1.0` is tagged and pushed; no GitHub Releases
-  (release notes/assets) yet.
+- **No component-model runtime.** `extern "c" func ...` gives a callable host import (the FFI
+  surface), but there is no WASM component-model runtime, so SVL cannot yet call into a
+  C/Rust *library* — only functions the host chooses to expose.
+- **Releases.** `v0.1.0` is tagged, pushed, and has a **GitHub Release** with an attested
+  `.wasm` asset.
 - **Re-run after the fixes:** `python -m svl.spike_runner` → **41/43** (exit 2 = the two
   self-declared stubs H36/H37), no regressions; `python -m svl.spike_s17_wasm_determinism`
   → **Passed: True** (assembly ok, text deterministic).
