@@ -364,28 +364,62 @@ verify_wasm_determinism(source, runs=5)  # Returns True/False
 
 "Compiles to WASM" means **wasmtime accepted and ran it**. Text-level checks cannot see invalid WAT or a
 mis-executing loop, so verify by assembling (`wasmtime.wat2wasm` then `wasmtime.Module` — the `Module` is
-what validates) and invoking the export.
+what validates) and invoking the export (`<module>_main`).
 
-Verified to assemble **and run** (2026-11-12):
+Measured against a 27-construct matrix: **21 run correctly**, 3 assemble-fail, 2 compile-error,
+1 runtime error. Verified to assemble **and run**:
 
 | Feature | Probe | Result |
 |---|---|---|
 | `while` (incl. nested) | `while i<=5 { s+=i; i+=1 }` | 15 |
-| `for` over a range | `for i in 0..5 { s+=i }` | 10 |
+| `for` over a range (fixed or computed bound) | `for i in 0..n { s+=i }` | correct |
 | `if…then…else` **expression** | `let r = if c then 10 else 20` with `c=0` | 20 |
+| `? :` ternary | `c ? 10 : 20` with `c=1` | 10 |
 | top-level `const`/`var` | `const one=1 const seven=7  return one+seven` | 8 |
+| **recursion** | `fib(10)` with `if n<2 then { return n } else { … }` | 55 |
+| early `return` from inside `if`/`while` | — | runs cleanly |
 | `assert` | `assert x==5` with `x=5` | no trap — and it **must** trap when false |
 | `print` / `print_int` | `print("hi")` | assembles + calls the host |
-| early `return` from inside `if`/`while` | — | runs cleanly |
+| arithmetic `+ - * / %` | `2 + 3*4 - 6%4` | 12 |
+| **bitwise** `& | ^ << >>` and unary `~` | `(12 & 10) + (1 | 2)` | 11 |
+| unary `-`, `!` | `-5 + (1 - !0)` | -5 |
+| `void` returns, helper calls, comparisons, `&& \|\|` | — | correct |
 
-Also working: `void` returns, helper calls, `+ - * %` on i32.
+**Not** in the executable subset: closures/`lambda`, `match` expressions, struct/array literals + field/
+index access (no real layout), `try`/`catch`, `async`/`await`, SIMD for general loops, GC structs, and
+generics at runtime. These fail loudly (assemble error or a clear compile error) rather than silently.
 
-**Not** in the executable subset (parse-level only, or unimplemented): closures/`lambda`, `match`
-expressions, struct/array literals + field/index access on real layout, `try`/`catch`, `async`/`await`,
-SIMD emission for general loops, GC structs, generics at runtime.
+**Pitfalls confirmed by execution**
+- `%` is WASM's **truncated remainder (sign of the dividend)**, not Python's floor modulo: `(-1) % 256` is
+  `-1`, not `255`. Keep the operand non-negative, or you get a self-failing `assert`.
+- `int` is **i32**: an out-of-range literal is a compile error, not a wrap.
 
-**Pitfall — `%` is WASM's truncated remainder (sign of the dividend), not Python's floor modulo.**
-`(-1) % 256` is `-1`, not `255`. Write arithmetic that keeps the operand non-negative.
+### 5.3.2 What the three verification layers do — and do NOT — verify
+
+Verified by execution, and important before quoting the "self-verifying" name:
+
+Given a program and three semantically **different** but valid variants (swap `+`→`-`, change a constant,
+change precedence), **all three layers pass on all four programs** (`syntax.passed=True`,
+`type.passed=True`, `theorem.passed=True`). What differs is only the recorded 231-gate value:
+
+| Program | syntax | type | theorem | 231-gate (SUM, LINEAR, PRODUCT) |
+|---|---|---|---|---|
+| `a + 2` (baseline) | pass | pass | pass | (125, 158, 0) |
+| `a - 2` | pass | pass | pass | (127, 137, 0) |
+| `a * 2` | pass | pass | pass | (124, 53, 0) |
+
+So the layers verify **internal consistency and hash properties** — that the AST is well-formed, that types
+are structurally consistent, that the program hash has the expected monodromy parity — **not** that the
+program computes what you meant. They are a *tamper/drift detector against a recorded reference*: they catch
+a program that changed, not a program that is wrong. The theorem layer in particular passes for
+essentially any well-formed program (its parity is even unless exactly one of MR/Lucas says "prime").
+
+Treat the 231-gate value as the thing you pin and compare. Do not advertise the layers as proving
+correctness.
+
+**Also note**: the layers verify the **AST**. Compilation has no layer — a program can pass all three and
+still have produced invalid or wrong WASM (that was true of this backend until 2026-11-12). Assembling and
+running is the only check that covers the emitter; `python -m svl.spike_s17_wasm_determinism` does it.
 
 ### 5.4 Package Manager
 

@@ -8,6 +8,14 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 | **L2** | Types | Mod-5 Dual-Stream | Mod-5 buckets + Z/2 negation + structural checksums |
 | **L3** | Theorem | BPSW Monodromy | Cryptographic verification via SHA256 + BPSW on primes {37,73,17} |
 
+> **Scope of the layers (measured, don't skip this).** They verify **internal consistency and hash
+> properties** — the AST is well-formed, types are structurally consistent, the program hash has the expected
+> monodromy parity. They do **not** prove your program computes what you meant, and they verify the **AST, not
+> the emitted code**. Given four semantically different programs (`a + 2`, `a - 2`, `a * 2`), all three layers
+> pass on all of them — what changes is the recorded 231-gate value. Treat the gate as a *tamper/drift
+> detector against a recorded reference*: it catches a program that **changed**, not one that is **wrong**.
+> Compilation is covered by no layer, so assembling and running is a separate gate. See the KB §5.3.2.
+
 ## Quick Start
 
 ```bash
@@ -28,8 +36,9 @@ python -m svl.lsp_server
   pinning required (every value that feeds a checksum, a serialised AST or a program hash is a fixed
   function of its input)
 - **A WASM backend that actually executes** — `while` (incl. nested), `for i in a..b`, `if`/`else`,
-  `if…then…else` *expressions*, top-level `const`/`var`, `assert`, `print`/`print_int` compile, assemble
-  under wasmtime and run (`svl/compiler_wasm.py`)
+  `if…then…else` *expressions*, top-level `const`/`var`, `assert`, `print`/`print_int`, `void` returns,
+  **recursion**, arithmetic (`+ - * / %`), **bitwise** (`& | ^ << >>`, unary `~`) and unary `-`/`!`. Measured
+  against a 27-construct matrix: 21 run correctly (`svl/compiler_wasm.py`).
 - **Self-hosting compiler** — bootstraps in 3 stages
 - **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types
 - **Verification extensions** — SMT/Z3, incremental 231-gate checksums, proof-carrying code, abstract interpretation, differential verification, property-based testing
