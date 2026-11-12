@@ -503,8 +503,8 @@ class WasmCompiler:
 
     def _callee_yields_value(self, name: str) -> bool:
         """True if calling `name` produces a result value."""
-        if name in ('print', 'print_int', 'putc', 'clear'):
-            return False                      # void host imports
+        if name in ('print', 'print_int', 'putc', 'clear', 'free'):
+            return False                      # void host imports / builtins
         for fn_name, fn in self.state.functions.items():
             if fn_name == name or fn_name.endswith(f'${name}'):
                 return bool(fn.func_type.results)
@@ -656,9 +656,7 @@ class WasmCompiler:
         func.body.append('end')
     
     def _compile_for_stmt(self, stmt: ForStmt):
-        """Compile for loop."""
-        func = self.state.current_function
-        
+        """Compile a `for` loop: ranges (`a..b`) and arrays are supported."""
         # Range loops (`for i in start..end`) have well-defined counting semantics;
         # lower them directly instead of routing through the partial iterator protocol.
         if self._is_range_loop(stmt):
@@ -672,41 +670,14 @@ class WasmCompiler:
             self._compile_array_for_stmt(stmt)
             return
 
-        # Iterator protocol. `iterator_next` returns the next handle/element and 0 once
-        # the stream is exhausted, so the loop must exit when the value is 0.
-        iter_local = f"iter_{self.state.label_counter}"
-        self.state.label_counter += 1
-        self._compile_expr(stmt.iter_expr)
-        func.locals.append((iter_local, WasmValType.I32))
-        func.body.append(f'local.set ${iter_local}')
-        
-        label_start = f"$for_{self.state.label_counter}"
-        label_end = f"$for_end_{self.state.label_counter}"
-        self.state.label_counter += 1
-        
-        func.body.append(f'loop {label_start}')
-        func.body.append(f'block {label_end}')
-        
-        # Advance the iterator; 0 means exhausted → leave the loop (branch on false).
-        func.body.append(f'local.get ${iter_local}')
-        func.body.append(f'call $iterator_next')
-        func.body.append(f'local.set ${iter_local}')
-        func.body.append(f'local.get ${iter_local}')
-        func.body.append(f'i32.eqz')
-        func.body.append(f'br_if {label_end}')
-        
-        # Bind the current element to the loop variable
-        func.locals.append((stmt.var, WasmValType.I32))
-        func.body.append(f'local.get ${iter_local}')
-        func.body.append(f'local.set ${stmt.var}')
-        
-        # Body
-        self._compile_block(stmt.body)
-        
-        func.body.append(f'br {label_start}')
-        func.body.append('end')
-        func.body.append('end')
-    
+        # Anything else is not iterable in SVL.  The old iterator path emitted
+        # `call $iterator_next`, which the shipped host stub answers with 0 — so the
+        # body silently never ran.  Refuse instead of emitting a no-op.
+        raise SyntaxError(
+            f"`for <var> in <iterable>` supports ranges (a..b) and arrays; "
+            f"this iterable is not supported (line {getattr(stmt, 'line', '?')})"
+        )
+
     def _compile_range_for_stmt(self, stmt: ForStmt, start_expr, end_expr):
         """Lower `for <var> in <start>..<end>` to a counting loop over [start, end)."""
         func = self.state.current_function
@@ -1181,6 +1152,13 @@ class WasmCompiler:
             func.body.append('memory.fill')
             func.body.append(f'local.get ${ptr}')
             return
+        # `free(ptr)` — return an allocation to the free list.  Only available when the
+        # module allocates (the `$free` function is emitted alongside `$alloc`).
+        if expr.callee == 'free' and len(expr.arguments) == 1:
+            self._uses_heap = True
+            self._compile_expr(expr.arguments[0])
+            self.state.current_function.body.append('call $free')
+            return
         callee = self._resolve_callee(expr.callee, getattr(expr, 'line', '?'))
         # `print` is a host import taking (ptr: i32, len: i32). A lone string-literal
         # argument is therefore expanded into its (ptr, len) pair — pushing only the
@@ -1581,14 +1559,69 @@ class WasmCompiler:
         # It replaces the old `call $malloc` (a host import), which made every allocation
         # the host's problem and collided when the host returned a constant.
         if self._uses_heap:
+            # $alloc returns the PAYLOAD pointer; the 4 bytes before it hold the block's
+            # total size, which is what lets $free push the block onto a free list.
             lines.append('  (func $alloc (param $n i32) (result i32)')
-            lines.append('    (local $p i32)')
+            lines.append('    (local $need i32) (local $prev i32) (local $cur i32)')
+            lines.append('    (local $next i32) (local $p i32)')
+            lines.append('    local.get $n')
+            lines.append('    i32.const 4')
+            lines.append('    i32.add')
+            lines.append('    local.set $need')
+            # --- scan the free list for an exact-size block (-1 = empty) ---
+            lines.append('    i32.const -1')
+            lines.append('    local.set $prev')
+            lines.append('    global.get $free_list')
+            lines.append('    local.set $cur')
+            lines.append('    block $scan_done')
+            lines.append('      loop $scan')
+            lines.append('        local.get $cur')
+            lines.append('        i32.const -1')
+            lines.append('        i32.eq')
+            lines.append('        br_if $scan_done')
+            lines.append('        local.get $cur')
+            lines.append('        i32.load')
+            lines.append('        local.get $need')
+            lines.append('        i32.ne')
+            lines.append('        if')
+            lines.append('          local.get $cur')
+            lines.append('          local.set $prev')
+            lines.append('          local.get $cur')
+            lines.append('          i32.const 4')
+            lines.append('          i32.add')
+            lines.append('          i32.load')
+            lines.append('          local.set $cur')
+            lines.append('          br $scan')
+            lines.append('        end')
+            lines.append('        local.get $cur')
+            lines.append('        i32.const 4')
+            lines.append('        i32.add')
+            lines.append('        i32.load')
+            lines.append('        local.set $next')
+            lines.append('        local.get $prev')
+            lines.append('        i32.const -1')
+            lines.append('        i32.eq')
+            lines.append('        if')
+            lines.append('          local.get $next')
+            lines.append('          global.set $free_list')
+            lines.append('        else')
+            lines.append('          local.get $prev')
+            lines.append('          i32.const 4')
+            lines.append('          i32.add')
+            lines.append('          local.get $next')
+            lines.append('          i32.store')
+            lines.append('        end')
+            lines.append('        local.get $cur')
+            lines.append('        i32.const 4')
+            lines.append('        i32.add')
+            lines.append('        return')
+            lines.append('      end')
+            lines.append('    end')
+            # --- bump, growing memory when the block would exceed the current size ---
             lines.append('    global.get $heap')
             lines.append('    local.set $p')
-            # Grow linear memory when p+n would exceed the current size.  Without this
-            # the module was fixed at `(memory 16)` (1 MiB) with no way to grow.
             lines.append('    local.get $p')
-            lines.append('    local.get $n')
+            lines.append('    local.get $need')
             lines.append('    i32.add')
             lines.append('    memory.size')
             lines.append('    i32.const 65536')
@@ -1596,7 +1629,7 @@ class WasmCompiler:
             lines.append('    i32.gt_u')
             lines.append('    if')
             lines.append('      local.get $p')
-            lines.append('      local.get $n')
+            lines.append('      local.get $need')
             lines.append('      i32.add')
             lines.append('      memory.size')
             lines.append('      i32.const 65536')
@@ -1613,15 +1646,37 @@ class WasmCompiler:
             lines.append('        unreachable')
             lines.append('      end')
             lines.append('    end')
-            lines.append('    global.get $heap')
-            lines.append('    local.get $n')
+            lines.append('    local.get $p')
+            lines.append('    local.get $need')
+            lines.append('    i32.store')                   # header: total block size
+            lines.append('    local.get $p')
+            lines.append('    local.get $need')
             lines.append('    i32.add')
             lines.append('    global.set $heap')
             lines.append('    local.get $p')
+            lines.append('    i32.const 4')
+            lines.append('    i32.add')
+            lines.append('  )')
+            # $free(payload): push the block onto the free list.
+            lines.append('  (func $free (param $payload i32)')
+            lines.append('    (local $b i32)')
+            lines.append('    local.get $payload')
+            lines.append('    i32.const 4')
+            lines.append('    i32.sub')
+            lines.append('    local.set $b')
+            lines.append('    local.get $b')
+            lines.append('    i32.const 4')
+            lines.append('    i32.add')
+            lines.append('    global.get $free_list')
+            lines.append('    i32.store')
+            lines.append('    local.get $b')
+            lines.append('    global.set $free_list')
             lines.append('  )')
             lines.append('  (func $heap_reset')
             lines.append(f'    i32.const {self._heap_base}')
             lines.append('    global.set $heap')
+            lines.append('    i32.const -1')
+            lines.append('    global.set $free_list')
             lines.append('  )')
         
         # Memory (declared after imports and functions; exported separately below).
@@ -1634,6 +1689,7 @@ class WasmCompiler:
         # overlap the data segments.
         if self._uses_heap:
             lines.append(f'  (global $heap (mut i32) (i32.const {self._heap_base}))')
+            lines.append('  (global $free_list (mut i32) (i32.const -1))')
         
         # Globals — canonical WAT: `(global $n <type> (<init>))` when immutable,
         # `(global $n (mut <type>) (<init>))` when mutable. The old form wrapped the type

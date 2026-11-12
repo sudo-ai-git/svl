@@ -369,13 +369,26 @@ compile-latency measurement), not failures.
 - **Mirror synced**: all changed `svl/` modules, the fixed test, `pyproject.toml`, and the
   README; the mirror re-runs 61/61 and 28/23.
 
-### 11.4 Not done, plainly
+### 11.4 Closed later the same day (second pass)
 
-- **PRODUCT channel (L2)** is still degenerate. Replacing it changes every pinned 231-gate
-  value (golden refs, attestation payloads), so it was documented rather than swapped.
-- **`for x in <iterator>`** (non-array) is still an error; only array iteration is lowered.
-- **REPL state does not persist across blocks** — `let x = 1` then `x + 1` in a later block
-  still reports an unknown identifier. Each block is independent.
+- **PRODUCT channel → ROLLING.** `Π(b+1) mod 231` was degenerate (0 for 2000/2000 random
+  512-byte windows); replaced with `H=(H*31+b) mod 231` (31 coprime to 231). Probe **P14 PASS**
+  (0 zeros / 2000), all three implementations agree, golden refs and attestation still pass.
+- **Non-array iterators** now raise a clear compile error instead of emitting the broken
+  `iterator_next` path. Probe **P31 PASS**.
+- **REPL state persists.** Top-level declarations are replayed into every later block, so a
+  function defined in one block is callable in the next. Verified by execution.
+- **Free list.** `$alloc`/`$free` with a `free(ptr)` builtin reclaim exact-size blocks;
+  the entry-point heap reset still covers whole-program re-runs. Probe **P32 PASS**
+  (same-size reallocation returns the same pointer).
+
+### 11.5 Still open, plainly
+
+- **No garbage collection.** Reclamation is `free` or the entry-point reset; a long-running
+  loop that allocates without freeing still grows memory.
+- **No real C/Rust FFI.** WIT/component-model *generation* exists, but no component-model
+  runtime is wired, so cross-language calls are not callable today.
+- **No releases beyond `0.1.0`.** No semver tags or GitHub releases.
 - **Re-run after the fixes:** `python -m svl.spike_runner` → **41/43** (exit 2 = the two
   self-declared stubs H36/H37), no regressions; `python -m svl.spike_s17_wasm_determinism`
   → **Passed: True** (assembly ok, text deterministic).

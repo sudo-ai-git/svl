@@ -177,6 +177,30 @@ def probe_semantics():
     record("P27", "import links a module (inline import rejected)", status,
            f"inline rejected = {inline_rejected}; two-file link -> 42 = {linked}")
 
+    # P31 non-array iterators are rejected, not silently no-op
+    bad_iter = 'module m { func main() type int { let n = 3 let s = 0 for x in n { s += x } return s } }'
+    try:
+        compile_ok(bad_iter)
+        record("P31", "non-array iterator is rejected (not a silent no-op)", "FAIL",
+               "compiled; the body would silently never run")
+    except SyntaxError:
+        record("P31", "non-array iterator is rejected (not a silent no-op)", "PASS",
+               "clear SyntaxError naming the supported iterables")
+    except Exception as exc:
+        record("P31", "non-array iterator is rejected", "FAIL",
+               f"{type(exc).__name__}: {str(exc)[:80]}")
+
+    # P32 the free list reclaims same-size allocations
+    reuse_src = ('module m { func main() type int { let a = zeros(10) let p1 = a'
+                 ' free(a) let b = zeros(10) return b - p1 } }')
+    try:
+        rv, _ = run_wat(compile_ok(reuse_src))
+        record("P32", "free() reclaims a same-size allocation", "PASS" if rv == 0 else "FAIL",
+               f"reallocated pointer minus original = {rv} (0 = same block reused)")
+    except Exception as exc:
+        record("P32", "free() reclaims a same-size allocation", "FAIL",
+               f"{type(exc).__name__}: {str(exc)[:80]}")
+
 
 def probe_type_soundness():
     cases = [
@@ -352,11 +376,11 @@ def probe_verification():
     record("P13", "BPSW 'theorem' layer fails any program", "INFO" if failures == 0 else "PASS",
            f"{failures}/{n} programs failed the layer (0 = constant-true, gates nothing)")
 
-    # P14 PRODUCT channel degeneracy
+    # P14 PRODUCT/ROLLING channel degeneracy
     rng = random.Random(7)
     zeros = sum(1 for _ in range(2000) if product_checksum(bytes(rng.randrange(256) for _ in range(512))) == 0)
-    record("P14", "231-gate PRODUCT channel is non-degenerate", "INFO" if zeros >= 1999 else "PASS",
-           f"PRODUCT == 0 for {zeros}/2000 random 512-byte windows")
+    record("P14", "231-gate ROLLING channel is non-degenerate", "PASS" if zeros < 1999 else "FAIL",
+           f"zero checksums: {zeros}/2000 random 512-byte windows (was 2000/2000 with PRODUCT)")
 
     # P15 strict vs non-strict gate
     bad_typed = 'module m { func f() type int { return "hi" } func main() type int { return 0 } }'

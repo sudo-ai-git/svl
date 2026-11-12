@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional
 import numpy as np
 
 MODULUS = 231  # 3 * 7 * 11
+ROLLING_MULTIPLIER = 31  # coprime to 231, so no single byte can force a zero
 
 
 def sum_checksum(data: bytes) -> int:
@@ -21,12 +22,24 @@ def linear_checksum(data: bytes) -> int:
     return total % MODULUS
 
 
-def product_checksum(data: bytes) -> int:
-    """PRODUCT = (Π (byte[i] + 1)) mod 231 (with 0→1 mapping)"""
-    result = 1
+def rolling_checksum(data: bytes) -> int:
+    """ROLLING = (H*31 + byte[i]) mod 231, H_0 = 0.
+
+    This is the third channel.  It replaced the old PRODUCT channel, which was
+    **degenerate**: Π(b+1) mod 231 is 0 whenever any byte has b+1 divisible by 3, 7 or
+    11, so 2000/2000 random 512-byte windows produced 0 and the channel carried no
+    information.  31 is coprime to 231, so the rolling hash is non-degenerate: a
+    one-byte change alters the checksum with probability ≈ 1 - 1/231.
+    """
+    h = 0
     for b in data:
-        result = (result * (b + 1)) % MODULUS
-    return result
+        h = (h * ROLLING_MULTIPLIER + b) % MODULUS
+    return h
+
+
+def product_checksum(data: bytes) -> int:
+    """Deprecated alias for :func:`rolling_checksum` (the channel is no longer a product)."""
+    return rolling_checksum(data)
 
 
 def compute_checksums(data: bytes) -> Tuple[int, int, int]:
@@ -63,11 +76,21 @@ def linear_checksum_numpy(data: np.ndarray) -> int:
 
 
 def product_checksum_numpy(data: np.ndarray) -> int:
-    """NumPy vectorized PRODUCT checksum with modulo at each step."""
-    result = 1
-    for b in data:
-        result = (result * (int(b) + 1)) % MODULUS
-    return int(result)
+    """NumPy implementation of the rolling-hash channel (see `rolling_checksum`)."""
+    n = len(data)
+    if n == 0:
+        return 0
+    powers = np.empty(n, dtype=np.int64)
+    p = 1
+    for i in range(n - 1, -1, -1):
+        powers[i] = p
+        p = (p * ROLLING_MULTIPLIER) % MODULUS
+    return int((np.dot(data.astype(np.int64), powers)) % MODULUS)
+
+
+def rolling_checksum_numpy(data: np.ndarray) -> int:
+    """Alias for the NumPy rolling-hash channel."""
+    return product_checksum_numpy(data)
 
 
 def compute_checksums_numpy(data: bytes) -> Tuple[int, int, int]:
@@ -99,11 +122,16 @@ def linear_checksum_cython(data: bytes) -> int:
 
 
 def product_checksum_cython(data: bytes) -> int:
-    """Cython-compatible PRODUCT checksum (pure Python equivalent)."""
-    result = 1
+    """Cython-compatible rolling-hash channel (pure Python equivalent)."""
+    h = 0
     for b in data:
-        result = (result * (b + 1)) % MODULUS
-    return result
+        h = (h * ROLLING_MULTIPLIER + b) % MODULUS
+    return h
+
+
+def rolling_checksum_cython(data: bytes) -> int:
+    """Alias for the Cython-compatible rolling-hash channel."""
+    return product_checksum_cython(data)
 
 
 def compute_checksums_cython(data: bytes) -> Tuple[int, int, int]:
