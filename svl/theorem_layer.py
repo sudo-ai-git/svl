@@ -55,6 +55,9 @@ class TheoremVerifyResultWrapper:
     smt_result: Optional[Any] = None
     smt_logic: Optional[str] = None
     smt_solver_time_ms: float = 0.0
+    # The BPSW monodromy computation is reported for information only: it is
+    # constant-true (0/60 valid programs fail it) and contributes nothing to `passed`.
+    bpsw_status: str = "informational"
 
 
 @dataclass
@@ -183,7 +186,10 @@ class TheoremLayer:
                 if not golden_ref_match:
                     warnings.append("Golden reference verification failed")
 
-            all_passed = syntax_ok and type_ok and theorem_result.passed and golden_ref_match and smt_verified
+            # The BPSW "theorem" layer is constant-true (measured 0/60 valid programs
+            # fail it) and is deliberately NOT part of `passed`: it gates nothing and
+            # must not be presented as evidence.  It is reported as informational.
+            all_passed = syntax_ok and type_ok and golden_ref_match and smt_verified
 
             return TheoremVerifyResultWrapper(
                 passed=all_passed,
@@ -191,6 +197,7 @@ class TheoremLayer:
                 program_hash_hex=theorem_result.program_hash_hex,
                 monodromy_results=theorem_result.monodromy_results,
                 all_parities_even=theorem_result.all_parities_even,
+                bpsw_status="informational",
                 syntax_layer_verified=syntax_ok,
                 type_layer_verified=type_ok,
                 errors=errors,

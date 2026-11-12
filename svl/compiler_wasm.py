@@ -9,7 +9,7 @@ import hashlib
 
 from svl.parser_rd import (
     Program, Module, FuncDecl, StructDecl, Block, LetStmt, IfStmt, WhileStmt,
-    ForStmt, ReturnStmt, AssertStmt, TryStmt, ExprStmt, ConstDecl, VarDecl,
+    ForStmt, ReturnStmt, AssertStmt, TryStmt, ThrowStmt, ExprStmt, ConstDecl, VarDecl,
     BinaryExpr, UnaryExpr, CallExpr, MatchExpr, AwaitExpr, LambdaExpr,
     StructLit, ArrayLit, Ident, Literal, FieldAccess, IndexExpr, TernaryExpr,
     AssignExpr, TypeExpr, Param, Field, NodeType
@@ -194,6 +194,11 @@ class WasmCompiler:
         self._known_locals = None
         self._uses_heap = False
         self._local_struct_types = {}
+        # Local names known to hold arrays ([len, e0, ...] handles), for `for x in a`.
+        self._array_locals = set()
+        # Stack of (label, err_local) for enclosing try blocks; `throw` branches to the
+        # innermost one after setting its error flag.
+        self._try_stack = []
         self._temp_counter = 0
         self._heap_base = 0
         # The type checker's inferred types for the program being compiled. Type-directed
@@ -207,6 +212,8 @@ class WasmCompiler:
         self._uses_heap = False
         # (function name, local name) -> struct type name, for field-offset resolution.
         self._local_struct_types = {}
+        self._array_locals = set()
+        self._try_stack = []
         # Phase 0: run the type checker and keep its inferred types. This is the point
         # where the type layer starts driving codegen: locals, arithmetic width, struct
         # resolution and un-annotated parameters are all lowered from these types.
@@ -448,6 +455,10 @@ class WasmCompiler:
                 elif isinstance(s, ForStmt):
                     names.add(s.var)
                     walk_block(s.body)
+                elif isinstance(s, TryStmt):
+                    names.add(s.catch_var)
+                    walk_block(s.try_block)
+                    walk_block(s.catch_block)
                 elif isinstance(s, Block):
                     walk_block(s)
 
@@ -470,6 +481,8 @@ class WasmCompiler:
             self._compile_assert_stmt(stmt)
         elif isinstance(stmt, TryStmt):
             self._compile_try_stmt(stmt)
+        elif isinstance(stmt, ThrowStmt):
+            self._compile_throw_stmt(stmt)
         elif isinstance(stmt, ExprStmt):
             self._compile_expr(stmt.expression)
             # Drop the leftover value ONLY when the expression actually produces one:
@@ -537,7 +550,70 @@ class WasmCompiler:
                 struct_name = cand
         if struct_name:
             self._local_struct_types[(func.name, stmt.name)] = struct_name
-    
+
+        # Track which locals hold arrays ([len, e0, ...] handles) so `for x in a` can
+        # be lowered to an index scan instead of the (broken) iterator protocol.
+        if isinstance(stmt.value, (ArrayLit, CallExpr)) and (
+                isinstance(stmt.value, ArrayLit)
+                or (isinstance(stmt.value, CallExpr) and stmt.value.callee == 'zeros')):
+            self._array_locals.add(stmt.name)
+
+    def _is_array_iterable(self, expr) -> bool:
+        """True when `for var in <expr>` can be scanned as an array."""
+        if isinstance(expr, ArrayLit):
+            return True
+        if isinstance(expr, CallExpr) and expr.callee == 'zeros':
+            return True
+        if isinstance(expr, Ident):
+            return expr.name in self._array_locals
+        t = self._inferred_expr_type(expr)
+        return bool(t is not None and getattr(t, 'kind', None) in ('array', 'tuple'))
+
+    def _compile_array_for_stmt(self, stmt: ForStmt):
+        """Lower `for var in <array>` to a bounds-safe index scan over [len, e0..]."""
+        func = self.state.current_function
+        base = f"arrbase_{self.state.label_counter}"; self.state.label_counter += 1
+        idx = f"arridx_{self.state.label_counter}"; self.state.label_counter += 1
+        label_start = f"$for_{self.state.label_counter}"
+        label_end = f"$for_end_{self.state.label_counter}"
+        self.state.label_counter += 1
+
+        self._compile_expr(stmt.iter_expr)
+        func.locals.append((base, WasmValType.I32))
+        func.body.append(f'local.set ${base}')
+        func.body.append('i32.const 0')
+        func.locals.append((idx, WasmValType.I32))
+        func.body.append(f'local.set ${idx}')
+
+        func.body.append(f'loop {label_start}')
+        func.body.append(f'block {label_end}')
+        func.body.append(f'local.get ${idx}')
+        func.body.append(f'local.get ${base}')
+        func.body.append('i32.load')
+        func.body.append('i32.ge_s')
+        func.body.append(f'br_if {label_end}')
+
+        func.locals.append((stmt.var, WasmValType.I32))
+        func.body.append(f'local.get ${base}')
+        func.body.append('i32.const 4')
+        func.body.append('i32.add')
+        func.body.append(f'local.get ${idx}')
+        func.body.append('i32.const 4')
+        func.body.append('i32.mul')
+        func.body.append('i32.add')
+        func.body.append('i32.load')
+        func.body.append(f'local.set ${stmt.var}')
+
+        self._compile_block(stmt.body)
+
+        func.body.append(f'local.get ${idx}')
+        func.body.append('i32.const 1')
+        func.body.append('i32.add')
+        func.body.append(f'local.set ${idx}')
+        func.body.append(f'br {label_start}')
+        func.body.append('end')
+        func.body.append('end')
+
     def _compile_if_stmt(self, stmt: IfStmt):
         """Compile if statement."""
         func = self.state.current_function
@@ -588,7 +664,14 @@ class WasmCompiler:
         if self._is_range_loop(stmt):
             self._compile_range_for_stmt(stmt, stmt.iter_expr.left, stmt.iter_expr.right)
             return
-        
+
+        # Array iteration: the host `iterator_next` stub returns 0 immediately, so the
+        # old iterator path silently executed the body zero times.  Scan the array
+        # directly using its [len, e0, ...] layout.
+        if self._is_array_iterable(stmt.iter_expr):
+            self._compile_array_for_stmt(stmt)
+            return
+
         # Iterator protocol. `iterator_next` returns the next handle/element and 0 once
         # the stream is exhausted, so the loop must exit when the value is 0.
         iter_local = f"iter_{self.state.label_counter}"
@@ -733,17 +816,54 @@ class WasmCompiler:
         func.body.append('end')
     
     def _compile_try_stmt(self, stmt: TryStmt):
-        """`try`/`catch` is not lowered yet.
+        """Lower `try { ... } catch e { ... }` with a per-try error flag.
 
-        The old code emitted `try ... catch <var> ... end`, which is not valid WASM
-        (legacy `catch` needs a tag and the whole block was malformed), so the module failed
-        to assemble. Fail at compile time with a clear message instead of emitting junk.
+        WASM MVP has no exception handling, so the lowering is:
+            block $try
+              err = 0
+              <try body>          ; `throw` sets err and branches to $try
+              br $try             ; normal exit
+            end
+            if err != 0
+              e = err
+              <catch body>
+            end
         """
-        raise SyntaxError(
-            f"`try`/`catch` is not supported by the WASM backend yet "
-            f"(at line {getattr(stmt, 'line', '?')}) — use a sentinel return value or an "
-            f"out-parameter to signal failure"
-        )
+        func = self.state.current_function
+        err = self._temp_local(func, 'err')
+        label = f"$try_{self.state.label_counter}"
+        self.state.label_counter += 1
+
+        func.body.append(f'block {label}')
+        func.body.append('i32.const 0')
+        func.body.append(f'local.set ${err}')
+
+        self._try_stack.append((label, err))
+        self._compile_block(stmt.try_block)
+        self._try_stack.pop()
+
+        func.body.append(f'br {label}')
+        func.body.append('end')
+
+        func.body.append(f'local.get ${err}')
+        func.body.append('if')
+        func.locals.append((stmt.catch_var, WasmValType.I32))
+        func.body.append(f'local.get ${err}')
+        func.body.append(f'local.set ${stmt.catch_var}')
+        self._compile_block(stmt.catch_block)
+        func.body.append('end')
+
+    def _compile_throw_stmt(self, stmt: ThrowStmt):
+        """`throw <expr>` sets the innermost try's error flag and leaves the block."""
+        if not self._try_stack:
+            raise SyntaxError(
+                f"`throw` outside a `try` block (at line {getattr(stmt, 'line', '?')})"
+            )
+        label, err = self._try_stack[-1]
+        func = self.state.current_function
+        self._compile_expr(stmt.value)
+        func.body.append(f'local.set ${err}')
+        func.body.append(f'br {label}')
     
     def _compile_expr(self, expr) -> None:
         """Compile expression."""
@@ -809,6 +929,13 @@ class WasmCompiler:
             # A top-level `var`/`const` is a WASM GLOBAL: it used to be assigned with
             # `local.set`, which emitted `unknown local: failed to find name $x`.
             is_global = target.name in self.state.globals
+            if is_global and self.state.globals[target.name].mutability == WasmMutability.CONST:
+                # WASM rejects `global.set` on an immutable global, so the module was
+                # invalid.  Refuse at compile time with the name and line instead.
+                raise SyntaxError(
+                    f"cannot assign to const '{target.name}' at line "
+                    f"{getattr(target, 'line', '?')}"
+                )
             get_op = 'global.get' if is_global else 'local.get'
             set_op = 'global.set' if is_global else 'local.set'
             if compound:
@@ -901,6 +1028,28 @@ class WasmCompiler:
         func.body.append('end')
     
     def _compile_binary_expr(self, expr: BinaryExpr):
+        # `&&` / `||` must SHORT-CIRCUIT: the right operand is only evaluated when the
+        # left does not already decide the result.  Compiling both operands and applying
+        # `i32.and`/`i32.or` made `x == 0 && 10 / x > 1` trap on a division by zero.
+        if expr.operator in ('&&', '||'):
+            func = self.state.current_function
+            self._compile_expr(expr.left)
+            func.body.append('if (result i32)')
+            if expr.operator == '&&':
+                self._compile_expr(expr.right)
+                func.body.append('i32.const 0')
+                func.body.append('i32.ne')       # normalise to 0/1
+                func.body.append('else')
+                func.body.append('i32.const 0')
+            else:
+                func.body.append('i32.const 1')
+                func.body.append('else')
+                self._compile_expr(expr.right)
+                func.body.append('i32.const 0')
+                func.body.append('i32.ne')
+            func.body.append('end')
+            return
+
         self._compile_expr(expr.left)
         self._compile_expr(expr.right)
         
@@ -1049,10 +1198,50 @@ class WasmCompiler:
                 func.body.append(f'i32.const {len(arg.value.encode("utf-8"))}')  # -> len
                 func.body.append(f'call {callee}')
                 return
+            # Non-literal argument: dispatch on the inferred type.  `print(<int>)` used
+            # to push one operand for the two-parameter `$print` import, producing a
+            # module that wasmtime.Module rejected.
+            tname = self._arg_type_name(arg)
+            func = self.state.current_function
+            if tname in ('int', 'bool'):
+                self._compile_expr(arg)
+                func.body.append(f'call {self._resolve_callee("print_int", getattr(expr, "line", "?"))}')
+                return
+            if tname == 'string':
+                tmp = self._temp_local(func, 's')
+                self._compile_expr(arg)
+                func.body.append(f'local.set ${tmp}')
+                func.body.append(f'local.get ${tmp}')
+                func.body.append('i32.const 4')
+                func.body.append('i32.add')
+                func.body.append(f'local.get ${tmp}')
+                func.body.append('i32.load')
+                func.body.append(f'call {callee}')
+                return
+            raise SyntaxError(
+                f"print() does not support {tname or 'this'} argument "
+                f"(line {getattr(expr, 'line', '?')})"
+            )
         for arg in expr.arguments:
             self._compile_expr(arg)
         func = self.state.current_function
         func.body.append(f'call {callee}')
+
+    def _arg_type_name(self, expr) -> Optional[str]:
+        """The inferred type name of a call argument ('int', 'string', 'float', ...).
+
+        A bare `Ident` is looked up in the local-type map: the expression-type map is
+        keyed by object identity and returns None for a plain identifier.
+        """
+        if isinstance(expr, Ident):
+            t = self._inferred_local_type(self.state.current_function.name, expr.name)
+        else:
+            t = self._inferred_expr_type(expr)
+        if t is None:
+            return None
+        if getattr(t, 'kind', None) == 'prim':
+            return str(t)
+        return getattr(t, 'kind', None)
 
     def _resolve_callee(self, callee: str, line: Any = '?') -> str:
         """
@@ -1379,6 +1568,12 @@ class WasmCompiler:
         # Functions (function definitions come before memory in the canonical field order)
         for func_name in self.state.sorted_functions:
             func = self.state.functions[func_name]
+            # Reset the heap at the start of the exported entry point.  The bump
+            # allocator never frees, so without this a second call in one Store leaks
+            # past the memory ceiling and traps.  The call goes first in the BODY,
+            # i.e. after the `(local ...)` declarations in the header.
+            if self._uses_heap and func_name.endswith('$main'):
+                func.body.insert(0, 'call $heap_reset')
             lines.append(self._generate_wasm_function(func, type_map))
         
         # Internal bump allocator — emitted ONLY when the program allocates (an array or
@@ -1390,11 +1585,43 @@ class WasmCompiler:
             lines.append('    (local $p i32)')
             lines.append('    global.get $heap')
             lines.append('    local.set $p')
+            # Grow linear memory when p+n would exceed the current size.  Without this
+            # the module was fixed at `(memory 16)` (1 MiB) with no way to grow.
+            lines.append('    local.get $p')
+            lines.append('    local.get $n')
+            lines.append('    i32.add')
+            lines.append('    memory.size')
+            lines.append('    i32.const 65536')
+            lines.append('    i32.mul')
+            lines.append('    i32.gt_u')
+            lines.append('    if')
+            lines.append('      local.get $p')
+            lines.append('      local.get $n')
+            lines.append('      i32.add')
+            lines.append('      memory.size')
+            lines.append('      i32.const 65536')
+            lines.append('      i32.mul')
+            lines.append('      i32.sub')
+            lines.append('      i32.const 65535')
+            lines.append('      i32.add')
+            lines.append('      i32.const 65536')
+            lines.append('      i32.div_u')
+            lines.append('      memory.grow')
+            lines.append('      i32.const -1')
+            lines.append('      i32.eq')
+            lines.append('      if')
+            lines.append('        unreachable')
+            lines.append('      end')
+            lines.append('    end')
             lines.append('    global.get $heap')
             lines.append('    local.get $n')
             lines.append('    i32.add')
             lines.append('    global.set $heap')
             lines.append('    local.get $p')
+            lines.append('  )')
+            lines.append('  (func $heap_reset')
+            lines.append(f'    i32.const {self._heap_base}')
+            lines.append('    global.set $heap')
             lines.append('  )')
         
         # Memory (declared after imports and functions; exported separately below).
@@ -1495,28 +1722,35 @@ class WasmCompiler:
 # ============================================================================
 
 def compile_to_wasm(ast: Program, deterministic: bool = True) -> str:
-    """Compile SVL AST to WASM text format."""
+    """Compile SVL AST to WASM text format.
+
+    The AST is scope-renamed first: the backend keeps one WASM local per NAME, so without
+    renaming an inner `let` sharing a name with an outer binding overwrites it (see
+    `svl/scope.py`).  `rename_scopes` is idempotent.
+    """
+    from svl.scope import rename_scopes
+    rename_scopes(ast)
     compiler = WasmCompiler(deterministic=deterministic)
     return compiler.compile(ast)
 
 
 def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool = True,
-                         attest: bool = False) -> str:
+                         attest: bool = False, base_dir: Optional[str] = None) -> str:
     """Compile SVL source file to WASM.
 
     With ``strict=True`` (the default) the verification gate runs FIRST and the compile is
     refused on failure, so "the layers run on every compilation" is true rather than
-    aspirational. Pass ``strict=False`` to compile without the gate (useful for tooling that
+    aspirational.  Pass ``strict=False`` to compile without the gate (useful for tooling that
     wants to highlight or format a program that does not type-check yet).
+
+    ``base_dir`` enables ``import``: each top-level import path is resolved relative to it,
+    the file is parsed, and its modules/items are linked in.  Without ``base_dir`` an
+    unresolved import is a compile error rather than a silently dropped line.
 
     With ``attest=True`` the returned WAT carries an ``svl.attest`` custom section binding the
     artifact to its canonical AST fingerprint (see `svl.attest`).  The default is False so a
     raw compile stays byte-identical and artifacts already pinned elsewhere remain valid; use
     `svl.attest.compile_attested` when producing a shipped artifact.
-
-    Verified safe to default on: across all 54 real programs in this repo + the workspace, the
-    gate rejects only the files that do not even PARSE (a genuine `f`-instead-of-`func` error);
-    every program that compiled before still compiles.
     """
     if strict:
         from svl.verify_gate import assert_verified
@@ -1525,11 +1759,56 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     from svl.parser_rd import parse
     tokens = tokenize(source)
     ast = parse(tokens)
+    if base_dir:
+        _link_imports(ast, base_dir)
+    elif ast.imports:
+        raise SyntaxError(
+            f"cannot resolve import '{ast.imports[0].path}': no base_dir given "
+            f"(pass base_dir=... to compile_file_to_wasm)"
+        )
     wat = compile_to_wasm(ast, deterministic)
     if attest:
         from svl.attest import attest_wat
         wat, _payload = attest_wat(source, wat)
     return wat
+
+
+def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) -> None:
+    """Resolve top-level imports relative to ``base_dir`` and link their modules/items.
+
+    The imported file is parsed and its declarations appended; cross-module calls resolve
+    through the existing ``module$func`` namespacing.  Cycles are detected via the real
+    path of each file.
+    """
+    if _seen is None:
+        _seen = set()
+    if not program.imports:
+        return
+    import os
+
+    from svl.lexer import tokenize
+    from svl.parser_rd import parse
+
+    added_modules, added_items = [], []
+    for imp in program.imports:
+        path = os.path.join(base_dir, imp.path)
+        real = os.path.realpath(path)
+        if real in _seen:
+            raise SyntaxError(f"circular import: {imp.path}")
+        if not os.path.exists(path):
+            raise SyntaxError(
+                f"cannot resolve import '{imp.path}' (looked in {base_dir})"
+            )
+        _seen.add(real)
+        with open(path, encoding='utf-8') as fh:
+            sub = parse(tokenize(fh.read()))
+        _link_imports(sub, os.path.dirname(path), _seen)
+        added_modules.extend(sub.modules)
+        added_items.extend(sub.items)
+
+    program.modules.extend(added_modules)
+    program.items.extend(added_items)
+    program.imports = []
 
 
 def verify_wasm_determinism(source: str, runs: int = 3) -> bool:

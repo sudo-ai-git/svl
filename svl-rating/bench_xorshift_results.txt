@@ -1,0 +1,9 @@
+==============================================================================
+BENCHMARK — xorshift32 accumulation over 5000000 iterations, expected 1490141054
+==============================================================================
+SVL    wasm/wasmtime    compile=    38.2 ms  warm=   9.237 ms (10.313 med)  cold=  12.401 ms  artifact=210 B  result=1490141054
+Rust   wasm/wasmtime    compile=   202.6 ms  warm=  11.617 ms (12.012 med)  cold=  10.652 ms  artifact=521 B  result=1490141054
+C      native/x86-64    compile=  1448.3 ms  warm=  14.324 ms (16.312 med)  cold=  14.324 ms  artifact=15968 B  result=0
+------------------------------------------------------------------------------
+expected result: 1490141054
+note: native 'warm' pays process spawn; wasm 'cold' pays module compile+instantiate.

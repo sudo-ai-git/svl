@@ -1,0 +1,29 @@
+// SVL benchmark: sieve of Eratosthenes, N = 100000
+// Same algorithm as sieve.rs / sieve.c / sieve.py in this directory.
+module bench {
+  func sieve_count(n: int) type int {
+    let is_composite: int = zeros(n + 1)
+    let i: int = 2
+    while i * i <= n {
+      if is_composite[i] == 0 then {
+        let k: int = i * i
+        while k <= n {
+          is_composite[k] = 1
+          k += i
+        }
+      } else { }
+      i += 1
+    }
+    let count: int = 0
+    let p: int = 2
+    while p <= n {
+      if is_composite[p] == 0 then { count += 1 } else { }
+      p += 1
+    }
+    return count
+  }
+
+  func main() type int {
+    return sieve_count(100000)
+  }
+}

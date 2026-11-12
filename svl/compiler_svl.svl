@@ -1,12 +1,6 @@
-import "ast"
-import "lexer"
-import "parser"
-import "serialization"
-import "gate231"
-import "mod5_types"
-import "type_inference"
-import "bpsw_monodromy"
-
+// The self-hosting claim was retracted (see README): this file is a stub, not a
+// self-compiler.  It previously carried `import "ast"` etc. for modules that do not
+// exist as files, which the import resolver now correctly rejects.
 module svl_compiler {
   const one: int = 1
   const two: int = 2

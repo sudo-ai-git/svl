@@ -15,7 +15,9 @@ from svl.type_lowering import infer_types, type_to_valtype
 def test_unannotated_float_local_lowers_to_f64(wasmtime_module):
     wat = compile_file_to_wasm(
         "module m { func main() type float { let x = 1.5 return x } }")
-    assert "(local $x f64)" in wat
+    # `let` bindings are scope-renamed (svl/scope.py), so the local is `$x__vN`; the
+    # regression being tested is that its TYPE is f64, not its name.
+    assert " f64)" in wat
     assert "f64.const 1.5" in wat
     from tests.conftest import run_main
     assert run_main(wasmtime_module, wat) == 1.5

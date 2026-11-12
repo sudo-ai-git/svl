@@ -1,0 +1,403 @@
+[
+  {
+    "id": "lexical-scoping",
+    "title": "One WASM local per binding with scope-aware resolution",
+    "addresses": [
+      "F1"
+    ],
+    "problem": "The backend keeps one flat local per name: `_compile_let_stmt` (compiler_wasm.py:500) appends `(stmt.name, ...)` and emits `local.set $name`, while `_compile_ident` (:1190) and `_compile_assign` (:779) resolve through the flat `_known_locals` set built by `_collect_local_names` (:428), so an inner `let x` overwrites the outer slot (P01 WAT: one `(local $x i32)`, two `local.set $x`).",
+    "proposal": "Add a per-function scope stack `List[Dict[source_name, (wasm_name, struct_name)]]` pushed/popped in `_compile_block` (:409); mangle each binding with a per-function counter in `_compile_let_stmt`, resolve innermost-first in `_compile_ident`/`_compile_assign`, bind params, `for`/`range` loop vars and `catch_var` in the same map, and key `_local_struct_types` (:196) by the mangled name. Delete `_collect_local_names`/`_known_locals`. In type_inference.py make `_check_if_stmt` (:815), `_check_while_stmt` (:834) and `_check_for_stmt` (:845) save/restore `self.env` and bind the loop var in a child env so the checker's scopes agree with the backend.",
+    "expected_effect": "P01 `let x = 1; if 1==1 then { let x = 99 } else {}; return x` returns 1; the WAT has two locals (`$x`, `$x__v1`) and the trailing `local.get $x` reads the outer one.",
+    "spike_question": "Given the current single `$x` local, when `_compile_let_stmt` assigns a per-binding suffix and `_compile_ident` resolves innermost-first, then compiling and running P01 must yield 1, not 99.",
+    "risk": "Medium \u2014 touches every name-resolution path; the 61 tests and bit-identical determinism must be re-verified.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "array-for-in",
+    "title": "Lower for-in over arrays to a bounds-safe index scan",
+    "addresses": [
+      "F2"
+    ],
+    "problem": "`_compile_for_stmt` (compiler_wasm.py:582) routes every non-range iterable through the host `$iterator_next` import; the host stub (tests/conftest.py:63, probes.py:61) returns 0, so the loop exits immediately and P02 returns 0.",
+    "proposal": "Add `_is_array_iterable(expr)` (ArrayLit, `zeros(n)`, or an inferred type of kind array/tuple/generic 'List' via `_inferred_expr_type`) and `_compile_array_for_stmt`, which reuses the existing `[len, e0..]` layout: `len = i32.load(base)`, scan `idx` from 0 while `idx < len`, bind `var = i32.load(base + 4 + idx*4)`. For a non-array iterable raise SyntaxError instead of emitting `call $iterator_next`.",
+    "expected_effect": "P02 `let a=[1,2,3]; let s=0; for x in a { s+=x }; return s` returns 6; the emitted WAT contains no `iterator_next` call.",
+    "spike_question": "Given the host `iterator_next` returns 0, when P02 is compiled with the array-scan lowering, then the loop body must execute 3 times; run the module and assert 6.",
+    "risk": "Low \u2014 best-effort type detection means an unannotated array-handle parameter still gets a loud compile error, not a silent 0; pair with lexical-scoping for correct loop-variable shadowing.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "short-circuit-logic",
+    "title": "Short-circuit && and || with a value-producing if",
+    "addresses": [
+      "F3"
+    ],
+    "problem": "`_compile_binary_expr` (compiler_wasm.py:903) compiles both operands and maps `&&`/`||` to `i32.and`/`i32.or` (:912), so the right operand is always evaluated and `10/x` traps when x is 0.",
+    "proposal": "Special-case `&&`/`||` before the generic path: compile the left, emit `if (result i32)`, compile the right in the taken branch and `i32.const 0` (for `&&`) or `i32.const 1` (for `||`) in the other, then `end`; optionally normalize the right with `i32.const 0; i32.ne` so the result is 0/1 as the type layer claims. Preserve left-to-right evaluation order.",
+    "expected_effect": "`func f(x:int){ let r = x == 0 || 10/x > 1; return r }` called with f(0) returns 1 with no trap; today it traps. (P03's literal `x == 0 && 10/x > 1` still traps even with correct short-circuit because the left operand is true \u2014 the probe's expected 1 is unreachable; use `||` or `x != 0 &&`.)",
+    "spike_question": "Given the eager `i32.and`/`i32.or` lowering, when the `if (result i32)` form is emitted, then calling f(0) must skip the division; a hand-written WAT of this exact lowering already returned `[1, 1]` for x=0,2 in wasmtime 50.",
+    "risk": "Low \u2014 pure structured control flow; wasmtime 50 accepts `if (result i32)`.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "const-immutability",
+    "title": "Reject assignment to const in the gate and the backend",
+    "addresses": [
+      "F6"
+    ],
+    "problem": "`_compile_assign` (compiler_wasm.py:779) emits `global.set $c` for a top-level const, but `_collect_declarations` (:239) declares `(global $c i32 (i32.const 5))` immutable, so the module fails validation (P09); the type checker never inspects AssignExpr at all.",
+    "proposal": "In type_inference.py track const names in a scoped set pushed/popped with function/block envs, add a `NodeType.EXPR_STMT` case to `_check_stmt` (:745), and reject an AssignExpr whose target Ident is const with `assignment to const 'c'`; `_check_const_decl` (:930) records the name. Add a backend backstop in `_compile_assign`: if the target is a global with `WasmMutability.CONST`, raise SyntaxError (covers strict=False).",
+    "expected_effect": "P09 `const c: int = 5; func main() type int { c = 6 return c }` makes `verify_program` report a const-assignment problem and `compile_file_to_wasm` raise SVLVerificationError (probe PASS instead of invalid artifact).",
+    "spike_question": "Given `_check_stmt` has no EXPR_STMT case, when the const check is added, then `verify_program` on P09 must return a problem mentioning const and `compile_file_to_wasm` must raise SVLVerificationError.",
+    "risk": "Low \u2014 additive check; verify that `var` and local `let` reassignment still compile.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "throw-try-error-model",
+    "title": "Minimal throw/try error model via a per-try error flag and br",
+    "addresses": [
+      "F9"
+    ],
+    "problem": "`_compile_try_stmt` (compiler_wasm.py:735) unconditionally raises SyntaxError, and `throw` is not a statement at all: `parse_stmt` (:1149) falls through to `parse_primary` (:1557), whose hebrew_map (:1621) turns THROW into `Ident('THROW')`, so the language has no error model (P26).",
+    "proposal": "Add a `ThrowStmt` AST node + `THROW_STMT` NodeType and a `parse_throw_stmt` called from `parse_stmt`. In the compiler keep a per-function stack of `(label, err_local)`; `_compile_try_stmt` emits `block $try`, initialises `err=0`, compiles the try block, emits `br $try`, then `local.get $err; if; bind catch_var; compile catch block; end`. `_compile_throw_stmt` sets the innermost `err` and emits `br $label` (compile error if the stack is empty). Add `_check_throw_stmt` to the type checker. Runtime traps stay uncaught and documented as such.",
+    "expected_effect": "`module m { func main() type int { let r = 0 try { throw 7 } catch e { r = e } return r } }` returns 7, and P26's `try { let x = 1 } catch e { let y = 2 }` compiles (probe PASS); today both raise SyntaxError.",
+    "spike_question": "Given the current SyntaxError, when the block+flag lowering is compiled, then a throw must land in the catch (7) and a normal exit must skip it; the hand-written WAT pattern already validated both paths in wasmtime 50.",
+    "risk": "Medium \u2014 new AST node plus unreachable-code emission after `br`; validate nested try/throw and throw inside loops.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "import-link-or-reject",
+    "title": "Make import either link a file or fail loudly",
+    "addresses": [
+      "F10"
+    ],
+    "problem": "`Program.imports` (parser_rd.py:602) is never read by `WasmCompiler.compile` (compiler_wasm.py:203), and `import` inside a module body is parsed by `parse_primary`'s hebrew_map (:1621) into `Ident('IMPORT')`, which the compiler silently drops (P27 runs and returns 42).",
+    "proposal": "Reject `TokenType.IMPORT` in `parse_stmt` (:1149) with 'import must appear at top level'. In `compile_file_to_wasm` (:1503) add a `base_dir` parameter and a `_link_imports(program, base_dir)` step that resolves each `Import.path`, reads and parses the file, appends its modules/items, and detects cycles; unresolvable paths raise. The existing `module$func` namespacing and `_resolve_callee` suffix scan (:1057) already make cross-module calls work.",
+    "expected_effect": "A real `import \"other.svl\"` where other.svl defines `module other { func answer() type int { return 42 } }` links and `main` returns 42 via `other$answer`; the probe's inline `import \"other\"` inside a module now raises SyntaxError (P27 becomes an honest rejection, not a silent 42).",
+    "spike_question": "Given the compiler never reads `program.imports`, when `_link_imports` is added, then a two-file program must resolve `answer()` to `other$answer`; assert the probe's malformed import is rejected before codegen.",
+    "risk": "Medium \u2014 path resolution, cycles and an API change; P27 cannot PASS as written because it imports a nonexistent file from inside a module body.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "check-call-arguments-and-return",
+    "title": "Type-check call arguments and return statements so the gate's soundness claim is true",
+    "addresses": "F4, F5, P15",
+    "problem": "`TypeInferencer._synth_call` (svl/type_inference.py:518-527) returns the callee's return type without synthesizing any argument, and `TypeChecker._check_return_stmt` (svl/type_inference.py:852-854) discards the synthesized type, so `return \"hi\"` in a `type int` function and `f(\"hi\")` against `f(x: int)` both pass the strict gate (svl-rating/probes.py P15 FAIL).",
+    "proposal": "Three additions to `TypeChecker`. (a) In `_check_module` (svl/type_inference.py:739-743) add a signature pre-pass that extends the env with every `FuncDecl`'s `Type.func` before any body is checked \u2014 this also fixes recursion and forward references, which are unchecked today because the scheme is added at type_inference.py:913-915 *after* the body. (b) Rewrite `_synth_call`: `instantiate()` the scheme, check `len(expr.arguments) == len(params)`, `synthesize` each argument and `unify` it with the corresponding parameter, appending to `self.errors`. (c) Set `_current_return_type` in `_check_func_decl` before the body and compare it in `_check_return_stmt`. Host builtins in `BUILTIN_SIGNATURES` (type_inference.py:27-37) then get checked too, so `print_int(1.5)` and `zeros(1.5)` become errors instead of emitting an f64 operand into an i32 import.",
+    "expected_effect": "`module m { func f() type int { return \"hi\" } func main() type int { return f() } }` -> `compile_file_to_wasm(..., strict=True)` raises `SVLVerificationError: Return type mismatch: Argument mismatch: string vs int` (probe P15 flips to PASS); `f(\"hi\")` against `f(x: int)` -> refused; `print_int(1.5)` -> refused; `func f(x: int) type int { return x } func main() type int { let a = [1,2,3] return f(len(a)) }` still compiles and returns 3 (spike-verified).",
+    "spike_question": "Given the monkeypatched `_synth_call` and `_check_return_stmt` from the spike, when the gate is run over the 61 pytest programs plus `examples/*.svl`, then zero previously-passing tests regress and all four F4 sources are refused.",
+    "risk": "Medium \u2014 the checker was blind to arguments, so newly-surfaced errors may reject real programs; the pre-pass and arg check must be run over `examples/` and `tests/` before landing.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "lower-print-from-string-values",
+    "title": "Generalize `print` lowering to any string-typed expression via the runtime length word",
+    "addresses": "F5, P08",
+    "problem": "`_compile_call_expr` (svl/compiler_wasm.py:1039-1051) special-cases only a bare string `Literal`; any other single argument falls through to svl/compiler_wasm.py:1052-1055, which compiles one operand and emits `call $print` where the import needs `(i32 i32)`, so `let x = 5; print(x)` is rejected by wasmtime with 'expected i32 but nothing on stack' (probe P08 FAIL).",
+    "proposal": "Replace the literal-only special case with an argument-type-driven one. Add `WasmCompiler._arg_type(arg)` resolving, in order: the recorded `expr_types` entry, a string `Literal`, an `Ident` via `self._inferred_local_type(func.name, arg.name)`, or a `CallExpr` via `self.inferred.func_types[callee].args[-1]`. If the type is `prim/string`, emit `arg; i32.const 4; i32.add` (text start \u2014 word 0 is the length, per the layout documented at compiler_wasm.py:1439-1441) then `arg; i32.load` (length) then `call $print`. Otherwise raise `SyntaxError(\"print() takes a string ... use print_int() for integers\")`.",
+    "expected_effect": "`module m { func main() type void { let s = \"hi\" print(s) } }` assembles and the host import receives `(ptr=4, len=2)` (spike-verified); likewise a `string` parameter `(4, 3)` for \"hey\" and `print(g())` where `g() type string`. `let x = 5; print(x)` becomes a compile-time `SyntaxError` naming `print_int` instead of invalid WAT. Probe P08 PASS.",
+    "spike_question": "Given the patched `_compile_call_expr`, when the four string forms (literal, let-bound, parameter, function result) are assembled and run through `tests/conftest.py::instantiate`, then each host `print` call carries a correct (ptr, len) pair and the int case raises before any WAT is emitted.",
+    "risk": "Low \u2014 it only widens an existing special case and turns a silent invalid-artifact path into a compile error.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "enforce-const-mutability",
+    "title": "Refuse assignment to a `const` at compile time",
+    "addresses": "F6, P09",
+    "problem": "`_compile_assign` (svl/compiler_wasm.py:779, Ident path 802-822) emits `global.set` for any target in `self.state.globals` (811-813) without consulting `WasmMutability`, so `const c: int = 5; c = 6` emits `global.set $c` against the immutable `(global $c i32 (i32.const 5))` generated at compiler_wasm.py:1414-1419 and module validation fails (probe P09 FAIL); the type layer has no constness at all (`_check_const_decl`, type_inference.py:930-942, is identical to `_check_var_decl`, 944-956, except the message).",
+    "proposal": "At the top of `_compile_assign` (svl/compiler_wasm.py:779), for an `Ident` target look up `self.state.globals[target.name].mutability` and raise `SyntaxError(f\"cannot assign to const '{target.name}' ...\")` when it is `WasmMutability.CONST`. This covers both `c = 6` and `c += 1` (the compound path at 814-818 routes through the same method). If constness should be a type-system property, the minimal honest version is a `const_names: set` recorded in `InferredTypes` (svl/type_lowering.py:29-43) from `_check_const_decl` and consulted by the backend \u2014 same behaviour, one extra source of truth.",
+    "expected_effect": "`module m { const c: int = 5 func main() type void { c = 6 print_int(c) } }` -> `SyntaxError: cannot assign to const 'c'`; `var v: int = 5; v = 6` still assembles and prints 6. Probe P09 PASS ('refused').",
+    "spike_question": "Given the five-line guard, when the two const-assignment forms and the `var` control are compiled, then both const forms raise `SyntaxError` before WAT generation and the `var` program still assembles.",
+    "risk": "Low \u2014 pure rejection of a case that already produced an invalid artifact.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "type-layer-block-scopes",
+    "title": "Give the type checker real block scope \u2014 it leaks every inner binding",
+    "addresses": "F1, F4",
+    "problem": "`_check_if_stmt` (svl/type_inference.py:815-832) builds `else_env` from the *then* environment and never restores `self.env`; `_check_while_stmt` (834-843) and `_check_for_stmt` (845-850) check bodies in the enclosing env with no child at all, so `if 1==1 then { let y: int = 1 } else {} let z: int = y` is accepted today \u2014 the type-side twin of runtime bug F1.",
+    "proposal": "Add one helper, `TypeChecker._check_scoped_block(block)`, that saves `outer = self.env`, creates `child = TypeEnv(bindings=dict(outer.bindings), parent=outer)`, sets `self.env = child`, checks the statements, and restores `self.env = outer` in a `finally`. Use it in `_check_if_stmt` (one child per branch, both parented on `outer`, then restore), `_check_while_stmt`, `_check_for_stmt` (binding the loop var in the child) and `_check_try_stmt` (replacing the manual restore at type_inference.py:877-881). `TypeEnv.extend` (type_inference.py:191-194) already returns a child; the defect is purely that callers never restore.",
+    "expected_effect": "`module m { func main() type void { if 1==1 then { let y: int = 1 } else {} let z: int = y } }` -> refused ('void vs int'); the same `let z` *inside* the branch still checks; while-body and for-body lets no longer leak into the enclosing scope.",
+    "spike_question": "Given the helper, when the checker runs over `tests/` and `examples/`, then no program that binds a name inside a branch/body and references it outside still passes, and none of the 61 tests regress.",
+    "risk": "Low \u2014 strictly tighter scoping; a program that relied on the leak was relying on a bug.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "host-import-signature-table",
+    "title": "One signature table drives both type checking and host-call lowering",
+    "addresses": "F5, F4",
+    "problem": "`BUILTIN_SIGNATURES` (svl/type_inference.py:27-37) and `HOST_IMPORT_SIGS` (svl/compiler_wasm.py:171-181) are two hand-maintained tables and the checker never consults the compiler's arity/valtypes, so `print_int(1.5)`, `len(1)` and `putc(1.5)` pass the gate and then emit an f64 operand to an i32 import \u2014 invalid WAT of exactly the F5 class.",
+    "proposal": "Make `HOST_IMPORT_SIGS` the single source of truth (it already carries `(param ...)` / `(result ...)`), derive `BUILTIN_SIGNATURES` from it at import time, and add `WasmCompiler._check_host_call(expr)` that walks the same table before emitting: arity, and operand valtype per parameter, using the `_arg_type` helper from the print fix. On mismatch raise `SyntaxError` naming the expected type. Keep `len`/`zeros` as codegen builtins but list them in the same table with their valtypes.",
+    "expected_effect": "`module m { func main() type void { print_int(1.5) } }` and `let n = zeros(1.5)` -> `SyntaxError: print_int expects i32, got f64`; `print_int(3)`, `print(\"a\")`, `len(a)` unchanged. Any module containing a host call now either type-checks or fails loudly.",
+    "spike_question": "Given the shared table, when every host call in `examples/` and `tests/` is compiled, then all of them pass the check and no test regresses.",
+    "risk": "Low-Medium \u2014 a shared table can reject a call the old checker allowed, but only where the emitted WAT was invalid anyway.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "codegen-scope-stack",
+    "title": "Scope the WASM backend's locals so an inner `let` cannot overwrite an outer slot",
+    "addresses": "F1, P01",
+    "problem": "`WasmCompiler` keeps no scope stack: `_compile_let_stmt` appends `(stmt.name, val_type)` to a flat `func.locals` (svl/compiler_wasm.py:518) and every access emits `local.get $name` (1207) / `local.set $name` (519), while `_generate_wasm_function` dedupes by name keeping the first type (1475-1483) \u2014 so `let x=1; if 1==1 then { let x=99 } else {}; return x` returns 99 (probe P01 FAIL).",
+    "proposal": "Add `self._scopes: List[Dict[str, str]]` to `WasmCompiler`, pushed/popped in `_compile_if_stmt` (541-556), `_compile_while_stmt` (558), `_compile_for_stmt` (582/627) and nested `Block`s. `_compile_let_stmt` mints a fresh WASM name on collision (`x`, then `x__1`, `x__2`) and records `scopes[-1][stmt.name] = wasm_name`; `_compile_ident` and `_compile_assign` resolve through the stack with a globals fallback, so the name-based dedupe at 1475-1483 becomes a no-op. If the full stack is too invasive, the cheapest honest fix is to reject the collision in `_compile_let_stmt` ('duplicate local x in function f') \u2014 a two-line change that converts a silent wrong answer into a compile error.",
+    "expected_effect": "`module m { func main() type int { let x = 1 if 1==1 then { let x = 99 } else {} return x } }` returns 1 (probe P01 PASS); with the fallback, the same program raises `SyntaxError: duplicate local 'x'` instead of returning 99.",
+    "spike_question": "Given the scope stack, when P01 plus every `examples/*.svl` program is compiled and run, then P01 returns 1 and the 61 tests plus the documented bubble_sort/sieve outputs are unchanged.",
+    "risk": "Medium \u2014 name resolution is touched in three places (let, ident, assign) and any missed path reintroduces 'unknown local' assembly failures.",
+    "effort": "L",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "memory-grow-reset",
+    "title": "Grow linear memory in $alloc and reset the heap between runs",
+    "addresses": [
+      "F8"
+    ],
+    "problem": "The emitted $alloc (svl/compiler_wasm.py:1388-1398) is a pure bump allocator over a fixed (memory 16) (1 MiB, lines 1403-1404) with no memory.grow and no reset; a program allocating 800 KiB returns from the first main() and traps on the second.",
+    "proposal": "Extend the $alloc body to compare p+n against memory.size*65536 and emit memory.grow with the missing page delta (trap on -1) before bumping; emit a $heap_reset function (global.set $heap (i32.const <heap_base>)) and call it at the top of the exported main body in _compile_functions (lines 382-407), or export it for the host. Keep the initial 16 pages so small programs keep their current footprint.",
+    "expected_effect": "module m { func main() type int { let n = 200000 let a = zeros(n) a[0] = 1 return a[0] } } returns 1 on the first and second call in one Store; a single run allocating 2 MiB (zeros(500000)) no longer traps; P16 reports memory.grow present = True.",
+    "spike_question": "Given a module compiled from zeros(300000) (1.2 MiB) with the new $alloc, When the exported main is invoked twice in one wasmtime Store, Then both calls return without an out-of-bounds trap and the WAT contains memory.grow; if the page-delta arithmetic is wrong the second call traps.",
+    "risk": "Medium - memory.grow can return -1 and must trap, and resetting the heap at main entry clobbers live allocations if main is re-entered or recursive.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "print-type-dispatch",
+    "title": "Lower print() by the argument's inferred type instead of only string literals",
+    "addresses": [
+      "F5"
+    ],
+    "problem": "_compile_call_expr (svl/compiler_wasm.py:1039-1051) special-cases only print(<string literal>); every other single argument falls through to lines 1052-1055, which push one operand and emit call $print, but $print takes (i32,i32) (HOST_IMPORT_SIGS line 173), so let x = 5 print(x) fails wasmtime.Module validation.",
+    "proposal": "In _compile_call_expr, dispatch on self._inferred_expr_type(arg): string-typed -> keep the literal fast path, and for a general string expression store the pointer in a temp local then emit ptr+4 and i32.load of the length word; int/bool -> emit call $print_int (already declared line 174); float/array -> add a print_float host import or raise a clear SyntaxError. Do not evaluate a string expression twice.",
+    "expected_effect": "module m { func main() type void { let x = 5 print(x) return } } validates and runs (P08 PASS); let s = 'hi' print(s) prints hi; print('hi') is unchanged.",
+    "spike_question": "Given let x = 5 print(x), When compiled and passed to wasmtime.Module, Then it validates and the host print_int receives 5; given let s = 'hi' print(s), Then the host print receives a pointer to hi and length 2.",
+    "risk": "Low - the type layer already infers string (type_inference.py:461); the only hazards are double-evaluating a string expression and the float case.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "const-immutability-check",
+    "title": "Reject assignment to a const global at compile time",
+    "addresses": [
+      "F6"
+    ],
+    "problem": "_compile_assign (svl/compiler_wasm.py:802-822) emits global.set for any global target, including a const declared with WasmMutability.CONST (line 281); WASM rejects global.set on an immutable global, so const c: int = 5 ... c = 6 produces an invalid module.",
+    "proposal": "In _compile_assign, when is_global is true, look up self.state.globals[target.name].mutability and raise SyntaxError('cannot assign to const ...') if it is CONST, before emitting any instruction. Optionally mirror the check in the type layer's assignment path so strict=True refuses it too; the backend check is the load-bearing one.",
+    "expected_effect": "const c: int = 5 func main() type int { c = 6 return c } is refused with a clear error (P09 PASS); var c: int = 5 ... c = 6 still compiles and runs.",
+    "spike_question": "Given the P09 source, When compiled with strict=True, Then compilation raises before codegen and no global.set on an immutable global is emitted; given the same source with var instead of const, Then it compiles and returns 6.",
+    "risk": "Low - it turns an invalid artifact into a clear compile error; no currently-valid program is affected.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "pcc-binary-custom-section",
+    "title": "Carry PCC proofs in a binary custom section, not in WAT text",
+    "addresses": [
+      "F7"
+    ],
+    "problem": "PCCWasmModule.to_wasm_with_proofs (svl/pcc_wasm.py:33-59) inserts a text line (custom 'svl-proofs' '<hex>') before the closing paren; wasmtime.wat2wasm has no custom-section syntax (verified: (module (custom 'x' 'a')) -> 'expected valid module field'), so the artifact never assembles. The correct binary helpers WasmCustomSection.create_proof_section (lines 281-301) are unused.",
+    "proposal": "Add PCCWasmModule.to_wasm_bytes_with_proofs() that runs wat2wasm on the plain WAT and appends WasmCustomSection.create_proof_section(proof_data) to the module binary; make extract_proofs_from_wasm (lines 215-231) scan the binary for section code 0 / name 'svl-proofs' instead of the text regex. Update probe P10 to validate the binary with wasmtime.Module(engine, bytes) - as written it asserts a WAT form that no correct PCC can produce, so it is a probe defect, not a feature.",
+    "expected_effect": "PCCWasmGenerator().generate('module m { func main() type int { return 7 } }').to_wasm_bytes_with_proofs() validates with wasmtime.Module and extract_proofs_from_wasm recovers source_hash plus the three proof layers; P10 (binary form) PASS.",
+    "spike_question": "Given a PCC module built from return 7, When the bytes are passed to wasmtime.Module, Then it validates; When the trailing custom section is parsed, Then source_hash and the three proofs round-trip. If a trailing custom section is rejected, insert it before the code section.",
+    "risk": "Low - binary custom sections are standard; the only risks are section ordering and the required probe/API change.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "for-in-array-lowering",
+    "title": "Lower for x in <array> to an index loop over the length word",
+    "addresses": [
+      "F2"
+    ],
+    "problem": "_compile_for_stmt (svl/compiler_wasm.py:582-625) routes every non-range loop through the iterator_next host import, which the harness implements as return 0 (tests/conftest.py:63, svl-rating/probes.py:61), so for x in [1,2,3] { s += x } returns 0; the array layout is already [len, e0, ...] (lines 1168-1188), so a direct loop is available.",
+    "proposal": "In _compile_for_stmt, before the iterator path, read t = self._inferred_expr_type(stmt.iter_expr); if t is not None and t.kind in ('array','generic','tuple') (or iter_expr is an ArrayLit), emit an index loop: evaluate the iterable once into a temp base local, load len = i32.load base, then a counting loop with an index local i and stmt.var = i32.load(base + 4 + i*4), reusing the range-loop pattern at lines 627-667. If the type is not array-like and no iterator protocol exists, raise a clear SyntaxError rather than silently iterating zero times.",
+    "expected_effect": "module m { func main() type int { let a = [1,2,3] let s = 0 for x in a { s += x } return s } } returns 6 (P02 PASS); for x in zeros(1000) iterates 1000 times instead of 0.",
+    "spike_question": "Given the P02 source, When compiled with the array path, Then the WAT contains an i32.load of the length word and a counting loop and main returns 6; given a non-array iterable with no iterator implementation, Then compilation fails loudly instead of returning 0.",
+    "risk": "Medium - a false negative in the inferred type falls back to the silent no-op, so the fallback must be a compile error; the iterable expression must be evaluated exactly once.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "scope-aware-locals",
+    "title": "Give every let binding a unique wasm local and resolve names through a scope stack",
+    "addresses": [
+      "F1"
+    ],
+    "problem": "WasmFunction.locals is a flat list (svl/compiler_wasm.py:159); _compile_let_stmt appends stmt.name (line 518) and every access emits local.get $name (line 1207) / local.set $name (line 821), so an inner let overwrites the outer binding: let x = 1; if 1==1 then { let x = 99 } else {}; return x returns 99. _collect_local_names (lines 428-455) also flattens nested blocks, so shadowing is undetectable.",
+    "proposal": "Maintain self._scopes (list of dicts source-name -> unique wasm name) seeded with the function params; in _compile_let_stmt allocate a fresh name like name@<counter>, emit local.set to it, and push the binding; resolve through _scopes innermost-first in _compile_ident and _compile_assign, falling back to globals; push/pop a scope in _compile_block and the loop bodies. _generate_wasm_function already dedups locals by name (lines 1475-1483), so each unique name is emitted once.",
+    "expected_effect": "let x = 1 if 1 == 1 then { let x = 99 } else { } return x returns 1 (P01 PASS); the WAT contains two distinct locals; a name bound inside a block is not visible outside it.",
+    "spike_question": "Given the P01 source, When compiled with the scope resolver, Then the WAT has two distinct locals and main returns 1; given { let y = 2 return y }, Then y resolves to the inner local and returns 2.",
+    "risk": "Medium/High - it touches every name-resolution site (_compile_ident, _compile_assign, _field_offset/_local_struct_types, _known_locals); a missed site converts a wrong answer into an unknown-local error, so the 61-test suite must stay green.",
+    "effort": "L",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "gate-refuse-unsupported",
+    "title": "Make the compile-time gate refuse constructs the backend silently miscompiles",
+    "addresses": [
+      "F2",
+      "F5",
+      "F6",
+      "F9",
+      "F10"
+    ],
+    "problem": "verify_program (svl/verify_gate.py:38-80) runs the AST guard, type layer and interval AI, but the AI only reports OOB/div-zero (svl/abstract_interpretation.py:1183-1230); the backend then silently no-ops iterator `for` (svl/compiler_wasm.py:582-625, `call $iterator_next` at 608-613), emits a one-operand `call $print` for print(<int>) (compiler_wasm.py:1039-1044), and emits `global.set` on an immutable const global (compiler_wasm.py:265-284, mutability CONST at 281-282), so a program can pass the gate and still be wrong.",
+    "proposal": "Add a backend-contract pass to the gate: extend ASTGuard (svl/ast_guard.py:39-85) or add check_backend_support(ast) in a new svl/backend_contract.py, emitting a Finding(severity='error') for (a) ForStmt whose iter_expr is not BinaryExpr('..'); (b) CallExpr to print whose argument is not a string Literal; (c) AssignExpr / ExprStmt(AssignExpr) targeting a name collected from ConstDecl (extend _collect, abstract_interpretation.py:762-793, to return const_names); (d) Import and TryStmt nodes, which the backend drops or rejects late. Wire it into verify_program as step 3.5 and into the default strict compile (compiler_wasm.py:1521-1523).",
+    "expected_effect": "The program `let a=[1,2,3] let s=0 for x in a { s+=x } return s` raises SVLVerificationError('... iterator for-loop is not supported by the backend ...') instead of returning 0; `let x=5 print(x)` and `const c: int = 5 ... c = 6` are refused with the construct named; the 61-test suite and corpus_check still pass.",
+    "spike_question": "Given the five failing constructs (for-in, print(int), const reassignment, try/catch, import), when compiled with compile_file_to_wasm(src) under the strict default, then each raises SVLVerificationError naming the construct; and `python -m pytest tests -q` stays 61/61 with corpus_check reporting 0 newly-refused files.",
+    "risk": "Medium \u2014 false positives on existing corpus programs are possible (sweep examples/ and tests/ first); local const reassignment already fails at parse time, so the const check mainly matters for module-level consts.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "demote-bpsw",
+    "title": "Demote the constant-true BPSW theorem layer to an informational certificate and replace it with the falsifiable attestation binding",
+    "addresses": [
+      "L1"
+    ],
+    "problem": "compute_monodromy_for_prime (svl/bpsw_monodromy.py:232-256) runs BPSW on program_hash % p for p in {17,37,73}, so the tested value is always below 73 and MR-base-2 plus Lucas-Selfridge agree on every input; verify_theorem (bpsw_monodromy.py:301-334) is therefore constant-true (measured 0/60 random ASTs fail), yet it is counted as a verification layer in TheoremLayer.verify_theorem (svl/theorem_layer.py:133,186) and embedded as the theorem proof by PCCWasmGenerator.generate (svl/pcc_wasm.py:120-139).",
+    "proposal": "Remove theorem_result.passed and all_parities_even from TheoremVerifyResultWrapper.passed (theorem_layer.py:186) and keep the computation only as bpsw_status='informational' with a docstring stating it is a hash-primality certificate, not a program proof. Replace the PCC theorem artifact with the independently checkable svl.attest payload (attest.ast_fingerprint, svl/attest.py:148-169) so the artifact binds source_sha256 to ast_sha256 to content_sha256 and can be rejected by attest.verify_attestation (attest.py:241-258). If a real primality test is wanted, apply BPSW to the full 256-bit program_hash rather than hash % p and report it as a curiosity, never as evidence.",
+    "expected_effect": "verify_theorem_layer(src).passed is computed from syntax, types and attestation only; the wrapper exposes bpsw_status='informational'; PCCWasmGenerator embeds attest.ast_fingerprint(source) and verify_pcc_wasm recomputes content_hash, so flipping one byte of the module body makes verification fail. Probe P13 is retired as evidence rather than reported as a green check.",
+    "spike_question": "Given 60 programs, when running the new theorem layer, then passed equals the syntax/type/attestation verdict for all 60; and given a generated PCC artifact, when one byte of its code section is flipped, then verify_pcc_wasm returns False with a hash mismatch (before the change it returned True because the proof was self-declared).",
+    "risk": "Low \u2014 removes a false guarantee; requires updating README/rating claims and the PCC proof schema.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "fix-product-channel",
+    "title": "Replace the degenerate PRODUCT checksum with a non-degenerate rolling channel",
+    "addresses": [
+      "L2"
+    ],
+    "problem": "product_checksum (svl/gate231.py:24-29) computes the product of (b+1) mod 231; because 231 = 3*7*11, any byte with b+1 congruent to 0 mod 3, 7 or 11 forces the product to 0 and it can never recover \u2014 measured 2000/2000 random 512-byte windows give 0 (1 distinct value), degenerating the 231-gate and attest.locate_sync (svl/attest.py:47-55, which documents the effective keyspace as 231^2).",
+    "proposal": "Replace the PRODUCT channel with a polynomial rolling hash H = (H*31 + b) mod 231 (31 is coprime to 231) or an FNV-1a 32-bit hash reduced mod 231, keeping the (SUM, LINEAR, PRODUCT) tuple shape and meta_checksum (gate231.py:47-50) so type_layer._verify_structural (svl/type_layer.py:215-236), attest.ast_fingerprint and verify_checksums need no signature changes. Rename the field to ROLLING if desired but keep its tuple position.",
+    "expected_effect": "2000 random 512-byte windows yield more than 100 distinct PRODUCT values and fewer than 1% zeros; verify_checksums becomes falsifiable (a one-byte change alters the checksum with probability about 1 - 1/231); locate_sync's false-sync rate drops from about 1/53361 to about 1/231^3 per position.",
+    "spike_question": "Given 2000 random 512-byte windows, when computing the new PRODUCT channel, then len(set(values)) > 100 and zeros/2000 < 0.01; and when one byte of a window is flipped, then the checksum changes.",
+    "risk": "Low \u2014 but it changes the pinned gate231 triple, so golden references and attestation payloads (attest.py:156 documents a pinned gate [167, 10, 0]) must be regenerated.",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "pcc-real-custom-section",
+    "title": "Emit the PCC proof as a real custom section and make it independently checkable",
+    "addresses": [
+      "F7"
+    ],
+    "problem": "PCCWasmModule.to_wasm_with_proofs (svl/pcc_wasm.py:32-66) inserts `(custom \"svl-proofs\" \"<hex>\")` into the WAT; `(custom ...)` is not a valid WAT module field \u2014 measured: wasmtime.wat2wasm rejects it with 'expected valid module field', while `(@custom \"svl-proofs\" \"\\de\\ad\\be\\ef\")` assembles. extract_proofs_from_wasm (pcc_wasm.py:215-231) parses only the invalid form, the binary encoder WasmCustomSection.create_proof_section (pcc_wasm.py:297-301) is never used, and verify_proofs (pcc_wasm.py:68-71) just ANDs self-declared booleans.",
+    "proposal": "Emit `(@custom \"svl-proofs\" \"<wat-escaped bytes>\")` using the same escaping as attest._wat_escape and attest._section_text (svl/attest.py:144-146, 188-196), and update extract_proofs_from_wasm's regex to match it; or add to_wasm_bytes() that assembles the WAT and appends WasmCustomSection.create_proof_section. Replace the self-declared passed booleans with attest's content_sha256 and ast_sha256 so verify_pcc_wasm (pcc_wasm.py:234-252) recomputes the canonical hash and fails on mutation.",
+    "expected_effect": "PCCWasmGenerator().generate(src).to_wasm_with_proofs() is accepted by wasmtime.wat2wasm and wasmtime.Module; extract_proofs_from_wasm recovers the payload; verify_pcc_wasm returns True on the untouched artifact and False with a hash mismatch after a one-byte code change.",
+    "spike_question": "Given a generated PCC artifact, when assembled with wasmtime.wat2wasm, then it succeeds (before: 'expected valid module field'); and when one byte of the code section is flipped, then verify_pcc_wasm returns False.",
+    "risk": "Low \u2014 the `(@custom ...)` form is already proven to assemble in this repo (attest._section_text).",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "smt-opt-in-compile",
+    "title": "Put the SMT prover on an opt-in compile path and fix the theorem layer's Z3-absent false refusal",
+    "addresses": [
+      "F4",
+      "L1"
+    ],
+    "problem": "The SMT layer is real (svl/smt_theorem.py:758-819) but opt-in and off the compile path: verify_program (svl/verify_gate.py:38-80) never calls it and compile_file_to_wasm (svl/compiler_wasm.py:1503-1532) has no prove flag, while verify_program_theorem still runs the constant-true BPSW layer first (smt_theorem.py:766-771). Conversely TheoremLayer.verify_theorem folds smt_verified into all_passed unconditionally (svl/theorem_layer.py:186), so on an interpreter without z3 (SMT_INTEGRATION=False, theorem_layer.py:18-38) every program is reported as failed \u2014 a false refusal.",
+    "proposal": "(a) Add prove=False to compile_file_to_wasm; when set, run smt_theorem.verify_with_smt(source) after assert_verified and raise SVLVerificationError with the model on status='counterexample'. (b) Fix theorem_layer.py:186 to include smt_verified only when the SMT layer actually ran (smt_ran = SMT_INTEGRATION and Z3_AVAILABLE and config.use_smt), adding smt_skipped to the wrapper. (c) Remove the BPSW pre-gate in verify_program_theorem so the prover is not chained to the decorative layer. (d) Return AI findings and the SMT status from one combined result so the gate can report proven / refused / unverified honestly.",
+    "expected_effect": "compile_file_to_wasm('func f(a: int) type int { assert a > 0 return 0 }', prove=True) raises SVLVerificationError with counterexample a=0, while `assert a + 1 > a` compiles with status='proven'; without z3 installed, verify_theorem_layer(src).passed is True and smt_skipped=True instead of False.",
+    "spike_question": "Given a program with `assert a > 0`, when compiled with prove=True, then compilation is refused and the counterexample model is printed; and given the same program on an interpreter with z3 hidden, when calling verify_theorem_layer, then passed is True (before the fix: False for every program).",
+    "risk": "Low-Medium \u2014 SMT cost is opt-in; the Z3-absent fix is a pure bug fix; merging AI and SMT findings needs a shared result type.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "type-boundary-soundness",
+    "title": "Make the gate's type layer actually check return and call boundaries",
+    "addresses": [
+      "F4"
+    ],
+    "problem": "TypeChecker._check_return_stmt (svl/type_inference.py:852-854) synthesizes the return value's type but never unifies it with the enclosing FuncDecl.return_type, and _synth_call (type_inference.py:518-527) returns the callee's return type without unifying argument types with parameter types \u2014 so `return \"hi\"` in a `type int` function and `f(\"hi\")` against `f(x: int)` pass verify_type and therefore the gate (svl/verify_gate.py:56-62).",
+    "proposal": "In _check_func_decl (type_inference.py:883-917), compute return_type before walking the body and record it on the checker; in _check_return_stmt, unify the synthesized value type with it and append 'Type mismatch in return: ...' on failure. In _synth_call, after instantiating the callee's Type.func, unify each argument's synthesized type with the corresponding parameter type (skipping builtins with type vars and the array-handle/int allowance already used for `let`). verify_type already forwards these errors to verify_gate, so no gate change is needed.",
+    "expected_effect": "`func f() type int { return \"hi\" }` and `func f(x: int) type int { return x }` called as `f(\"hi\")` both raise SVLVerificationError at the default strict compile; `let x: int = \"hi\"` still fails; void functions with no return value are unaffected; P15 flips to PASS.",
+    "spike_question": "Given the two boundary programs, when compiled with compile_file_to_wasm(src) under the strict default, then each raises SVLVerificationError naming the boundary; and `python -m pytest tests -q` plus corpus_check still pass (void and never/Error returns must not be caught).",
+    "risk": "Medium \u2014 string-returning void functions and the array-handle/int allowance need care; a corpus sweep is required.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "repl-evaluates",
+    "title": "Make the REPL actually evaluate, and wrap input in a module before verifying",
+    "addresses": "F12",
+    "problem": "svl/repl.py:228 feeds a raw line to verify_syntax, but svl/parser_rd.py:969 parse_top_level only accepts declarations, so `let x = 1` raises 'Unexpected token at top level'; svl/repl.py:307 _execute_block only re-verifies and never compiles or runs anything, and :322 _reset_buffer discards definitions so no state survives between inputs.",
+    "proposal": "(a) Wrap the pending buffer in `module repl { ... }` in _verify_current_line/_verify_buffer_incremental before calling the verification layers, and in _execute_block before compiling. (b) Add a real execution path in _execute_block: compile_file_to_wasm -> wasmtime.wat2wasm -> Module -> Linker with the host ABI (extract the import definitions from tests/conftest.py:48-66 into svl/host_abi.py and reuse them in both places) -> call the exported main -> print the i32 result. (c) Keep a persistent self.state.definitions list that survives _reset_buffer, and for each evaluation append a synthetic `func __repl_expr() type int { return <expr> }` so `x + 1` works after `let x = 1`.",
+    "expected_effect": "`printf 'let x = 1\\n\\nx + 1\\n\\nexit\\n' | python -m svl.repl` prints 1 then 2 with no 'Unexpected token at top level'; the Jupyter kernel (jupyter_kernel.py:124-128) inherits the same fix and stops reporting 'Executed successfully' for code it never ran.",
+    "spike_question": "Given a REPL session, when the user types `let x = 1` then a blank line, then `x + 1` then a blank line, then the output must contain 1 and 2 and no Syntax Error. Throwaway: wrap the buffer in `module repl { ... }` in a scratch script, compile with compile_file_to_wasm, run under wasmtime with the conftest host imports, and assert the returned i32 is 2.",
+    "risk": "Medium \u2014 a new execution path can trap or leak past the 1 MiB ceiling (F8), so errors must be caught and surfaced as REPL messages, not tracebacks.",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "lsp-boot-fix",
+    "title": "Register LSP handlers as unbound functions so the server boots",
+    "addresses": "F11",
+    "problem": "svl/lsp_server.py:357-365 calls server.feature(NAME)(server.<method>), passing a bound method; pygls 2.1.1's assign_help_attrs (pygls/feature_manager.py:44) does setattr(f, ATTR_REGISTERED_NAME, reg_name), which bound methods reject -> AttributeError: 'method' object has no attribute 'reg_name'. pygls/lsprotocol are also absent from requirements-dev.txt, so CI cannot even import the module.",
+    "proposal": "Change the eight registrations to pass the unbound functions (SVLLanguageServer.initialize, .did_open, .did_change, .did_close, .did_save, .completion, .hover, .definition, .semantic_tokens_full) \u2014 verified all nine register cleanly in a probe \u2014 or define module-level `def handler(ls, params)` functions and decorate them. Add pygls>=2.1 and lsprotocol>=2025.0 to requirements-dev.txt (or a requirements-lsp.txt), and add tests/test_lsp_boot.py that constructs SVLLanguageServer, registers the features, and asserts no exception plus a framed initialize response.",
+    "expected_effect": "python -m svl.lsp_server reaches start_io() and answers an LSP initialize request; pytest tests/test_lsp_boot.py passes; the P19 probe in svl-rating/probes.py flips from FAIL to PASS.",
+    "spike_question": "Given pygls 2.1.1 installed, when main() registers SVLLanguageServer.initialize instead of server.initialize, then no AttributeError is raised and the server responds to initialize. Already proven: a probe registering all nine unbound handlers completed without error.",
+    "risk": "Low",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "svlc-cli-pyproject",
+    "title": "Add pyproject.toml, an `svlc` console script, and svl/__init__.py",
+    "addresses": "L3",
+    "problem": "There is no pyproject.toml/setup.py in the repo (only unrelated ones under flipper-gui/ and tanakh-vre-guard/), no svl/__init__.py (the package is an implicit namespace package), and the only CLI is svl/package_manager.py:266 with prog=\"svl\", reachable only as `python -m svl.package_manager`; repl.py and lsp_server.py are only reachable as modules.",
+    "proposal": "Add pyproject.toml (setuptools; name=\"svl\"; version read from svl/__init__.py; dependencies = the hard module-level imports already enumerated in requirements-dev.txt:12-18; [project.optional-dependencies] lsp = [\"pygls>=2.1\",\"lsprotocol>=2025.0\"]), with [project.scripts] svlc = \"svl.cli:main\", svl-lsp = \"svl.lsp_server:main\", svl-repl = \"svl.repl:run_repl\". Add svl/__init__.py with __version__ and lazy re-exports. Add svl/cli.py with build|run|check|repl|lsp|corpus|pkg subcommands; run uses compile_file_to_wasm + wasmtime + the shared svl/host_abi.py.",
+    "expected_effect": "In a clean venv, `pip install -e .` then `svlc --version` prints 0.1.0, `svlc run <file.svl>` prints the program's result, `svlc check <file.svl>` exits non-zero on a gate refusal, and `svlc repl`/`svlc lsp` dispatch to the fixed REPL/LSP.",
+    "spike_question": "Given a clean venv, when `pip install -e . --no-deps` is run, then `svlc --help` lists the subcommands and `svlc run` on a known-good program prints the expected value. Throwaway: `python -m venv /tmp/v && /tmp/v/bin/pip install -e . --no-deps && /tmp/v/bin/svlc --version`.",
+    "risk": "Low",
+    "effort": "M",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "ci-branch-tooling-smoke",
+    "title": "Trigger CI on main and add a tooling smoke job",
+    "addresses": "L5",
+    "problem": ".github/workflows/ci.yml:5 triggers on branches: [master], but the public mirror's branch is main, so CI never runs; the workflow also only runs pytest/corpus/golden-refs/spikes and never touches the LSP, REPL, or CLI, so F11/F12/L3 can never be caught.",
+    "proposal": "Change line 5 to branches: [master, main] (or drop the branch filter). Add a tooling job that (a) boots `python -m svl.lsp_server`, sends a framed initialize, and asserts no traceback; (b) pipes `let x = 1\\n\\nx + 1\\n\\n` into `python -m svl.repl` and asserts the output contains 2; (c) runs `svlc --version` once the CLI exists. Add pygls/lsprotocol to the CI install so (a) is exercisable.",
+    "expected_effect": "A push to the mirror's main branch produces a green (or honestly red) run; a regression in the LSP/REPL/CLI fails CI instead of passing silently.",
+    "spike_question": "Given the workflow with branches: [main], when a commit is pushed to main, then a run appears in the Actions tab. Throwaway: push a dummy commit to a main branch in a scratch clone and check the run is triggered.",
+    "risk": "Low",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "package-manager-wat-mislabel",
+    "title": "Write real WASM binaries in the package manager, and stop advertising dead commands",
+    "addresses": "L3",
+    "problem": "svl/package_manager.py:124 sets wasm = compile_file_to_wasm(source), which returns WAT text, and :152 writes it with write_text to module.wasm; svl/package_registry.py:231 then tests content[:4] == b\"\\x00asm\", which is never true, so every published package is recorded UNVERIFIED. Separately :190 install() raises NotImplementedError and :212 publish() only prints 'Published successfully' without uploading, yet both are advertised in the argparse CLI at :280-287.",
+    "proposal": "Convert WAT to binary with wasmtime.wat2wasm before writing (or write module.wat and name the field accordingly), and hash the binary. For the dead commands, either implement local install by copying from ~/.svl/packages using the existing index, or make the CLI print 'not implemented' and exit 2 while removing them from --help and the README.",
+    "expected_effect": "`svlc pkg create demo 1.0.0 src.svl` writes a file whose first four bytes are 00 61 73 6d; publish then records VERIFIED when the artifact's svl.attest section checks out; `svlc pkg install` no longer raises NotImplementedError.",
+    "spike_question": "Given PackageManager.create_package, when the written module.wasm is read as bytes, then content[:4] == b\"\\x00asm\". Throwaway: run create_package on a small source and `xxd -l 4` the output.",
+    "risk": "Low",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  },
+  {
+    "id": "corpus-baseline-generated",
+    "title": "Make the README corpus number generated and CI-guarded",
+    "addresses": "L4",
+    "problem": "The public README states '52 files, 42 compilable', but SVL_FORMAL_RATING.md:30-31 measures 28 files / 23 compilable on the mirror; svl/corpus_check.py:42 hard-codes MIN_COMPILABLE = 20, below the measured 23, and :32-37 globs examples/ and svl-release/examples/, which do not exist in this workspace, so a missing directory is silently skipped.",
+    "proposal": "Add --json and --write-baseline to corpus_check.py, persist the measured counts in a versioned corpus_baseline.json, raise MIN_COMPILABLE to the measured value (23 on the mirror) or default it to the baseline file, and replace the README's hand-written '52 files, 42 compilable' with the generated number plus a date. Add a CI step that runs the checker and fails if the README number drifts. Make the dead globs explicit (or drop them) so a missing directory is reported, not skipped.",
+    "expected_effect": "The README reads '28 files, 23 compilable (2026-11-12)'; a change that drops the compilable count to 22 fails CI; the L4 probe flips to PASS.",
+    "spike_question": "Given `corpus_check.py --json`, when its files/compiled fields are compared to the numbers printed in the README, then they match. Throwaway: run the checker and diff its output against the README claim.",
+    "risk": "Low",
+    "effort": "S",
+    "_expert": "panel_semantics"
+  }
+]

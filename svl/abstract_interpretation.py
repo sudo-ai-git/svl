@@ -1126,6 +1126,19 @@ class _Analyzer:
             self._eval(expr.left, state)
             return _TOP_IV
         left = self._eval(expr.left, state)
+        if op in ('&&', '||'):
+            # Short-circuit: the right operand runs only when the left does not already
+            # decide the result.  Evaluating it unconditionally produced a false
+            # division-by-zero finding for `x != 0 && 10 / x > 1`.
+            if op == '&&':
+                if left.upper == 0:                 # left always false -> right unreachable
+                    return Interval(lower=0, upper=0)
+                self._eval(expr.right, state)
+            else:
+                if left.lower > 0:                  # left always true -> right unreachable
+                    return Interval(lower=1, upper=1)
+                self._eval(expr.right, state)
+            return Interval(lower=0, upper=1)
         right = self._eval(expr.right, state)
         if op == '+':
             return _iv_add(left, right)
@@ -1141,8 +1154,6 @@ class _Analyzer:
             return _iv_rem(left, right)
         if op in ('==', '!=', '<', '<=', '>', '>='):
             return _iv_cmp(left, right, op)
-        if op in ('&&', '||'):
-            return Interval(lower=0, upper=1)
         # Bitwise and shift operators: no interval information.
         return _TOP_IV
 

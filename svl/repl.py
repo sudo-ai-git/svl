@@ -35,6 +35,51 @@ class ReplConfig:
     max_history: int = 1000
 
 
+def run_wat(wat: str):
+    """Assemble, validate, instantiate and run a WAT module's `<module>_main`.
+
+    Returns (return_value, printed_bytes); return_value is None when the module has no
+    exported entry point.  Shared by the REPL and the Jupyter kernel so both execute
+    through the same host ABI.
+    """
+    import wasmtime
+
+    binary = wasmtime.wat2wasm(wat)
+    engine = wasmtime.Engine()
+    module = wasmtime.Module(engine, binary)
+    store = wasmtime.Store(engine)
+    linker = wasmtime.Linker(engine)
+    i32 = wasmtime.ValType.i32()
+    out = bytearray()
+    memory = {}
+
+    def read_mem(ptr, n):
+        if "m" not in memory or ptr < 0 or n < 0:
+            return b""
+        return bytes(memory["m"].read(store, ptr, ptr + n))
+
+    linker.define_func("env", "print", wasmtime.FuncType([i32, i32], []),
+                       lambda p, n: out.extend(read_mem(p, n)))
+    linker.define_func("env", "print_int", wasmtime.FuncType([i32], []),
+                       lambda v: out.extend(str(v).encode()))
+    linker.define_func("env", "putc", wasmtime.FuncType([i32], []),
+                       lambda c: out.append(c & 0xFF))
+    linker.define_func("env", "clear", wasmtime.FuncType([], []), lambda: None)
+    linker.define_func("env", "malloc", wasmtime.FuncType([i32], [i32]), lambda n: 1 << 20)
+    linker.define_func("env", "iterator_next", wasmtime.FuncType([i32], [i32]), lambda h: 0)
+    linker.define_func("env", "await", wasmtime.FuncType([i32], [i32]), lambda x: x)
+
+    inst = linker.instantiate(store, module)
+    exports = inst.exports(store)
+    names = [e.name for e in module.exports]
+    if "memory" in names:
+        memory["m"] = exports["memory"]
+    entry = next((n for n in names if n.endswith("_main")), None)
+    if entry is None:
+        return None, bytes(out)
+    return exports[entry](store), bytes(out)
+
+
 class SVLRepl:
     """SVL REPL with live verification."""
 
@@ -73,9 +118,11 @@ class SVLRepl:
                 
                 line = input(prompt)
                 
-                # Handle empty line (execute block if in block)
+                # Handle empty line: execute the accumulated buffer.  The old
+                # condition (`if self.state.in_block`) meant a single top-level
+                # statement like `let x = 1` was never executed.
                 if not line.strip():
-                    if self.state.in_block:
+                    if self.state.buffer:
                         self._execute_block()
                     continue
                 
@@ -225,6 +272,21 @@ SVL Syntax (22 Hebrew tokens with ASCII aliases):
         # If braces are balanced, statement is complete regardless of control structures
         return True
 
+    def _wrapped_source(self) -> str:
+        """Wrap the buffer in `module repl { func main() type int { ... } }`.
+
+        The verification layers only accept declarations at top level, so a bare
+        `let x = 1` raised "Unexpected token at top level" before it could be evaluated.
+        """
+        source = '\n'.join(self.state.buffer)
+        if not source.strip().startswith('module'):
+            # A block with a `return` needs a result type; a statement-only block must be
+            # void, or the backend's fall-through `unreachable` traps on a `let`-only body.
+            ret_type = 'int' if 'return' in source else 'void'
+            source = (f"module {self.state.module_name} {{\n"
+                      f"func main() type {ret_type} {{\n{source}\n}}\n}}")
+        return source
+
     def _verify_current_line(self, line: str):
         """Verify a single line (if it's a complete statement)."""
         self.state.buffer.append(line)
@@ -237,7 +299,7 @@ SVL Syntax (22 Hebrew tokens with ASCII aliases):
         if not self.state.buffer:
             return
         
-        source = '\n'.join(self.state.buffer)
+        source = self._wrapped_source()
         
         # Syntax check
         syntax_result = verify_syntax(source, self.syntax_config)
@@ -270,7 +332,7 @@ SVL Syntax (22 Hebrew tokens with ASCII aliases):
             print("Buffer empty")
             return
         
-        source = '\n'.join(self.state.buffer)
+        source = self._wrapped_source()
         print("Running full verification...")
         
         import time
@@ -305,19 +367,31 @@ SVL Syntax (22 Hebrew tokens with ASCII aliases):
         print(f"Total:   {total_time:.1f}ms")
 
     def _execute_block(self):
-        """Execute the current block (verify + show result)."""
+        """Execute the current block: verify, compile, run, print the result."""
         if not self.state.buffer:
             return
         
-        source = '\n'.join(self.state.buffer)
-        
-        # Wrap in module if not already
-        if not source.strip().startswith('module'):
-            source = f"module {self.state.module_name} {{\n{source}\n}}"
-        
-        print(f"Executing block...")
+        source = self._wrapped_source()
+        print("Executing block...")
         self._verify_full_buffer()
-        
+
+        from svl.compiler_wasm import compile_file_to_wasm
+        try:
+            wat = compile_file_to_wasm(source)
+        except Exception as e:
+            print(f"Compilation failed: {e}")
+            self._reset_buffer()
+            return
+
+        try:
+            rv, out = run_wat(wat)
+            if out:
+                sys.stdout.write(out.decode("utf-8", "replace"))
+            if rv is not None:
+                print(f"[{self.state.module_name}_main() returned {rv}]")
+        except Exception as e:
+            print(f"Execution failed: {e}")
+
         # Clear buffer after execution
         self._reset_buffer()
 

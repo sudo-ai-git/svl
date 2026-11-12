@@ -1,0 +1,47 @@
+spawning batch 1 (3 experts) on meituan/longcat-2.5:free ...
+  🔀 [set 1] delegating 3 tasks
+Failed to load plugin 'dspy-json-fix': load timed out after 10s (import + register() never returned)
+<unknown>:486: SyntaxWarning: invalid escape sequence '\.'
+Plugin 'photonic-compute' has no register() function
+/home/sudosudo/.hermes/plugins/reasoning/engine.py:1037: RuntimeWarning: coroutine 'WebSearchOracle.aquery' was never awaited
+  return OracleResult(
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/sudosudo/.hermes/plugins/reasoning/engine.py:1037: RuntimeWarning: coroutine 'WikipediaOracle.aquery' was never awaited
+  return OracleResult(
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+{"timestamp": "2026-11-12T17:35:13.673357Z", "operation": "reason", "provider": "nous", "model": "meituan/longcat-2.5:free", "success": true, "latency_ms": 55301.84, "input_tokens": 319, "output_tokens": 1409, "verification_passed": true, "prompt_length": 1630, "response_length": 8281, "oracle_count": 2, "context_length": 5, "attempt_number": 1}
+{"timestamp": "2026-11-12T17:35:22.838480Z", "operation": "reason_generator", "provider": "nous", "model": "unknown", "success": false, "latency_ms": 63688.89, "failure_reason": "", "attempt_number": 1}
+{"timestamp": "2026-11-12T17:35:23.265810Z", "operation": "reason", "provider": "nous", "model": "meituan/longcat-2.5:free", "success": false, "latency_ms": 64898.73, "failure_reason": "", "composed": false}
+{"timestamp": "2026-11-12T17:35:23.133361Z", "operation": "reason_generator", "provider": "nous", "model": "unknown", "success": false, "latency_ms": 63234.06, "failure_reason": "", "attempt_number": 1}
+{"timestamp": "2026-11-12T17:35:23.294866Z", "operation": "reason", "provider": "nous", "model": "meituan/longcat-2.5:free", "success": false, "latency_ms": 64930.51, "failure_reason": "", "composed": false}
+  ✓ [set 1 · 3/3] You are a senior expert  RUNTIME, CODEGE  (659.36s)
+  ✓ [set 1 · 2/3] You are a senior expert  TYPE SYSTEM AND  (781.1s)
+  ✓ [set 1 · 1/3] You are a senior expert  LANGUAGE SEMANT  (978.24s)
+spawning batch 2 (2 experts) on meituan/longcat-2.5:free ...
+  🔀 [set 2] delegating 2 tasks
+/home/sudosudo/.hermes/plugins/reasoning/engine.py:1037: RuntimeWarning: coroutine 'WebSearchOracle.aquery' was never awaited
+  return OracleResult(
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/sudosudo/.hermes/plugins/reasoning/engine.py:1037: RuntimeWarning: coroutine 'WikipediaOracle.aquery' was never awaited
+  return OracleResult(
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+{"timestamp": "2026-11-12T17:52:28.124506Z", "operation": "reason", "provider": "nous", "model": "meituan/longcat-2.5:free", "success": true, "latency_ms": 61291.41, "input_tokens": 317, "output_tokens": 1696, "verification_passed": true, "prompt_length": 1613, "response_length": 10260, "oracle_count": 2, "context_length": 5, "attempt_number": 1}
+{"timestamp": "2026-11-12T17:52:32.065694Z", "operation": "reason", "provider": "nous", "model": "meituan/longcat-2.5:free", "success": true, "latency_ms": 64593.58, "input_tokens": 318, "output_tokens": 1656, "verification_passed": true, "prompt_length": 1612, "response_length": 9341, "oracle_count": 2, "context_length": 5, "attempt_number": 1}
+  ✓ [set 2 · 2/2] You are a senior expert  TOOLING, DX AND  (636.3s)
+  ✓ [set 2 · 1/2] You are a senior expert  VERIFICATION AN  (908.42s)
+top-level keys: ['task_index', 'status', 'summary', 'api_calls', 'duration_seconds', 'model', 'exit_reason', 'truncated', 'tokens', 'tool_trace', 'cost_usd', 'cost_status', 'live_transcript']
+children returned: 5
+--- ?: status=completed len=11644
+    parsed 6 improvements; top_pick=array-for-in
+--- ?: status=completed len=13703
+    parsed 6 improvements; top_pick=check-call-arguments-and-return
+--- ?: status=completed len=11502
+    parsed 6 improvements; top_pick=memory-grow-reset
+--- ?: status=completed len=14737
+    parsed 6 improvements; top_pick=gate-refuse-unsupported
+--- ?: status=completed len=12795
+    parsed 6 improvements; top_pick=repl-evaluates
+
+TOTAL improvements collected: 30
+raw output: /home/sudosudo/.openclaw/workspace/svl-rating/panel_raw
+EXIT=0

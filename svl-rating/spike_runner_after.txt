@@ -1,0 +1,242 @@
+
+============================================================
+RUNNING ALL SPIKES (43 total)
+============================================================
+
+============================================================
+RUNNING SPIKE H1: Semantic Versioning in Module System
+============================================================
+
+============================================================
+RUNNING SPIKE H10: Higher-Kinded Types
+============================================================
+
+============================================================
+RUNNING SPIKE H11: Refinement Types
+============================================================
+
+============================================================
+RUNNING SPIKE H12: Intersection and Union Types
+============================================================
+
+============================================================
+RUNNING SPIKE H13: Quantified Constraints
+============================================================
+
+============================================================
+RUNNING SPIKE H14: Type-Level Computation
+============================================================
+
+============================================================
+RUNNING SPIKE H15: Linear Type Inference with Regions
+============================================================
+
+============================================================
+RUNNING SPIKE H16: Modal Types for Staging
+============================================================
+
+============================================================
+RUNNING SPIKE H17: SMT-Based Theorem Layer (Z3)
+============================================================
+
+============================================================
+RUNNING SPIKE H18: Incremental 231-Gate Checksums
+============================================================
+
+============================================================
+RUNNING SPIKE H19: Symbolic Execution for Theorem Layer
+============================================================
+
+============================================================
+RUNNING SPIKE H2: Effect System with Row Polymorphism
+============================================================
+
+============================================================
+RUNNING SPIKE H20: Proof-Carrying Code for WASM
+============================================================
+
+============================================================
+RUNNING SPIKE H21: Abstract Interpretation for Type Layer
+============================================================
+
+============================================================
+RUNNING SPIKE H22: Differential Verification
+============================================================
+
+============================================================
+RUNNING SPIKE H23: Probabilistic Verification
+============================================================
+
+============================================================
+RUNNING SPIKE H24: Self-Certifying Compiler
+============================================================
+
+============================================================
+RUNNING SPIKE H27: Tail Call Optimization
+============================================================
+
+============================================================
+RUNNING SPIKE H3: Linear/Uniqueness Types
+============================================================
+
+============================================================
+RUNNING SPIKE H31: AOT Compilation with Cranelift
+============================================================
+
+============================================================
+RUNNING SPIKE H33: LSP with Tree-sitter
+============================================================
+
+============================================================
+RUNNING SPIKE H34: Interactive Theorem Proving
+============================================================
+
+============================================================
+RUNNING SPIKE H35: Time-Travel Debugging
+============================================================
+
+============================================================
+RUNNING SPIKE H36: Visual AST/Type Explorer
+============================================================
+
+============================================================
+RUNNING SPIKE H37: AI-Assisted Proof Search
+============================================================
+
+============================================================
+RUNNING SPIKE H38: Property-Based Testing Integration
+============================================================
+
+============================================================
+RUNNING SPIKE H39: Semantic Diff
+============================================================
+
+============================================================
+RUNNING SPIKE H4: Dependent Types for Array Bounds
+============================================================
+
+============================================================
+RUNNING SPIKE H40: Error Messages with Repair Suggestions
+============================================================
+
+============================================================
+RUNNING SPIKE H41: FFI with C/Rust via Component Model
+============================================================
+
+============================================================
+RUNNING SPIKE H42: WIT Generation
+============================================================
+
+============================================================
+RUNNING SPIKE H43: Package Registry with Verification
+============================================================
+
+============================================================
+RUNNING SPIKE H44: Incremental Compilation
+============================================================
+
+============================================================
+RUNNING SPIKE H45: Distributed Build Cache
+============================================================
+
+============================================================
+RUNNING SPIKE H46: LSIF for Code Navigation
+============================================================
+
+============================================================
+RUNNING SPIKE H47: Docs Generation from Verification
+============================================================
+Documentation written to /home/sudosudo/.hermes/cache/scratch/tmpk8atyiqn
+
+============================================================
+RUNNING SPIKE H48: REPL Notebooks (Jupyter Kernel)
+============================================================
+Executing block...
+Running full verification...
+
+=== Verification Results ===
+Syntax:  ✓ PASS (2.9ms)
+Types:   ✓ PASS (0.8ms)
+Theorem: ✓ PASS (6.0ms)
+Total:   9.7ms
+Execution failed: error while executing at wasm backtrace:
+    0:     0x35 - <unknown>!repl$main
+
+Caused by:
+    wasm trap: wasm `unreachable` instruction executed
+
+
+============================================================
+RUNNING SPIKE H5: Gradual Typing with Blame
+============================================================
+
+============================================================
+RUNNING SPIKE H50: Verified Distributed Consensus (Raft)
+============================================================
+
+============================================================
+RUNNING SPIKE H6: Macro System with Hygiene
+============================================================
+
+============================================================
+RUNNING SPIKE H7: Module Functors
+============================================================
+
+============================================================
+RUNNING SPIKE H8: Algebraic Effects with Handlers
+============================================================
+
+============================================================
+RUNNING SPIKE H9: Type Classes with Coherence
+============================================================
+
+============================================================
+SPIKE TEST SUMMARY
+============================================================
+  H1     | ✓ PASS | Semantic Versioning in Module System
+  H10    | ✓ PASS | Higher-Kinded Types
+  H11    | ✓ PASS | Refinement Types
+  H12    | ✓ PASS | Intersection and Union Types
+  H13    | ✓ PASS | Quantified Constraints
+  H14    | ✓ PASS | Type-Level Computation (Type Families)
+  H15    | ✓ PASS | Linear Type Inference with Regions
+  H16    | ✓ PASS | Modal Types for Staging
+  H17    | ✓ PASS | SMT-Based Theorem Layer (Z3)
+  H18    | ✓ PASS | Incremental 231-Gate Checksums
+  H19    | ✓ PASS | Symbolic Execution for Theorem Layer
+  H2     | ✓ PASS | Effect System with Row Polymorphism
+  H20    | ✓ PASS | Proof-Carrying Code for WASM
+  H21    | ✓ PASS | Abstract Interpretation for Type Layer
+  H22    | ✓ PASS | Differential Verification
+  H23    | ✓ PASS | Probabilistic Verification
+  H24    | ✓ PASS | Self-Certifying Compiler
+  H27    | ✓ PASS | Tail Call Optimization (backend return_call)
+  H3     | ✓ PASS | Linear/Uniqueness Types
+  H31    | ✓ PASS | AOT Compilation with Cranelift
+  H33    | ✓ PASS | LSP with Tree-sitter
+  H34    | ✓ PASS | Interactive Theorem Proving
+  H35    | ✓ PASS | Time-Travel Debugging
+  H36    | ✗ FAIL | Visual AST/Type Explorer
+  H37    | ✗ FAIL | AI-Assisted Proof Search
+  H38    | ✓ PASS | Property-Based Testing Integration
+  H39    | ✓ PASS | Semantic Diff
+  H4     | ✓ PASS | Dependent Types for Array Bounds
+  H40    | ✓ PASS | Error Messages with Repair Suggestions
+  H41    | ✓ PASS | FFI with C/Rust via Component Model
+  H42    | ✓ PASS | WIT Generation
+  H43    | ✓ PASS | Package Registry with Verification
+  H44    | ✓ PASS | Incremental Compilation
+  H45    | ✓ PASS | Distributed Build Cache
+  H46    | ✓ PASS | LSIF for Code Navigation
+  H47    | ✓ PASS | Docs Generation from Verification
+  H48    | ✓ PASS | REPL Notebooks (Jupyter Kernel)
+  H5     | ✓ PASS | Gradual Typing with Blame
+  H50    | ✓ PASS | Verified Distributed Consensus (Raft)
+  H6     | ✓ PASS | Macro System with Hygiene
+  H7     | ✓ PASS | Module Functors
+  H8     | ✓ PASS | Algebraic Effects with Handlers
+  H9     | ✓ PASS | Type Classes with Coherence
+
+Total: 43 | Passed: 41 | Failed: 2
+Success Rate: 95.3%
+EXIT=2

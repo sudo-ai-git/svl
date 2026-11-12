@@ -28,6 +28,7 @@ class NodeType(Enum):
     RETURN_STMT = "ReturnStmt"
     ASSERT_STMT = "AssertStmt"
     TRY_STMT = "TryStmt"
+    THROW_STMT = "ThrowStmt"
     EXPR_STMT = "ExprStmt"
     BINARY_EXPR = "BinaryExpr"
     UNARY_EXPR = "UnaryExpr"
@@ -238,6 +239,11 @@ class TryStmt(ASTNode):
     catch_var: str
     catch_type: Optional['TypeExpr']
     catch_block: Block
+
+
+@dataclass
+class ThrowStmt(ASTNode):
+    value: 'Expr'
 
 
 @dataclass
@@ -1179,6 +1185,13 @@ class Parser:
             return self.parse_assert_stmt()
         elif self.match(TokenType.TRY):
             return self.parse_try_stmt()
+        elif self.match(TokenType.THROW):
+            return self.parse_throw_stmt()
+        elif self.match(TokenType.IMPORT):
+            raise SyntaxError(
+                "import must appear at top level, before any module "
+                f"(at line {getattr(self.current, 'line', '?')})"
+            )
         else:
             expr = self.parse_expr()
             if isinstance(expr, Block):
@@ -1278,6 +1291,16 @@ class Parser:
             column=self.current.column if self.current else 0,
             offset=self.current.offset if self.current else 0,
             try_block=try_block, catch_var=var, catch_type=catch_type, catch_block=catch_block
+        )
+
+    def parse_throw_stmt(self) -> ThrowStmt:
+        value = self.parse_expr()
+        return ThrowStmt(
+            type=NodeType.THROW_STMT,
+            line=self.current.line if self.current else 0,
+            column=self.current.column if self.current else 0,
+            offset=self.current.offset if self.current else 0,
+            value=value
         )
 
     # Expression parsing with precedence (highest to lowest)
