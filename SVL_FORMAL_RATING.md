@@ -388,7 +388,8 @@ compile-latency measurement), not failures.
   loop that allocates without freeing still grows memory.
 - **No real C/Rust FFI.** WIT/component-model *generation* exists, but no component-model
   runtime is wired, so cross-language calls are not callable today.
-- **No releases beyond `0.1.0`.** No semver tags or GitHub releases.
+- **No releases beyond `0.1.0`.** `v0.1.0` is tagged and pushed; no GitHub Releases
+  (release notes/assets) yet.
 - **Re-run after the fixes:** `python -m svl.spike_runner` → **41/43** (exit 2 = the two
   self-declared stubs H36/H37), no regressions; `python -m svl.spike_s17_wasm_determinism`
   → **Passed: True** (assembly ok, text deterministic).
