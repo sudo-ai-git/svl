@@ -116,19 +116,23 @@ module prog {
   pinning required (every value that feeds a checksum, a serialised AST or a program hash is a fixed
   function of its input)
 - **A WASM backend you can write programs in** — mutable variables (`x = v`, `x += v`), **arrays**
-  (literals, `a[i]` read/write with bounds checks, `len`, `zeros(n)`), **structs** (declaration, literals,
-  field read/write, pass to functions), **`match`** (`case <lit> => e`, `case _ => e`), `while` (incl.
-  nested), `for i in a..b`, `if`/`else`, `if…then…else` *expressions*, `const`/`var`, `assert`,
-  `print`/`print_int`, `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
-  unary `-`/`!`. Measured against a 38-construct matrix: **35 run correctly, 0 wrong answers**
-  (`svl/compiler_wasm.py`).
+  (literals, `a[i]` read/write with bounds checks, `len`, `zeros(n)`, `for x in <array>`), **structs**
+  (declaration, literals, field read/write, pass to functions), **`match`** (`case <lit> => e`,
+  `case _ => e`), `while` (incl. nested), `for i in a..b`, `if`/`else`, `if…then…else` *expressions*,
+  `const`/`var`, `assert`, `print`/`print_int`, `void` returns, **recursion**, arithmetic, bitwise
+  (`& | ^ << >>`, unary `~`) and unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**,
+  and **top-level `import`** (resolved with `base_dir`). Measured 2026-11-12: the 61-test pytest
+  suite assembles **and runs** every construct; the 30-row probe suite is
+  **26 PASS / 0 FAIL / 4 INFO** (`svl-rating/probes.py`).
+- **Command line** — `pip install -e .` then `svlc build|run|check|corpus` (`svl/cli.py`,
+  console script in `pyproject.toml`).
 - ~~**Self-hosting compiler** — bootstraps in 3 stages~~ **RETRACTED**: `svl/compiler_svl.svl` is a
   540-byte stub whose `main()` assigns integer constants and `assert true` — it compiles nothing. There
   is no self-hosted compiler.
 - **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types — **parse-level only.** The
   qualifiers are parsed and then consumed by nothing: `grep "kind == 'linear'"` outside the parser
   returns no engine, and `type_families._match_lhs` is `len(args) > 0` (it matches anything). See KB §11.
-- **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: PCC embeds a self-declared boolean (and its WAT does not assemble). **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract — see below.
+- **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing. **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract. **PCC is real as of 2026-11-12**: `PCCWasmModule.to_wasm_bytes_with_proofs()` emits a binary module with a standard `svl-proofs` custom section that `wasmtime.Module` validates, and `extract_proofs_from_wasm_bytes()` recovers the payload (the old WAT-text form is deprecated — wat2wasm has no custom-section syntax).
 - **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model
   of a program's arithmetic and discharges every `assert` by refuting its negation: `unsat` →
   proven, `sat` → a concrete counterexample. Measured: `assert a + 1 > a` is **proven for all
@@ -148,25 +152,32 @@ holding an f64 literal (invalid WAT that still parsed) and `x + y` on two floats
 - **The binary deserializer is real** — `svl/serialization.py` round-trips `to_binary` → `from_binary`
   → `to_binary` exactly. The wire format is **not self-describing** (an int in 1..5, a bool and a
   string of length 1..5 all begin with the same byte), so the reader is driven by the declared field
-  types and **raises rather than guessing**. Verified: all 42 compilable corpus programs round-trip
-  exactly, all 42 `NODE_TAGS` node types individually, and every `Literal`/`Pattern`/`TypeExpr`
-  discriminator path. `test_roundtrip()` now asserts structural equality **and** byte-stability.
-  Known gap: `CastExpr` is not in `NODE_TAGS`, so the *serializer* rejects it — it has never been
-  serialisable.
-- **Compiler optimizations** — **tail-call optimization is wired** into the backend: a tail
-  `return f(args)` with a matching in-module signature becomes a WASM `return_call`
-  (execution-verified: a 20000-deep tail-recursive call completes where the non-tail form
-  traps). The other six — SIMD, escape analysis, WASM GC, PGO, LTO, hot reloading — were
-  standalone libraries the compiler never called and were **removed** on 2026-11-12 rather
-  than left as dead code sustaining the claim. The RL pass-selection compiler (H49) was
-  removed too: every pass was a no-op. Type-directed lowering is also on the path (see the
-  Mod-5 bullet above).
-- **Tooling** — tree-sitter grammar, tactic prover, time-travel debugger, component-model FFI/WIT, package registry with attestations, incremental compilation, distributed build cache, LSIF, docs generation, Jupyter kernel, RL-guided optimization
+  types and **raises rather than guessing**. Verified 2026-11-12: all 23 compilable mirror corpus
+  programs round-trip exactly, all 43 `NODE_TAGS` node types individually, and every
+  `Literal`/`Pattern`/`TypeExpr` discriminator path. `test_roundtrip()` now asserts structural
+  equality **and** byte-stability. Known gap: `CastExpr` is not in `NODE_TAGS`, so the
+  *serializer* rejects it — it has never been serialisable.
+- **Compiler lowerings on the path** — **tail-call optimization** (a tail `return f(args)` with a
+  matching in-module signature becomes a WASM `return_call`; a 20000-deep tail-recursive call
+  completes where the non-tail form traps), **type-directed lowering** (locals, params, globals,
+  arithmetic width, struct resolution), **scope-aware alpha-renaming** (`svl/scope.py`), **array
+  `for-in` index scan**, **short-circuit `&&`/`||`**, **`memory.grow` + heap reset**,
+  **`try`/`catch` error-flag lowering**, **`print` type dispatch**, and **import linking**. The
+  six dead optimizations (SIMD, escape analysis, WASM GC, PGO, LTO, hot reloading) and the RL
+  pass-selection compiler (H49) were **removed** on 2026-11-12 rather than left as dead code
+  sustaining the claim.
+- **Tooling** — `svlc` CLI (build/run/check/corpus), **LSP server** (boots and registers all
+  handlers), **REPL** (evaluates a block and prints the result), tree-sitter grammar, tactic
+  prover, time-travel debugger, component-model FFI/WIT, package registry with attestations,
+  incremental compilation, distributed build cache, LSIF, docs generation, Jupyter kernel.
+  Not yet working: REPL state does not persist across blocks; non-array iterators still error.
 
 ## Repository Layout
 
 ```
 svl/                    # Language implementation (lexer, parser, verification, compiler)
+svl/cli.py              # `svlc` command line (build / run / check / corpus)
+pyproject.toml          # packaging + the `svlc` / `svl-lsp` / `svl-repl` console scripts
 SVL_PROGRAMMER_KB.md    # Programmer's knowledge base (complete reference)
 svl_grammar.json        # Generated tree-sitter grammar
 queries/                # Tree-sitter highlight/injection/local queries
@@ -213,6 +224,12 @@ requirements-dev.txt    # every dependency the suite and spikes import
     2 fail with `Unknown identifier 'ELSE'`).
 12. **Determinism** — WAT sha256 identical across `PYTHONHASHSEED` 0/1/12345/random, and the
     canonical AST fingerprint is identical for ASCII, Hebrew, re-indented and commented variants.
+13. **Defect probe suite** — `python svl-rating/probes.py` (workspace) runs 30 execution probes
+    that each must be able to fail: **26 PASS / 0 FAIL / 4 INFO**. The four INFO rows are
+    documented scope limits (BPSW constant-true, PRODUCT channel degenerate, compile-latency
+    measurement), not failures.
+14. **CLI** — `pip install -e .` then `svlc version` prints `0.1.0` and `svlc run <file.svl>`
+    compiles and executes a program.
 
 ## License
 

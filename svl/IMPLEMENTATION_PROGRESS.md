@@ -1,6 +1,12 @@
 # SVL Implementation Progress Report
 
-## Completed Work (8/50 Spikes Passing)
+> **SUPERSEDED (2026-11-12).** This file is an early-session snapshot and is kept for
+> history only. Its headline ("8/50 spikes passing") and its H24 "self-certifying compiler"
+> claim are **wrong**: the self-hosting claim is retracted, and the current measured state is
+> **41/43 spikes**, pytest 61/61, probe suite 26 PASS / 0 FAIL / 4 INFO.
+> For the current state see `README.md` (mirror) and `SVL_FORMAL_RATING.md` (workspace).
+
+## Completed Work (8/50 Spikes Passing) — historical, see banner above
 
 ### ✅ H1: Semantic Versioning in Module System
 - **Lexer**: Added `VERSION`, `VERSION_CONSTRAINT`, `AT` tokens
@@ -29,10 +35,12 @@
 - Verified that SVL verification is deterministic (not probabilistic)
 - No Monte Carlo needed - all checks are deterministic
 
-### ✅ H24: Self-Certifying Compiler
-- Compiler source (`compiler_svl.svl`) passes all 3 verification layers
-- 3-stage bootstrap produces bit-identical WASM output
-- Mutation detection works via monodromy comparison
+### ⚠️ H24: Self-Certifying Compiler — RETRACTED (2026-11-12)
+- ~~Compiler source (`compiler_svl.svl`) passes all 3 verification layers~~
+- ~~3-stage bootstrap produces bit-identical WASM output~~
+- **RETRACTED**: `svl/compiler_svl.svl` is a stub whose `main()` assigns integer constants
+  and `assert true`; it compiles nothing. There is no self-hosted compiler. The bootstrap
+  claim is dropped rather than left standing over a stub.
 
 ### ✅ H31: AOT Compilation with Cranelift
 - wasmtime available in environment
@@ -76,7 +84,7 @@
 
 ```bash
 # Run all spikes
-cd /path/to/svl && python -m svl.spike_runner
+cd /home/sudosudo/.openclaw/workspace && python -m svl.spike_runner
 
 # Run individual existing spikes
 python -m svl.spike_s9_bpsw      # BPSW Monodromy (now passing)

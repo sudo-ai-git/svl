@@ -31,17 +31,20 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 |-------|------|------------|---------|
 | **L1** | Syntax | 231-Gate Checksums | Structural integrity via SUM/LINEAR/PRODUCT mod 231 |
 | **L2** | Types | Mod-5 Dual-Stream | Mod-5 buckets + Z/2 negation + structural checksums |
-| **L3** | Theorem | BPSW Monodromy | Cryptographic verification via SHA256 + BPSW on primes {37,73,17} |
+| **L3** | Theorem | BPSW Monodromy — **informational only** | hash-primality parity via SHA256 + BPSW on primes {37,73,17}; constant-true (0/60 programs fail it), **not** part of `passed` |
+| **L3+** | SMT (opt-in) | Z3 theorem layer | the real prover: tri-state `proven` / `counterexample` / `unverified` |
 
 ### Key Properties
 - **22 tokens** mapped to Hebrew alphabet (א-ת)
 - **Deterministic compilation** - bit-identical WASM output across runs
-- **Self-hosting** - compiler written in SVL, bootstraps in 3 stages
-- **Probabilistic theorem layer** - Genesis 1:1 (2701 = 37×73) passes by mathematical coincidence
+- **Real prover** - the interval analyser proves out-of-bounds / division-by-zero and
+  refuses them; the Z3 SMT layer discharges every `assert` (opt-in)
+- **No self-hosting** - `svl/compiler_svl.svl` is a stub; the claim is retracted (2026-11-12)
 
 ### Target Platform
 - **WASM (WebAssembly)** - runs in browsers, Node.js, wasmtime, wasmer
-- **Linear memory model** - bump allocator, manual memory management
+- **Linear memory model** - bump allocator with `memory.grow` and a heap reset at the entry
+  point, so allocating programs are re-runnable
 - **Host ABI** - `env.print`, `env.malloc`, `env.await` imports
 
 ---
@@ -76,22 +79,6 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 | 22 | `AWAIT` | ת | `await` | 1 | Await expression |
 
 **Note**: Final forms (sofit: ך ם ן ף ץ) are **excluded** - 22 standard letters only.
-
-**The alias contract is tested, not just claimed** (`svl/hebrew_alias.py`, added 2026-11-12).
-`verify_mapping()` checks all 22 letters against their intended tokens (expect 22/22).
-`verify_alias(source)` compiles a program and its Hebrew spelling and requires **byte-identical
-WAT** — measured on three programs including `examples/sieve.svl`, identical at 2234, 2715 and
-4778 bytes. `to_hebrew()` rewrites keywords on word boundaries, so an identifier such as `letter`
-is not corrupted by the `let` → א replacement. `verify_sofit_excluded()` pins the documented
-exclusion. All four checks are falsifiable: overwriting `HEBREW_TOKENS['א']` makes the mapping
-check fail.
-
-Context for the "22 of 113 token types" observation: the other 91 are operators and punctuation
-(`+ - * / ( ) { } , ; : = == != < > && || ! & | ^ ~ << >>` and the rest) plus the extended
-type-system keywords, which the README already marks **parse-level only**. Hebrew letters spell
-the 22 keywords; the two spellings are one language, and making them compile differently would
-break the alias contract. "Sofit as erasure" has no specification anywhere in the repo; it was
-**not** implemented rather than invented.
 
 ### 2.2 Grammar Overview (EBNF)
 
@@ -180,33 +167,7 @@ z2_negate(B2) = B2
 | B3 | Covariant | `Future`, `Stream` | B3↔B1 preserves covariance |
 | B4 | Invariant | `Result`, `Error` | B4↔B0 preserves invariance |
 
-### 3.4 The Lattice (added 2026-11-12)
-
-The ring operations are **not** a lattice: `mod5_add` and `mod5_mul` are commutative and
-associative but **not idempotent** (`mod5_add(B1,B1) == B2 != B1`), so neither can serve as a
-join or a meet.  The buckets do carry a lattice, through the chain order
-`B0 < B1 < B2 < B3 < B4`:
-
-| Operation | Function | Definition |
-|-----------|----------|------------|
-| order | `bucket_leq(a, b)` | `a <= b` on the chain |
-| join | `bucket_join(a, b)` | `max(a, b)` |
-| meet | `bucket_meet(a, b)` | `min(a, b)` |
-
-`verify_mod5_lattice()` evaluates 12 laws exhaustively over all 125 triples: commutativity,
-associativity, idempotence, absorption, boundedness, order/join/meet consistency, the Z/2
-involution, and the order-reversing duality (`z2(join(a,b)) == meet(z2(a), z2(b))` and its
-dual).  All hold.
-
-**Z/2 is a duality, not a complement**: `bucket_join(B1, B3) == B3 != B4`, so it is not a
-Boolean negation.  Exhaustively, no (join, meet, bottom, top) chosen from
-{add, mul, max, min} makes it one.
-
-**Codegen is NOT affected.**  `compiler_wasm.py` does not import the type layer at all.  The
-type layer reaches compilation only through the compile-time gate (`svl/verify_gate.py`),
-which refuses to compile on a type error; nothing selects a WASM representation from a bucket.
-
-### 3.5 Type Constructors
+### 3.4 Type Constructors
 
 ```svl
 // Primitives
@@ -341,6 +302,10 @@ svl> save <file>             # Save buffer
 - **Block**: On blank line (executes block)
 - **Full**: `verify` command runs all 3 layers
 
+**Executes (2026-11-12):** the buffer is wrapped in `module repl { func main() ... }` before
+verification and then compiled and run, so a block prints its result. Known gap: definitions
+do not persist across blocks (each block is independent).
+
 **Example Session**:
 ```
 svl> let x: int = 42
@@ -394,236 +359,9 @@ verify_wasm_determinism(source, runs=5)  # Returns True/False
 ```
 
 **Output**: WASM text format (`.wat`) with:
-- Linear memory (1 page = 64KB; allocating programs get 16 pages = 1MB, and OOB access traps)
-- Function imports — emitted **only when the module actually calls them** (an unused import still has to be
-  supplied by the host, so emitting them unconditionally would force every host to stub functions it never
-  uses): `env.print(i32,i32)`, `env.print_int(i32)`, `env.putc(i32)`, `env.read_key()->i32`, `env.clear()`,
-  `env.malloc(i32)->i32`, `env.iterator_next(i32)->i32`, `env.await(i32)->i32`
-- **`read_key()` protocol**: a byte value when a key is available, **0** when nothing is pressed, **-1** at
-  EOF. The host chooses whether to block; returning 0 on a timeout is what makes real-time play possible
-  (the program simply advances a tick) while -1 ends a scripted run.
-- `clear()` lets the program ask for a display reset without knowing the terminal: the host writes ANSI on a
-  tty and does nothing when output is piped, so piped output stays diff-able.
-- Deterministic output with **no `PYTHONHASHSEED` pinning needed** (fixed function of the input)
-- Export name `<module>_main`
-
-### 5.3.1 What the WASM backend actually executes
-
-"Compiles to WASM" means **wasmtime accepted and ran it**. Text-level checks cannot see invalid WAT or a
-mis-executing loop, so verify by assembling (`wasmtime.wat2wasm` then `wasmtime.Module` — the `Module` is
-what validates) and invoking the export (`<module>_main`).
-
-Measured against a 38-construct matrix: **35 run correctly, 0 wrong answers** (1 compile-error,
-2 parse-level). Verified to assemble **and run**:
-
-| Feature | Probe | Result |
-|---|---|---|
-| mutable variables | `let x=1  x = 5` / `x += 2` / `s += a[i]` in a loop | 5 / 3 / correct |
-| arrays — literal, read, write | `let a=[1,2,3]  a[1] = 42  return a[1]` | 42 |
-| arrays — `len`, element `+=` | `len([1,2,3,4])` → 4; `a[0] += 9` | 4 / correct |
-| arrays — runtime allocation | `zeros(n)` (length-n zeroed array) | correct |
-| **bounds checking** | `a[9]` on a length-3 array | **traps** (no silent OOB read) |
-| structs — literal + field read | `struct P{x:int y:int}  P{x:1,y:2}.x` | correct |
-| structs — field write, passed to a func | `p.x = 7`; `g(p: P)` reading `p.y` | 74 / 9 |
-| **`match`** | `match x { case 1 => 10  case _ => 20 }` | 10 |
-| `while` (incl. nested) | `while i<=5 { s+=i; i+=1 }` | 15 |
-| `for` over a range (fixed or computed bound) | `for i in 0..n { s+=i }` | correct |
-| `if…then…else` **expression** / `? :` | `if c then 10 else 20` with `c=0` | 20 |
-| top-level `const`/`var` | `const one=1 const seven=7  return one+seven` | 8 |
-| **recursion** (incl. over arrays) | `fib(10)`; `go(a, i)` summing an array | 55 / 10 |
-| early `return` from inside `if`/`while` | — | runs cleanly |
-| `assert` | `assert x==5` with `x=5` | no trap — and it **must** trap when false |
-| `print` / `print_int` | `print("hi")` | correct bytes on the host's stdout |
-| arithmetic / bitwise / unary | `2+3*4-6%4`; `(12 & 10) + (1 | 2)`; `-5 + (1 - !0)` | 12 / 11 / -5 |
-| `void` returns, helper calls, comparisons, `&& \|\|` | — | correct |
-
-**Not** in the executable subset: closures/`lambda`, `try`/`catch`, `async`/`await`, SIMD for general
-loops, GC structs, generics at runtime, and non-exhaustive `match` at runtime. These now fail **loudly**
-(clear compile error or a trap) rather than emitting invalid WAT or a wrong answer.
-
-**End-to-end proof**: `examples/bubble_sort.svl` and `examples/sieve.svl` in this repo compile, execute, and
-their printed output plus return value match an independent Python implementation exactly
-(`sorted=1 sum=28 cmps=15 swaps=8 odds=6`; `pi(10)=4 pi(40)=12 pi(70)=19 pi(100)=25`).
-
-### Memory model
-
-- **Allocator**: a bump allocator (`$alloc`) plus a `$heap` global, emitted **only** when a program
-  allocates. The heap starts above the static string data. Programs that don't allocate keep
-  byte-identical output. Memory is grown to 1MB for allocating programs; out-of-bounds access traps.
-- **Array layout**: `[len, e0, e1, …]` — word 0 is the element count, then one 4-byte word per element.
-  `len(x)` reads word 0, `a[i]` reads word `1+i` (with a bounds check), so the two agree by construction.
-- **Struct layout**: fields in declaration order, 4-byte aligned, 4 bytes each. Field access uses the
-  load/store `offset=` immediate. The struct type of a local comes from its **type annotation** or from the
-  struct literal it is initialised with; if it cannot be resolved, reading/writing a field is a **compile
-  error** (the old code guessed the type from the variable *name* and silently used offset 0 — the wrong
-  field). A struct literal must supply every declared field.
-- **`try`/`catch`** has no lowering (WASM exception handling is a separate proposal) and raises at compile
-  time rather than emitting a malformed `try` block.
-
-**Pitfalls confirmed by execution**
-- String literals live in the data section as `[len][bytes]`. `print("…")` passes `ptr + 4` with the byte
-  length; `len("…")` reads word 0. The bytes are emitted as `\XX` escapes — a plain WAT string
-  `"05 00 00 00"` is the ASCII *text* "05 00 00 00", not four bytes, which silently corrupted every string
-  literal (print emitted hex text, `len(s)` returned garbage).
-- `%` is WASM's **truncated remainder (sign of the dividend)**, not Python's floor modulo: `(-1) % 256` is
-  `-1`, not `255`. Keep the operand non-negative, or you get a self-failing `assert`.
-- `int` is **i32**: an out-of-range literal is a compile error, not a wrap.
-- `a[i]` and `p.field` require a *resolvable* type: annotate the local with the struct type or initialise it
-  from a struct literal, otherwise it is a compile error rather than a silent wrong read.
-
-### 5.3.2 What the three verification layers do — and do NOT — verify
-
-Verified by execution, and important before quoting the "self-verifying" name:
-
-Given a program and three semantically **different** but valid variants (swap `+`→`-`, change a constant,
-change precedence), **all three layers pass on all four programs** (`syntax.passed=True`,
-`type.passed=True`, `theorem.passed=True`). What differs is only the recorded 231-gate value:
-
-| Program | syntax | type | theorem | 231-gate (SUM, LINEAR, PRODUCT) |
-|---|---|---|---|---|
-| `a + 2` (baseline) | pass | pass | pass | (125, 158, 0) |
-| `a - 2` | pass | pass | pass | (127, 137, 0) |
-| `a * 2` | pass | pass | pass | (124, 53, 0) |
-
-So the layers verify **internal consistency and hash properties** — that the AST is well-formed, that types
-are structurally consistent, that the program hash has the expected monodromy parity — **not** that the
-program computes what you meant. They are a *tamper/drift detector against a recorded reference*: they catch
-a program that changed, not a program that is wrong. The theorem layer in particular passes for
-essentially any well-formed program (its parity is even unless exactly one of MR/Lucas says "prime").
-
-Treat the 231-gate value as the thing you pin and compare. Do not advertise the layers as proving
-correctness.
-
-**The SMT layer is the exception to "consistency only"** (rewritten 2026-11-12). It builds a z3
-model of the program's straight-line arithmetic and discharges every `assert` by refuting its
-negation: `unsat` → proven, `sat` → a concrete counterexample. Measured: `assert a + 1 > a` is
-**proven for all `a`**; `assert a > 0` is refuted with the counterexample `a = 0`. Its result is a
-**tri-state**, not a boolean: `proven`, `counterexample`, `unverified` (loops need invariants;
-`/`/`%`/arrays are declined rather than modelled with the wrong semantics), and `vacuous` (no
-assertions). `passed` means "no counterexample found" — it does NOT mean verified; read
-`status`/`complete`. It is opt-in (`verify_with_smt`), not on the compile path.
-
-**Also note**: the layers verify the **AST**. Until 2026-11-12 compilation was covered by no layer at
-all, so a program could pass all three and still emit invalid or wrong WASM. It now IS covered:
-
-### 5.3.3 The compile-time gate and self-attestation (added 2026-11-12)
-
-**`svl/verify_gate.py`** — `compile_file_to_wasm(source, strict=True)` now runs a gate and **refuses to
-compile** on failure: the AST guard, the type checker, and the interval abstract interpreter (H21 —
-provable out-of-bounds index / zero divisor). `strict=False` bypasses it.
-
-What the gate deliberately excludes, and why:
-- **231-gate / viable-start**: an artifact-integrity check over serialised bytes, not a correctness
-  check, so it stays off the compile path.  It was also super-linear: the CRT search recomputed the
-  full 512-byte checksum ONCE PER MODULUS PER POSITION (3x redundant on an O(n*L) pure-Python loop),
-  measured ~0.95 s at 2 KB and ~13.7 s at 8 KB.  `svl.viable_start.rolling_checksums` now maintains
-  all three checksums in O(1) amortised per shift — bit-exact against `compute_checksums` over
-  231,542 windows, and 729x-4285x faster (128 KB first-match in ~20 ms).  It is wired into the
-  artifact path as a framing/resync mechanism (`svl.attest.locate_sync`), not a correctness gate.
-- **The BPSW "theorem" layer**: constant-true (see §5.3.2), so running it would only imply a guarantee
-  it does not provide.
-
-**The PRODUCT channel is degenerate at block sizes that matter.** `PRODUCT = Π(b[i]+1) mod 231` is 0
-whenever the window holds a byte `b` with `b+1` divisible by 3, 7 or 11 — for a 512-byte window that
-happens with probability ~1 (measured: **2000/2000** random windows).  The effective sync keyspace is
-therefore `231^2`, not `231^3`, and false syncs occur at ~1/53361 per position — measured 3 candidates
-in an 8 KB stream and 6 in 128 KB, all with PRODUCT 0.  `locate_sync` returns a **candidate list** for
-that reason.  The earlier "0 false positives in 300 trials" claim held only because those trials were
-small (at 2 KB the expected count is 0.04).  A non-degenerate product channel needs a modulus coprime
-to every byte value, e.g. a prime > 256.
-
-Cost: ~0.45 ms per statement, linear (measured 5.4 ms at 3 `let`s, 55 ms at 120).
-
-Flipping the gate on was measured first, not assumed: across 54 real programs the gate rejects only the
-files that do not even parse. Getting to that point required fixing three genuine checker defects —
-the env did not know the builtins (`len(a)` inferred `void`), `a[i]`/`s.x` had no inference rule (the
-cases were commented out as "not yet in parser"), and array literals typed as `List<int>` while the
-backend represents them as an `int` handle.
-
-**`svl/attest.py`** — turns the deterministic-compilation property into a *checkable* attestation.
-`attest(source, wat)` assembles, hashes the artifact **with all custom sections stripped**, and re-emits
-the module carrying a `svl.attest` custom section with that `content_sha256`, the 231-gate triple and the
-AST hash. `verify_attestation(binary)` reads the section, strips every custom section from the artifact it
-was handed, re-hashes and compares — so any change to the code (or to any non-custom section) fails.
-Try it: `python3 examples/attest.py examples/sieve.svl` then `--verify`.
-
-**The fingerprint is canonical, and that was a real fix.** `svl.serialization.to_binary` writes every
-dataclass field including `line`, `column` and `offset`, so the "AST hash" was a *layout* hash: the same
-function reformatted gave a different sha256 **and a different 231-gate triple** (measured `[38,170,0]`
-vs `[210,108,0]`), and the Hebrew and ASCII spellings of the same keywords differed too. That made it
-useless as a reproducible-build cache key. `svl.serialization.to_canonical_binary(ast)` omits the
-position fields, and `svl.attest.ast_fingerprint(source)` exposes the result:
-`{ast_sha256, gate231, source_sha256, ast_bytes}`. Measured: ASCII, Hebrew, re-indented, blank-line and
-commented variants of one program all give the **same** `ast_sha256` and `gate231`; `to_binary` gave five
-different values. Canonical bytes are one-way by design (see §5.3.5).
-
-**Self-framing resync.** The `svl.attest` payload (version 2) also carries a `sync` word — the 231-gate
-triple of the artifact's leading 512-byte block. `svl.attest.locate_sync(stream, sync)` finds that block
-inside a larger or shifted stream with no external framing, using the O(n) rolling search. Try
-`python3 examples/attest.py examples/sieve.svl --locate <file>`. It is a *candidate* list, not a unique
-answer, because the PRODUCT channel is degenerate (see §5.3.3).
-
-**Artifact path vs raw compile.** `compile_file_to_wasm(source, attest=True)` returns WAT carrying the
-section; `svl.attest.compile_attested(source)` returns `(wat_with_section, binary, payload)` and is what
-`examples/attest.py` uses. The default stays `attest=False` so a raw compile remains byte-identical — the
-minted spike-102 payload pins the sha256 of its `.wasm`, and flipping the default would invalidate it.
-
-**Custom sections are stripped by design**, so editing one is not a code change and is not flagged (the
-assembler's own `name` section is a custom section too). The `svl.attest` section's *claimed* hash is
-inside a custom section, but tampering with it makes the claim disagree with the recomputed hash, which
-fails verification.
-
-**Registry (`svl/package_registry.py`)** — `publish_package` no longer marks everything `VERIFIED`. A
-compiled SVL artifact is `VERIFIED` only when its own `svl.attest` section checks out; any other content is
-still published and signed but recorded `UNVERIFIED`. For attested artifacts the canonical fingerprint is
-copied onto the attestation (`ast_sha256`, `gate231`), so the registry exposes the reproducible-build
-identity and not just the byte hash.
-
-**Build cache (`svl/distributed_build.py`)** — `SVLBuildActionGenerator._input_hash` keys a source file on
-its canonical AST fingerprint rather than `sha256(text)`, so a reformatted source (or its Hebrew spelling)
-is a cache **hit**. An unparsable source falls back to a `text:`-prefixed hash so the failure is still
-cacheable.
-
-This is deliberately unlike `svl/pcc_wasm.py`, whose "proof" is a boolean produced by the same process
-that produced the artifact (and whose WAT does not assemble) — that checks nothing.
-
-### 5.3.4 Layer retractions (measured, do not cite the old claims)
-
-| Claim | Measured reality |
-|---|---|
-| "231-gate = three channels" | **PRODUCT is 0 for every real program** (300/300 sampled; unchanged across 150 single-byte flips) — because `prod(b+1) mod 231` collapses once a byte hits a multiple of 3·7·11. Effective gate is 2 channels, **with a 2-byte collision**: `+3` at byte 0 and `-3` at byte 77 of the serialised AST leave all three checksums identical. |
-| "L3 theorem layer" | **Constant-true.** Parity is 0 for every residue of {17,37,73} (all residues are below 2047, the first base-2 pseudoprime): 0 failures in 200 random programs and 20 000 random blocks. |
-| "SMT/Z3 verification" | **Was hollow; rewritten 2026-11-12.** `_extract_arithmetic_constraints` returned `[]` for every input → `smt_verified=True` in 0 ms. It now builds a real z3 model and discharges `assert`s (see §5.3.2). `passed` means no counterexample; `status` is one of `proven` / `counterexample` / `unverified` / `vacuous`. |
-| "Proof-carrying code" | Embeds a self-declared boolean; the emitted WAT does not assemble. Use `svl/attest.py` instead. |
-| "Self-hosting, 3-stage bootstrap" | `compiler_svl.svl` is a 540-byte stub (`assert true`); it compiles nothing. |
-| "Six compiler optimizations wired" | Only SIMD is referenced by `compiler_wasm.py` — and it currently breaks the shape it targets (`unknown local $sum`). |
-| "Registry with cryptographic attestations" | Had an **authentication bypass**: `verify_package` loaded the registered key then overwrote it with `attestation.public_key` (the party being verified). **Fixed 2026-11-12** and proven load-bearing: a copy with the old line restored accepts a self-signed package under a trusted verifier's name; the fixed tree rejects it. **Changed again 2026-11-12**: `publish_package` no longer sets `VERIFIED` unconditionally — a compiled SVL artifact is `VERIFIED` only when its own `svl.attest` section checks out; anything else is published and signed but recorded `UNVERIFIED`. `publish` self-attests as `verifier_id=metadata.author` by design, so only registered verifiers should ever be passed to `verify_package`. |
-
-### 5.3.5 The binary deserializer is real (added 2026-11-12)
-
-`ASTBinaryDeserializer._deserialize_node` was a stub that returned `{'_type': ..., '_tag': ...}`,
-so `from_binary(to_binary(ast)) != ast` (measured 4212 bytes -> 21 bytes).  It is now a full
-reader, and `test_roundtrip()` asserts structural equality **and** byte-stable re-serialisation.
-
-**The format is not self-describing**, and that drove the design: the writer emits primitives
-with no type tag, so an int in 1..5, a bool and a string of length 1..5 all begin with the same
-byte.  The reader therefore uses the *declared field type* — the same information the writer had.
-Three fields have unions too wide for that alone (`Literal.value`, `Pattern.value`,
-`TypeExpr.value`); each is disambiguated by a sibling discriminator the writer emitted earlier in
-the same node (`literal_type` / `kind`), and `Type.args` by `Type.kind`.  A field whose value is
-`None` is still *written* (as `0x00`), so it must be consumed even when the kind already implies
-`None` — missing that desynchronises the whole stream.
-
-`to_binary` is **unchanged and byte-identical**, so nothing that hashes it (the 231-gate over a
-serialised AST, the golden references, the bootstrap) is affected.  The reader raises rather than
-guessing when a bare primitive has no type context.
-
-Verified: all 46 corpus programs round-trip exactly; all 42 `NODE_TAGS` types round-trip
-individually; every `Literal`/`Pattern`/`TypeExpr` discriminator path; `Type` and `TypeVar`;
-corruption detected; truncation rejected.
-
-**Known gap:** `CastExpr` is not in `NODE_TAGS`, so the *serialiser* rejects it
-(`ValueError: Unknown node type: CastExpr`).  It has never been serialisable.
+- Linear memory (1 page = 64KB)
+- Function imports: `env.print`, `env.malloc`, `env.await`
+- Deterministic output (fixed `PYTHONHASHSEED=0`, ordered maps)
 
 ### 5.4 Package Manager
 
@@ -815,8 +553,7 @@ func main() type void {
 | `Forbidden function 'sum()'` | Used `sum()` instead of `neumaier_sum()` | Replace with `neumaier_sum()` |
 | `Type checking error` | Type mismatch | Add explicit type annotations |
 | `Theorem verification failed` | Probabilistic - BPSM parity odd | Expected for most programs; Genesis 1:1 is special |
-| `WASM compilation not deterministic` | A process-salted value leaked into a hashed path | Not expected any more — struct buckets use `sha256(name) % 5`, not `hash()`. Do **not** paper over this with `PYTHONHASHSEED=0`: find the salted input |
-| `unknown local: failed to find name $x` | A reference to a name that is not a param/local/const | Fix the name (or declare it); the compiler raises a clear `Unknown identifier` error for this case |
+| `WASM compilation not deterministic` | Non-deterministic compilation | Ensure `PYTHONHASHSEED=0`, ordered maps |
 
 ### Debugging Tips
 
@@ -972,7 +709,7 @@ module svl_compiler {
 
 ## 11. Extended Syntax (H2–H16)
 
-> **Status note**: All H2–H16 extensions are **parser-verified** (48/50 spike suite, 2026-11-11). Call them "syntax-level" — the type-checker/compiler backends for most are partial. Where a dedicated engine exists it is listed; where not, treat the feature as parse-only until the engine lands.
+> **Status note**: All H2–H16 extensions are **parser-verified** (41/43 spike suite, 2026-11-12). Call them "syntax-level" — the type-checker/compiler backends for most are partial. Where a dedicated engine exists it is listed; where not, treat the feature as parse-only until the engine lands.
 
 ### 11.1 Effect System with Row Polymorphism (H2)
 
@@ -1238,21 +975,9 @@ from svl.abstract_interpretation import AbstractInterpreter, IntervalDomain, Con
 from svl.abstract_interpretation import create_type_analysis_domain, analyze_type_bounds
 ```
 
-- Domains: `Interval` (`[lo, hi]` with `'-inf'`/`'+inf'` bounds), `Congruence` (`x ≡ r mod m`),
-  `ProductDomain` (component-wise).
-- Entry points (both take a **parsed AST**, not source text):
-  - `analyze_program(ast) -> AnalysisResult` — `.findings`, `.internal_errors`, `.state`, `.passed`.
-  - `analyze_type_bounds(ast) -> dict` — `{'state', 'findings', 'warnings', 'passed', 'internal_errors'}`.
-  - `AbstractInterpreter(domain=None).analyze_program(ast)` and
-    `.analyze_function(func_ast, param_state=None)`.
-- Finding kinds: `oob-index`, `div-zero`, `div-overflow` (all `severity='error'`).
-- Proved: `a[i]` where `i` is provably negative or `>= length(a)`; `/` and `%` by a provably zero
-  divisor (and the `/=` `%=` forms); `-2**31 / -1`.
-- Deliberately not tracked: call return values (a call evaluates to `top`), and array lengths for
-  anything not built from a literal, `zeros(n)`, `len(x)`, or another tracked path.
-- **Pitfall**: this is an over-approximation — it may miss a real bug but must never invent one; a
-  false positive rejects a correct program at compile time. `AnalysisResult.internal_errors` must be
-  empty, and `svl/verify_gate.py` refuses to compile when it is not.
+- Domains: `Interval` (overflow/div-by-zero), `Congruence` (modular invariants), `ProductDomain` (combined).
+- Entry points: `analyze_type_bounds(ast)` (warning dict for bounds/overflow/div-zero), `AbstractInterpreter(domain).analyze_program(ast)`.
+- **Pitfall**: both entry points take a **parsed AST** (`Program`), not source text.
 
 ### 12.5 Differential Verification (H22) & Semantic Diff (H39)
 
@@ -1353,6 +1078,18 @@ behaviour, so a program the checker cannot classify compiles exactly as before.
 does, is deleted rather than relabelled. Do not re-add one without wiring it into
 `compile_file_to_wasm` and verifying the effect by assembling and **running** the output.
 
+### 13.5 Lowerings added 2026-11-12 (panel-driven fixes)
+
+| Lowering | Where | Effect |
+|---|---|---|
+| Scope-aware alpha-renaming | `svl/scope.py`, called from `compile_to_wasm` | every `let`/`for`/`catch` binding gets a unique local; an inner binding no longer overwrites an outer one |
+| Array `for-in` | `_compile_for_stmt` | scans the `[len, e0..]` layout directly instead of the broken iterator protocol |
+| Short-circuit `&&`/`||` | `_compile_binary_expr` | the right operand runs only when the left does not decide the result; the interval AI is short-circuit-aware |
+| `memory.grow` + heap reset | `_generate_wasm_module` | allocating programs are re-runnable in one Store instead of trapping past a fixed 1 MiB |
+| `try`/`catch`/`throw` | `_compile_try_stmt` / `_compile_throw_stmt` | error-flag lowering (WASM MVP has no exceptions) |
+| `print` type dispatch | `_compile_call_expr` | `int`/`bool` → `print_int`; a string expression → `(ptr, len)` |
+| Import linking | `compile_file_to_wasm(base_dir=...)` | resolves and links imported files; an inline `import` is rejected |
+
 ---
 
 ## 14. Build & Tooling Ecosystem (H33–H35, H41–H48)
@@ -1361,6 +1098,9 @@ does, is deleted rather than relabelled. Do not re-add one without wiring it int
 
 - `svl/tree_sitter_grammar.py`: `save_grammar_to_file()` writes `svl_grammar.json`; `generate_highlight_queries()` writes highlight queries. Works alongside the hand-written `lsp_server.py`.
 - Regenerate after grammar changes: `python3 -m svl.tree_sitter_grammar` (exposes `save_grammar_to_file`).
+- **Boot fix (2026-11-12):** handlers must be registered as the **unbound** functions
+  (`server.feature(X)(SVLLanguageServer.method)`). Passing `server.method` gave
+  `AttributeError: 'method' object has no attribute 'reg_name'` and the server died on boot.
 
 ### 14.2 Interactive Theorem Proving / Tactics (H34)
 
@@ -1538,7 +1278,7 @@ check = cluster.verify_cluster()                  # {'all_verified': True, ...}
 
 ## 15. Spike Suite Status
 
-Run: `python -m svl.spike_runner` (from the repo root)
+Run: `cd /home/sudosudo/.openclaw/workspace && python -m svl.spike_runner`
 
 **Current (2026-11-12): 41 / 43 PASS (95.3%).** The set is 43 after the dead-optimization
 removals; the two failures are the self-declared unimplemented stubs.
@@ -1600,4 +1340,4 @@ as                  # Cast (gradual typing, H5)
 
 ---
 
-*SVL Knowledge Base v0.2.0 | Generated from BUILD_PLAN_2_SELF_VERIFYING_LANGUAGE.md | Spike suite 48/50 PASS (2026-11-11)*
+*SVL Knowledge Base v0.2.1 | Generated from BUILD_PLAN_2_SELF_VERIFYING_LANGUAGE.md | Spike suite 41/43 PASS (2026-11-12)*
