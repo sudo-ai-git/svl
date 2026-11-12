@@ -244,6 +244,9 @@ class WasmFunction:
 HOST_IMPORT_SIGS = {
     'print': '(func $print (param i32 i32))',
     'print_int': '(func $print_int (param i32))',
+    'putc': '(func $putc (param i32))',
+    'read_key': '(func $read_key (result i32))',
+    'clear': '(func $clear)',
     'malloc': '(func $malloc (param i32) (result i32))',
     'iterator_next': '(func $iterator_next (param i32) (result i32))',
     'await': '(func $await (param i32) (result i32))',
@@ -508,7 +511,7 @@ class WasmCompiler:
 
     def _callee_yields_value(self, name: str) -> bool:
         """True if calling `name` produces a result value."""
-        if name in ('print', 'print_int'):
+        if name in ('print', 'print_int', 'putc', 'clear'):
             return False                      # void host imports
         for fn_name, fn in self.state.functions.items():
             if fn_name == name or fn_name.endswith(f'${name}'):

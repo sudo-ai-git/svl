@@ -352,11 +352,16 @@ verify_wasm_determinism(source, runs=5)  # Returns True/False
 ```
 
 **Output**: WASM text format (`.wat`) with:
-- Linear memory (1 page = 64KB)
+- Linear memory (1 page = 64KB; allocating programs get 16 pages = 1MB, and OOB access traps)
 - Function imports — emitted **only when the module actually calls them** (an unused import still has to be
   supplied by the host, so emitting them unconditionally would force every host to stub functions it never
-  uses): `env.print(i32,i32)`, `env.print_int(i32)`, `env.malloc(i32)->i32`,
-  `env.iterator_next(i32)->i32`, `env.await(i32)->i32`
+  uses): `env.print(i32,i32)`, `env.print_int(i32)`, `env.putc(i32)`, `env.read_key()->i32`, `env.clear()`,
+  `env.malloc(i32)->i32`, `env.iterator_next(i32)->i32`, `env.await(i32)->i32`
+- **`read_key()` protocol**: a byte value when a key is available, **0** when nothing is pressed, **-1** at
+  EOF. The host chooses whether to block; returning 0 on a timeout is what makes real-time play possible
+  (the program simply advances a tick) while -1 ends a scripted run.
+- `clear()` lets the program ask for a display reset without knowing the terminal: the host writes ANSI on a
+  tty and does nothing when output is piped, so piped output stays diff-able.
 - Deterministic output with **no `PYTHONHASHSEED` pinning needed** (fixed function of the input)
 - Export name `<module>_main`
 

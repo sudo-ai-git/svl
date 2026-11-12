@@ -54,6 +54,20 @@ def main(argv):
                        lambda p, n: out.extend(read_mem(p, n)))
     linker.define_func("env", "print_int", wasmtime.FuncType([i32], []),
                        lambda v: out.extend(str(v).encode()))
+    linker.define_func("env", "putc", wasmtime.FuncType([i32], []),
+                       lambda c: out.append(c & 0xFF))
+    # Scripted input: consume stdin one byte at a time; -1 at EOF (so a piped run ends
+    # instead of spinning). Use examples/run_snake.py for interactive raw-mode keys.
+    kb = bytearray()
+    def read_key():
+        if not kb:
+            data = sys.stdin.buffer.read(1)
+            if not data:
+                return -1
+            kb.extend(data)
+        return kb.pop(0)
+    linker.define_func("env", "read_key", wasmtime.FuncType([], [i32]), read_key)
+    linker.define_func("env", "clear", wasmtime.FuncType([], []), lambda: None)
     linker.define_func("env", "malloc", wasmtime.FuncType([i32], [i32]), lambda n: 1 << 20)
     linker.define_func("env", "iterator_next", wasmtime.FuncType([i32], [i32]), lambda h: 0)
     linker.define_func("env", "await", wasmtime.FuncType([i32], [i32]), lambda x: x)

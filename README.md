@@ -26,6 +26,10 @@ python -m svl.spike_runner
 python3 examples/run_example.py examples/bubble_sort.svl   # sorted=1 sum=28 cmps=15 swaps=8 odds=6
 python3 examples/run_example.py examples/sieve.svl         # pi(10)=4 pi(40)=12 pi(70)=19 pi(100)=25
 
+# A playable Snake, written in SVL (w a s d to steer, q to quit; --timeout for real-time)
+python3 examples/run_snake.py examples/snake.svl
+printf 'dddddsddddd' | python3 examples/run_snake.py examples/snake.svl   # scripted replay
+
 # REPL
 python -m svl.repl
 

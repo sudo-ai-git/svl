@@ -1,0 +1,174 @@
+module snake {
+  // A playable Snake, written in SVL.
+  //
+  // Grid is W x H; a cell index is y * W + x. The snake body is a RING BUFFER of cell
+  // indices: segment k (0 = head) lives at cells[(head - k) mod cap]. Moving just advances
+  // the head slot and overwrites the slot the tail used to occupy.
+  //
+  // Keys: w=119 up, d=100 right, s=115 down, a=97 left, q=113 quit.
+  // read_key() returns a byte, 0 when nothing is pressed, or -1 at EOF (also quits).
+  //
+  //   python3 examples/run_snake.py examples/snake.svl                     # turn-based
+  //   python3 examples/run_snake.py examples/snake.svl --timeout 0.15      # real-time
+  //   printf 'ddddss' | python3 examples/run_snake.py examples/snake.svl    # scripted
+  struct G {
+    cells: int
+    head: int
+    n: int
+    food: int
+    dir: int
+    alive: int
+    score: int
+    cap: int
+    w: int
+    h: int
+  }
+
+  func dx_of(d: int) type int {
+    return match d { case 0 => 0  case 1 => 1  case 2 => 0  case _ => 0 - 1 }
+  }
+
+  func dy_of(d: int) type int {
+    return match d { case 0 => 0 - 1  case 1 => 0  case 2 => 1  case _ => 0 }
+  }
+
+  // ring slot holding segment k (0 = head)
+  func seg(g: G, k: int) type int {
+    let i: int = g.head - k
+    while i < 0 { i += g.cap }
+    return i
+  }
+
+  func occupied(g: G, cell: int) type int {
+    let k: int = 0
+    while k < g.n {
+      if g.cells[seg(g, k)] == cell then { return 1 } else { }
+      k += 1
+    }
+    return 0
+  }
+
+  // Deterministic food: the first free cell scanning forward from the previous food.
+  // Returns 0 when the board is full (nothing left to eat).
+  func place_food(g: G) type int {
+    let total: int = g.w * g.h
+    let f: int = g.food
+    let tries: int = 0
+    while tries < total {
+      f += 1
+      if f >= total then { f = 0 } else { }
+      if occupied(g, f) == 0 then { g.food = f  return 1 } else { }
+      tries += 1
+    }
+    return 0
+  }
+
+  func render(g: G) type void {
+    let y: int = 0
+    while y < g.h {
+      let x: int = 0
+      while x < g.w {
+        let cell: int = y * g.w + x
+        if cell == g.food then { putc(42) }
+        else {
+          if occupied(g, cell) == 1 then {
+            if cell == g.cells[g.head] then { putc(79) } else { putc(111) }
+          } else { putc(46) }
+        }
+        x += 1
+      }
+      putc(10)
+      y += 1
+    }
+  }
+
+  func status(g: G, tick: int) type void {
+    print("t=")
+    print_int(tick)
+    print(" score=")
+    print_int(g.score)
+    print(" len=")
+    print_int(g.n)
+    print(" dir=")
+    print_int(g.dir)
+    print(" alive=")
+    print_int(g.alive)
+    putc(10)
+  }
+
+  // One frame: the host decides what "clear" means (ANSI on a terminal, nothing when piped).
+  func frame(g: G, tick: int) type void {
+    clear()
+    status(g, tick)
+    render(g)
+  }
+
+  // Advance one tick. Returns 1 while the game is still running.
+  func step(g: G) type int {
+    let hx: int = g.cells[g.head] % g.w
+    let hy: int = g.cells[g.head] / g.w
+    let nx: int = hx + dx_of(g.dir)
+    let ny: int = hy + dy_of(g.dir)
+
+    if nx < 0 then { g.alive = 0  return 0 } else { }
+    if nx >= g.w then { g.alive = 0  return 0 } else { }
+    if ny < 0 then { g.alive = 0  return 0 } else { }
+    if ny >= g.h then { g.alive = 0  return 0 } else { }
+
+    let ncell: int = ny * g.w + nx
+    if occupied(g, ncell) == 1 then { g.alive = 0  return 0 } else { }
+
+    let nh: int = g.head + 1
+    if nh >= g.cap then { nh = 0 } else { }
+
+    if ncell == g.food then {
+      if g.n >= g.cap then { g.alive = 0  return 0 } else { }
+      g.cells[nh] = ncell
+      g.head = nh
+      g.n += 1
+      g.score += 10
+      if place_food(g) == 0 then { g.alive = 0 } else { }
+    } else {
+      g.cells[nh] = ncell
+      g.head = nh
+    }
+    return 1
+  }
+
+  func main() type int {
+    let w: int = 16
+    let h: int = 10
+    let cap: int = 160
+
+    let g: G = G{cells: zeros(cap), head: 0, n: 3, food: 40, dir: 1,
+                  alive: 1, score: 0, cap: cap, w: w, h: h}
+    // head at (x=3,y=1) -> cell 19, body to its left
+    g.cells[0] = 19
+    g.cells[159] = 18
+    g.cells[158] = 17
+
+    let tick: int = 0
+    frame(g, tick)
+
+    while g.alive == 1 {
+      let key: int = read_key()
+      if key < 0 then { g.alive = 0 }
+      else {
+        if key == 113 then { g.alive = 0 }
+        else {
+          // ignore a 180-degree reversal
+          if key == 119 then { if g.dir != 2 then { g.dir = 0 } else { } } else { }
+          if key == 100 then { if g.dir != 3 then { g.dir = 1 } else { } } else { }
+          if key == 115 then { if g.dir != 0 then { g.dir = 2 } else { } } else { }
+          if key == 97 then { if g.dir != 1 then { g.dir = 3 } else { } } else { }
+          if step(g) == 1 then {
+            tick += 1
+            frame(g, tick)
+          } else { }
+        }
+      }
+    }
+    status(g, tick)
+    return g.score
+  }
+}
