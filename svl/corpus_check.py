@@ -27,9 +27,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# Both layouts: the public repo keeps programs in `examples/`; the development workspace
+# keeps them at the repo root and mirrors the public examples under `svl-release/`.
 SEARCH = [
     os.path.join(ROOT, '*.svl'),
     os.path.join(ROOT, 'svl', '*.svl'),
+    os.path.join(ROOT, 'examples', '*.svl'),
     os.path.join(ROOT, 'svl-release', 'examples', '*.svl'),
 ]
 

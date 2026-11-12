@@ -23,8 +23,12 @@ def _load_corpus():
     import glob
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Both layouts: the public repo keeps programs in `examples/`; the development
+    # workspace keeps them at the repo root and mirrors the public examples under
+    # `svl-release/`.
     patterns = [os.path.join(root, "*.svl"),
                 os.path.join(root, "svl", "*.svl"),
+                os.path.join(root, "examples", "*.svl"),
                 os.path.join(root, "svl-release", "examples", "*.svl")]
     seen, out = set(), []
     for pattern in patterns:
