@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-from svl.attest import compile_attested, verify_attestation            # noqa: E402
+from svl.attest import compile_attested, verify_attestation, locate_sync  # noqa: E402
 
 
 def main(argv):
@@ -39,7 +39,27 @@ def main(argv):
     ap.add_argument("--out", default=None, help="write the attested .wasm here")
     ap.add_argument("--verify", default=None, metavar="WASM",
                     help="verify an existing attested artifact instead of building one")
+    ap.add_argument("--locate", default=None, metavar="STREAM",
+                    help="find this artifact's sync block inside another file "
+                         "(self-framing resync; prints candidate offsets)")
     args = ap.parse_args(argv[1:])
+
+    if args.locate:
+        if not args.path:
+            print("--locate needs the artifact path as well")
+            return 2
+        source = open(args.path).read()
+        _wat, binary, payload = compile_attested(source)
+        stream = open(args.locate, "rb").read()
+        starts = locate_sync(stream, payload["sync"])
+        print(f"artifact : {args.path}")
+        print(f"stream   : {args.locate} ({len(stream)} bytes)")
+        print(f"sync     : block={payload['sync']['block']} "
+              f"checksums={payload['sync']['checksums']} meta={payload['sync']['meta']}")
+        print(f"starts   : {starts}")
+        print("note     : the PRODUCT channel is degenerate at this block size, so treat "
+              "this as a candidate list (see svl.attest.locate_sync).")
+        return 0
 
     if args.verify:
         binary = open(args.verify, "rb").read()

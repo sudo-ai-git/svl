@@ -117,7 +117,10 @@ module prog {
   (`svl.distributed_build`), the package identity recorded by the registry, and the payload of the
   `svl.attest` custom section that `svl.attest.compile_attested` embeds in a shipped artifact. The raw
   `compile_file_to_wasm` stays byte-identical (`attest=False` by default) so artifacts already pinned
-  elsewhere remain valid.
+  elsewhere remain valid. The same artifact carries a self-framing **sync word** (the 231-gate triple of
+  its leading 512-byte block); `svl.attest.locate_sync` finds it inside a larger or shifted stream in
+  O(n) — a 128 KB scan is ~20 ms — though the candidate list is not unique because the PRODUCT channel is
+  degenerate (see the KB).
 - **Abstract interpretation that runs** — `svl/abstract_interpretation.py` performs a sound interval
   analysis over the AST (i32-aware: intervals that leave `[-2**31, 2**31-1]` widen to `top` because WASM
   wraps; array lengths tracked per lvalue path; loop fixpoints with widening; a bounded interprocedural

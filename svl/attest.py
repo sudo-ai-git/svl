@@ -23,8 +23,36 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 SECTION_NAME = "svl.attest"
-ATTEST_VERSION = 1
+ATTEST_VERSION = 2
 WASM_MAGIC = b"\x00asm"
+
+# The artifact's leading code block, used as a self-framing sync word by `locate_sync`.
+SYNC_BLOCK = 512
+
+
+def sync_checksums(plain_binary: bytes, block_size: int = SYNC_BLOCK) -> Dict[str, Any]:
+    """Checksums of the artifact's leading block -- its self-framing sync word."""
+    from svl.gate231 import compute_checksums_cython
+    block = plain_binary[:block_size]
+    s, l, p = compute_checksums_cython(block)
+    return {"block": len(block), "checksums": [s, l, p], "meta": (s ^ l ^ p) % 231}
+
+
+def locate_sync(data: bytes, sync: Dict[str, Any]) -> List[int]:
+    """Find the artifact's sync block inside `data` -- a larger stream, a shifted container.
+
+    This is the self-synchronising frame-code property: no external framing or offset table is
+    needed, the block locates itself.  Uses the O(n) rolling search (`svl.viable_start`).
+
+    **Read the result as a candidate list, not a unique answer.**  The PRODUCT channel is 0 for
+    essentially every block of this size (measured: 2000/2000 random 512-byte windows, because
+    a 512-byte window almost surely contains a byte b with b+1 divisible by 3, 7 or 11).  The
+    effective keyspace is therefore 231^2, not 231^3, and false syncs occur at ~1/53361 per
+    position -- measured 3 in an 8 KB stream and 6 in 128 KB.
+    """
+    from svl.viable_start import rolling_unique_viable_starts
+    block = int(sync.get("block", SYNC_BLOCK))
+    return rolling_unique_viable_starts(data, tuple(sync["checksums"]), int(sync["meta"]), block)
 
 
 # --------------------------------------------------------------------------- binary helpers
@@ -149,6 +177,9 @@ def _payload(source: str, plain_binary: bytes) -> Dict[str, Any]:
         "gate231": fp["gate231"],
         "ast_sha256": fp["ast_sha256"],
         "source_sha256": fp["source_sha256"],
+        # The artifact's leading code block, as a self-framing sync word: `locate_sync` can
+        # find this block inside a larger or shifted stream without any external framing.
+        "sync": sync_checksums(plain_binary),
         # The compile-time gate ran and refused to compile on failure (strict=True).
         "layers": {"syntax": True, "types": True, "abstract": True},
     }

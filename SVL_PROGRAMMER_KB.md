@@ -463,10 +463,23 @@ provable out-of-bounds index / zero divisor). `strict=False` bypasses it.
 
 What the gate deliberately excludes, and why:
 - **231-gate / viable-start**: an artifact-integrity check over serialised bytes, not a correctness
-  check — and `find_viable_start` is super-linear (measured ~16.9 s of 17.2 s at 100 statements), so it
-  would make every compile slow for no correctness gain. It belongs at package/attestation time.
+  check, so it stays off the compile path.  It was also super-linear: the CRT search recomputed the
+  full 512-byte checksum ONCE PER MODULUS PER POSITION (3x redundant on an O(n*L) pure-Python loop),
+  measured ~0.95 s at 2 KB and ~13.7 s at 8 KB.  `svl.viable_start.rolling_checksums` now maintains
+  all three checksums in O(1) amortised per shift — bit-exact against `compute_checksums` over
+  231,542 windows, and 729x-4285x faster (128 KB first-match in ~20 ms).  It is wired into the
+  artifact path as a framing/resync mechanism (`svl.attest.locate_sync`), not a correctness gate.
 - **The BPSW "theorem" layer**: constant-true (see §5.3.2), so running it would only imply a guarantee
   it does not provide.
+
+**The PRODUCT channel is degenerate at block sizes that matter.** `PRODUCT = Π(b[i]+1) mod 231` is 0
+whenever the window holds a byte `b` with `b+1` divisible by 3, 7 or 11 — for a 512-byte window that
+happens with probability ~1 (measured: **2000/2000** random windows).  The effective sync keyspace is
+therefore `231^2`, not `231^3`, and false syncs occur at ~1/53361 per position — measured 3 candidates
+in an 8 KB stream and 6 in 128 KB, all with PRODUCT 0.  `locate_sync` returns a **candidate list** for
+that reason.  The earlier "0 false positives in 300 trials" claim held only because those trials were
+small (at 2 KB the expected count is 0.04).  A non-degenerate product channel needs a modulus coprime
+to every byte value, e.g. a prime > 256.
 
 Cost: ~0.45 ms per statement, linear (measured 5.4 ms at 3 `let`s, 55 ms at 120).
 
@@ -492,6 +505,12 @@ position fields, and `svl.attest.ast_fingerprint(source)` exposes the result:
 `{ast_sha256, gate231, source_sha256, ast_bytes}`. Measured: ASCII, Hebrew, re-indented, blank-line and
 commented variants of one program all give the **same** `ast_sha256` and `gate231`; `to_binary` gave five
 different values. Canonical bytes are one-way (the deserializer is a stub — see §5.3.4).
+
+**Self-framing resync.** The `svl.attest` payload (version 2) also carries a `sync` word — the 231-gate
+triple of the artifact's leading 512-byte block. `svl.attest.locate_sync(stream, sync)` finds that block
+inside a larger or shifted stream with no external framing, using the O(n) rolling search. Try
+`python3 examples/attest.py examples/sieve.svl --locate <file>`. It is a *candidate* list, not a unique
+answer, because the PRODUCT channel is degenerate (see §5.3.3).
 
 **Artifact path vs raw compile.** `compile_file_to_wasm(source, attest=True)` returns WAT carrying the
 section; `svl.attest.compile_attested(source)` returns `(wat_with_section, binary, payload)` and is what

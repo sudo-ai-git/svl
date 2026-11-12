@@ -126,12 +126,12 @@ def crt_solve_viable_start(
 def combine_crt(candidates_by_mod: dict) -> List[int]:
     """
     Combine candidates from each modulus using CRT.
-    
+
     For moduli 3, 7, 11, find all x such that:
         x ≡ a (mod 3)
         x ≡ b (mod 7)
         x ≡ c (mod 11)
-    
+
     Returns list of solutions mod 231.
     """
     solutions = []
@@ -187,6 +187,106 @@ def find_viable_start(
         return crt_solve_viable_start(data, expected_checksums, expected_meta, block_size)
     else:
         raise ValueError(f"Unknown method: {method}")
+
+
+# ============================================================================
+# ROLLING (O(n)) IMPLEMENTATION
+# ============================================================================
+#
+# `crt_solve_viable_start` recomputes the full 512-byte checksum ONCE PER MODULUS PER
+# POSITION -- 3x redundant work on top of an O(n*L) pure-Python inner loop.  Measured at
+# ~0.95 s for a 2 KB block and ~13.7 s for 8 KB, which is why it never left the spikes.
+#
+# All three checksums can be maintained in O(1) amortised per one-byte shift:
+#   SUM'     = SUM - out + in
+#   LINEAR'  = LINEAR - SUM + L * in              (from the index-weighted sum)
+#   PRODUCT' = PRODUCT / (out+1) * (in+1)         -- needs (out+1) invertible mod 231
+# 231 = 3*7*11 is composite, so PRODUCT is tracked per prime factor instead: a count of
+# window elements divisible by p, plus the product of the non-zero residues.  Each factor is
+# prime, so every non-zero residue has an inverse and the product rolls exactly.
+
+_CRT_PRIMES = (3, 7, 11)
+
+
+def _crt_combine(residues) -> int:
+    """Combine residues mod (3, 7, 11) into a value mod 231."""
+    a3, a7, a11 = residues
+    return (a3 * 154 + a7 * 99 + a11 * 210) % MODULUS
+
+
+def _inv_mod_p(x: int, p: int) -> int:
+    """Inverse of x mod p, for prime p and x != 0."""
+    return pow(x, p - 2, p)
+
+
+def rolling_checksums(data: bytes, block_size: int):
+    """Yield (SUM, LINEAR, PRODUCT) mod 231 for every window, O(1) amortised per shift."""
+    n = len(data)
+    if block_size <= 0 or n < block_size:
+        return
+    L = block_size
+
+    s = 0
+    lin = 0
+    zero_count = [0, 0, 0]
+    prod_res = [1, 1, 1]
+    for i in range(L):
+        v = data[i]
+        s += v
+        lin += (i + 1) * v
+        w = (v + 1) % MODULUS
+        for k, p in enumerate(_CRT_PRIMES):
+            wp = w % p
+            if wp == 0:
+                zero_count[k] += 1
+            else:
+                prod_res[k] = (prod_res[k] * wp) % p
+
+    def _product():
+        return _crt_combine([0 if zero_count[k] else prod_res[k] for k in range(3)])
+
+    yield (s % MODULUS, lin % MODULUS, _product())
+
+    for start in range(0, n - L):
+        out = data[start]
+        inc = data[start + L]
+        # LINEAR' = LINEAR - SUM + L*in, using the OLD sum.
+        lin = (lin - s + L * inc) % MODULUS
+        s = (s - out + inc) % MODULUS
+        wo = (out + 1) % MODULUS
+        wi = (inc + 1) % MODULUS
+        for k, p in enumerate(_CRT_PRIMES):
+            x = wo % p
+            if x == 0:
+                zero_count[k] -= 1
+            else:
+                prod_res[k] = (prod_res[k] * _inv_mod_p(x, p)) % p
+            y = wi % p
+            if y == 0:
+                zero_count[k] += 1
+            else:
+                prod_res[k] = (prod_res[k] * y) % p
+        yield (s % MODULUS, lin % MODULUS, _product())
+
+
+def rolling_viable_start(data: bytes, expected_checksums, expected_meta: int,
+                         block_size: int = 512) -> Optional[int]:
+    """O(n) viable-start search.  Same contract as `crt_solve_viable_start`."""
+    for start, (s, l, p) in enumerate(rolling_checksums(data, block_size)):
+        if (s, l, p) == tuple(expected_checksums):
+            if ((s ^ l ^ p) % MODULUS) == expected_meta:
+                return start
+    return None
+
+
+def rolling_unique_viable_starts(data: bytes, expected_checksums, expected_meta: int,
+                                 block_size: int = 512) -> List[int]:
+    """Every viable start, for proving uniqueness."""
+    out = []
+    for start, (s, l, p) in enumerate(rolling_checksums(data, block_size)):
+        if (s, l, p) == tuple(expected_checksums) and ((s ^ l ^ p) % MODULUS) == expected_meta:
+            out.append(start)
+    return out
 
 
 def verify_unique_viable_start(
