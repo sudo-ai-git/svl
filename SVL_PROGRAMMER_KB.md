@@ -164,7 +164,33 @@ z2_negate(B2) = B2
 | B3 | Covariant | `Future`, `Stream` | B3↔B1 preserves covariance |
 | B4 | Invariant | `Result`, `Error` | B4↔B0 preserves invariance |
 
-### 3.4 Type Constructors
+### 3.4 The Lattice (added 2026-11-12)
+
+The ring operations are **not** a lattice: `mod5_add` and `mod5_mul` are commutative and
+associative but **not idempotent** (`mod5_add(B1,B1) == B2 != B1`), so neither can serve as a
+join or a meet.  The buckets do carry a lattice, through the chain order
+`B0 < B1 < B2 < B3 < B4`:
+
+| Operation | Function | Definition |
+|-----------|----------|------------|
+| order | `bucket_leq(a, b)` | `a <= b` on the chain |
+| join | `bucket_join(a, b)` | `max(a, b)` |
+| meet | `bucket_meet(a, b)` | `min(a, b)` |
+
+`verify_mod5_lattice()` evaluates 12 laws exhaustively over all 125 triples: commutativity,
+associativity, idempotence, absorption, boundedness, order/join/meet consistency, the Z/2
+involution, and the order-reversing duality (`z2(join(a,b)) == meet(z2(a), z2(b))` and its
+dual).  All hold.
+
+**Z/2 is a duality, not a complement**: `bucket_join(B1, B3) == B3 != B4`, so it is not a
+Boolean negation.  Exhaustively, no (join, meet, bottom, top) chosen from
+{add, mul, max, min} makes it one.
+
+**Codegen is NOT affected.**  `compiler_wasm.py` does not import the type layer at all.  The
+type layer reaches compilation only through the compile-time gate (`svl/verify_gate.py`),
+which refuses to compile on a type error; nothing selects a WASM representation from a bucket.
+
+### 3.5 Type Constructors
 
 ```svl
 // Primitives
