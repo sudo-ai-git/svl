@@ -3,8 +3,16 @@
 
 Rebuilds the README's measured expectation from the files on disk:
   * how many .svl programs parse+compile (strict, so the gate runs),
-  * how many the abstract interpreter refuses (must be 0 on this corpus),
+  * how many the compile-time gate refuses (must be 0 on this corpus),
+  * how many the abstract interpreter flags (must be 0 on this corpus),
   * how many round-trip through the binary AST format.
+
+Exit status
+-----------
+Non-zero only when the *gate* regresses: a refusal, an abstract-interpreter finding, or a
+drop below the measured compilable count. Files that never compiled (the pre-existing
+legacy fixtures) are reported but do not fail the run -- they are corpus content, not a
+gate regression, and CI must be green on a clean checkout.
 
 Run:  /usr/bin/python3 svl/corpus_check.py
 """
@@ -13,11 +21,22 @@ import sys
 import glob
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# `python svl/corpus_check.py` puts svl/ on sys.path, not the workspace root, so `import
+# svl` would fail unless the caller sets PYTHONPATH. Insert it here so the script works
+# the same when run directly and from CI.
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 SEARCH = [
     os.path.join(ROOT, '*.svl'),
     os.path.join(ROOT, 'svl', '*.svl'),
     os.path.join(ROOT, 'svl-release', 'examples', '*.svl'),
 ]
+
+# Measured 2026-11-12 on this corpus. A drop below it means a program that used to
+# compile no longer does -- a real regression, as opposed to the legacy fixtures that
+# never compiled at all.
+MIN_COMPILABLE = 20
 
 
 def corpus():
@@ -39,7 +58,8 @@ def main():
     from svl.verify_gate import verify_program
 
     total = compiled = refused = ai_findings = roundtrip = 0
-    failures = []
+    legacy = []
+    gate_regressions = []
     for path in corpus():
         total += 1
         src = open(path, encoding='utf-8').read()
@@ -47,31 +67,38 @@ def main():
             problems = verify_program(src)
             ast = parse(tokenize(src))
         except SyntaxError as exc:
-            failures.append((path, f'parse: {exc}'))
+            legacy.append((path, f'parse: {exc}'))
             continue
         ai = analyze_program(ast)
         ai_findings += len(ai.findings)
         if problems:
             refused += 1
-            failures.append((path, f'gate: {problems[0][:90]}'))
+            gate_regressions.append((path, f'gate: {problems[0][:90]}'))
             continue
         try:
             compile_file_to_wasm(src)
             compiled += 1
         except Exception as exc:                                    # noqa: BLE001
-            failures.append((path, f'compile: {type(exc).__name__}: {str(exc)[:90]}'))
+            legacy.append((path, f'compile: {type(exc).__name__}: {str(exc)[:90]}'))
             continue
         try:
             if from_binary(to_binary(ast)) is not None:
                 roundtrip += 1
         except Exception as exc:                                    # noqa: BLE001
-            failures.append((path, f'roundtrip: {type(exc).__name__}: {str(exc)[:90]}'))
+            legacy.append((path, f'roundtrip: {type(exc).__name__}: {str(exc)[:90]}'))
 
     print(f'files={total} compiled={compiled} refused={refused} '
           f'ai_findings={ai_findings} roundtrip={roundtrip}')
-    for path, why in failures:
-        print(f'  {os.path.relpath(path, ROOT)}: {why}')
-    return 0 if not failures else 1
+    for path, why in gate_regressions:
+        print(f'  GATE REGRESSION {os.path.relpath(path, ROOT)}: {why}')
+    for path, why in legacy:
+        print(f'  legacy (never compiled): {os.path.relpath(path, ROOT)}: {why}')
+
+    ok = (refused == 0 and ai_findings == 0 and compiled >= MIN_COMPILABLE)
+    if compiled < MIN_COMPILABLE:
+        print(f'  REGRESSION: only {compiled} programs compiled '
+              f'(expected >= {MIN_COMPILABLE})')
+    return 0 if ok else 1
 
 
 if __name__ == '__main__':

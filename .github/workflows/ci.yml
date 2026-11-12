@@ -34,15 +34,13 @@ jobs:
         run: python -c "from svl.golden_refs import verify_all_golden_refs; r = verify_all_golden_refs(); print(r); assert all(r.values())"
 
       - name: Hebrew alias contract
-        run: >-
-          python -c "from svl.hebrew_alias import verify_mapping, verify_alias;
-          assert verify_mapping();
-          src='module m { func main() type int { let x: int = 1 let y: int = 2 return x + y } }';
-          assert verify_alias(src); print('alias ok')"
+        run: |
+          python -c "from svl.hebrew_alias import verify_mapping, verify_alias; assert verify_mapping(); src = 'module m { func main() type int { let x: int = 1 let y: int = 2 return x + y } }'; assert verify_alias(src); print('alias ok')"
 
       # The spike runner exits with the NUMBER of failed spikes. H36/H37 are the two
       # self-declared unimplemented stubs, so exit code 2 is the expected clean state;
-      # anything above it is a regression.
+      # anything above it is a regression. Verified in a clean venv installed from
+      # requirements-dev.txt: 41/43 pass, exit 2.
       - name: Spike suite
         run: |
           set +e
