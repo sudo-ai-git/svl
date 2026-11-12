@@ -37,6 +37,9 @@ BUILTIN_SIGNATURES = {
     'free':      (['handle'], 'void'), # return an allocation to the free list
 }
 
+# `extern "c" func name(...)` declarations are host imports, not user functions; they are
+# registered from the AST (see svl/compiler_wasm.py) rather than from this table.
+
 
 def _is_float(t: Any) -> bool:
     """True when `t` is the primitive `float` type (not a type variable)."""

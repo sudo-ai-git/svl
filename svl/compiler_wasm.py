@@ -10,6 +10,7 @@ import hashlib
 from svl.parser_rd import (
     Program, Module, FuncDecl, StructDecl, Block, LetStmt, IfStmt, WhileStmt,
     ForStmt, ReturnStmt, AssertStmt, TryStmt, ThrowStmt, ExprStmt, ConstDecl, VarDecl,
+    ExternDecl,
     BinaryExpr, UnaryExpr, CallExpr, MatchExpr, AwaitExpr, LambdaExpr,
     StructLit, ArrayLit, Ident, Literal, FieldAccess, IndexExpr, TernaryExpr,
     AssignExpr, TypeExpr, Param, Field, NodeType
@@ -148,6 +149,8 @@ class CompilerState:
     # For deterministic output
     sorted_functions: List[str] = field(default_factory=list)
     sorted_structs: List[str] = field(default_factory=list)
+    # `extern "c" func name(...) type ret` declarations -> their WASM signature.
+    externs: Dict[str, 'WasmFuncType'] = field(default_factory=dict)
     
 
 
@@ -243,11 +246,25 @@ class WasmCompiler:
                 return f'i32.const {-int(inner[len("i32.const "):])}'
         return None
 
+    def _collect_extern(self, item) -> None:
+        """Register an `extern "c" func name(...)` declaration as a host import."""
+        ret = (item.return_type if item.return_type is not None else TypeExpr(
+            type=NodeType.TYPE_EXPR, line=0, column=0, offset=0,
+            kind='prim', value='void'))
+        self.state.externs[item.name] = lower_func_type(
+            [self._param_valtype(item.name, p) for p in item.params], ret)
+
     def _collect_declarations(self, program: Program):
         """Collect all modules, functions, structs, globals."""
+        # Program-level declarations (including top-level `extern`).
+        for item in program.items:
+            if isinstance(item, ExternDecl):
+                self._collect_extern(item)
         for module in program.modules:
             for item in module.body.statements:
-                if isinstance(item, FuncDecl):
+                if isinstance(item, ExternDecl):
+                    self._collect_extern(item)
+                elif isinstance(item, FuncDecl):
                     func_name = f"{module.name}${item.name}"
                     func_type = lower_func_type(
                         [self._param_valtype(item.name, p) for p in item.params],
@@ -1233,6 +1250,8 @@ class WasmCompiler:
         for name in self.state.sorted_functions:
             if name == callee or name.endswith(f'${callee}'):
                 return f'${name}'
+        if callee in self.state.externs:
+            return f'${callee}'
         if callee in HOST_IMPORT_SIGS:
             return f'${callee}'
         raise SyntaxError(f"call to undefined function '{callee}' at line {line}")
@@ -1542,6 +1561,11 @@ class WasmCompiler:
         for host_name, host_sig in host_sigs.items():
             if host_name in called_hosts:
                 lines.append(f'  (import "env" "{host_name}" {host_sig})')
+        # `extern "c" func name(...)` declarations — the language's FFI surface.
+        for ext_name in sorted(self.state.externs):
+            if ext_name in called_hosts:
+                sig = self._func_type_to_string(self.state.externs[ext_name])
+                lines.append(f'  (import "env" "{ext_name}" (func ${ext_name} {sig}))')
         
         # Functions (function definitions come before memory in the canonical field order)
         for func_name in self.state.sorted_functions:
@@ -1791,7 +1815,8 @@ def compile_to_wasm(ast: Program, deterministic: bool = True) -> str:
 
 
 def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool = True,
-                         attest: bool = False, base_dir: Optional[str] = None) -> str:
+                         attest: bool = False, base_dir: Optional[str] = None,
+                         prove: bool = False) -> str:
     """Compile SVL source file to WASM.
 
     With ``strict=True`` (the default) the verification gate runs FIRST and the compile is
@@ -1802,6 +1827,10 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     ``base_dir`` enables ``import``: each top-level import path is resolved relative to it,
     the file is parsed, and its modules/items are linked in.  Without ``base_dir`` an
     unresolved import is a compile error rather than a silently dropped line.
+
+    ``prove=True`` additionally discharges every ``assert`` with the Z3 SMT prover and
+    raises ``SVLVerificationError`` naming a counterexample when one is found.  It is
+    opt-in because it is far more expensive than the compile-time gate.
 
     With ``attest=True`` the returned WAT carries an ``svl.attest`` custom section binding the
     artifact to its canonical AST fingerprint (see `svl.attest`).  The default is False so a
@@ -1823,6 +1852,15 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
             f"(pass base_dir=... to compile_file_to_wasm)"
         )
     wat = compile_to_wasm(ast, deterministic)
+    if prove:
+        from svl.smt_theorem import verify_with_smt
+        from svl.verify_gate import SVLVerificationError
+        result = verify_with_smt(source)
+        if result.status == "counterexample":
+            raise SVLVerificationError(
+                "SMT counterexample: an assertion was refuted"
+                + (f" ({result.error_message})" if result.error_message else "")
+            )
     if attest:
         from svl.attest import attest_wat
         wat, _payload = attest_wat(source, wat)
