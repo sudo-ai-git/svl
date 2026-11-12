@@ -1,7 +1,12 @@
 # SVL — Self-Verifying Language
-## Pitch Deck · v1.0 · 2026-11-11
+## Pitch Deck · v1.1 · 2026-11-12 · **v0.1.0 released** (GitHub Release + attested `.wasm`)
 
-> *Every fact marked ✅ in this deck is execution-verified on the current codebase (41/43 spike suite, golden refs, bootstrap determinism — all re-run this session). Anything not yet measured is labeled plainly.*
+> *Every fact marked ✅ in this deck is execution-verified on the current codebase (41/43 spike suite, golden refs, determinism — all re-run this session). Anything not yet measured is labeled plainly.*
+>
+> **Since v1.0:** 13 defect-probe failures closed, the ROLLING checksum channel replaced the
+> degenerate PRODUCT, a free-list allocator landed, the REPL remembers definitions, the Z3
+> prover moved onto the compile path (`prove=True`), and `extern "c" func ...` made host
+> imports callable. Probe suite: **30 PASS / 0 FAIL / 3 INFO**.
 
 ---
 
@@ -111,6 +116,13 @@ Compare: Lean has dependent types but no effects rows or WASM target. Rust has l
 - **`try` / `catch` / `throw`** — ON THE COMPILE PATH, via a per-try error flag (WASM MVP
   has no exceptions). ✅ throw lands in the catch; a normal exit skips it.
 - **`print` type dispatch** and **import linking** — ON THE COMPILE PATH.
+- **ROLLING checksum channel** — replaces the degenerate `Π(b+1) mod 231` PRODUCT with
+  `H=(H*31+b) mod 231` (31 coprime to 231): 0 zeros / 2000 windows, was 2000/2000. ✅
+- **Free list** — `$alloc`/`$free` with the `free(ptr)` builtin reclaim exact-size blocks
+  (a same-size reallocation returns the same pointer). ✅
+- **`extern` host imports** — `extern "c" func name(...)` emits a real `env` import. ✅
+- **SMT on the compile path** — `compile_file_to_wasm(..., prove=True)` discharges every
+  `assert` with Z3 and refuses on a counterexample. ✅
 - **SIMD, escape analysis, WASM GC, PGO, LTO, hot reloading, RL pass selection** —
   ❌ **removed** (2026-11-12). They were standalone libraries the compiler never called;
   several were stubs that emitted invalid WAT while their spikes passed on text checks.
@@ -124,9 +136,10 @@ Compare: Lean has dependent types but no effects rows or WASM target. Rust has l
 
 | Tool | What it does |
 |---|---|
-| **`svlc` CLI** (`build` / `run` / `check` / `corpus`) | installable entry point (`pyproject.toml`) — ✅ `pip install -e .` then `svlc run <file>` |
+| **`svlc` CLI** (`build` / `run` / `check` / `corpus` / `repl` / `lsp`) | installable entry point (`pyproject.toml`) — ✅ `pip install -e .` then `svlc run <file>`; `build\|run --prove` discharges asserts with Z3 |
 | **LSP server** w/ tree-sitter grammar + semantic highlighting | IDE-grade editing — ✅ boots and registers all handlers (2026-11-12) |
-| **REPL** | evaluates a block and prints the result — ✅ (2026-11-12) |
+| **REPL** | evaluates a block, prints the result, and remembers top-level declarations across blocks — ✅ (2026-11-12) |
+| **`extern "c" func name(...)` FFI** | callable host imports — ✅ `host_add(2,3)=5` via a host-provided function |
 | **Interactive theorem prover** (tactics: intro, apply, rewrite, induction…) | Proofs as a REPL, not a research project |
 | **Time-travel debugger** + deterministic replay | Step backward, `find_bug(predicate)` |
 | **Component-model FFI** + WIT generation | C/Rust interop with generated bindings |
@@ -139,7 +152,10 @@ Compare: Lean has dependent types but no effects rows or WASM target. Rust has l
 | **Verified Raft consensus** | leader election, log replication, partition recovery — as a *language library* with property verifiers ✅ |
 
 **No language VM ships this toolbox. SVL's is attached to a proof-producing compiler.**
-Known gaps, plainly: REPL state does not persist across blocks; non-array iterators still error.
+Known gaps, plainly: non-array iterators are rejected with a clear compile error (only ranges
+and arrays are iterable); there is no garbage collector (reclamation is `free` or the
+entry-point reset); and there is no component-model runtime, so `extern` reaches only host
+functions the host chooses to expose.
 
 ---
 
@@ -150,8 +166,8 @@ Known gaps, plainly: REPL state does not persist across blocks; non-array iterat
 | Full spike suite (H1–H50) | **41 / 43 pass (95.3%)** | ✅ re-run 2026-11-12; the set is 43 after the dead-optimization removals (H36/H37 remain the only failures) |
 | Golden references (Psalm 119 Aleph, Gen 1:1) | **both True** | ✅ |
 | BPSW monodromy spike (all 25 primes) | **complete** | ✅ |
-| Bootstrap determinism | **True** — compiler deterministic, WASM deterministic, golden ref stable | ✅ |
-| Mutation detection | **True** — mutations caught | ✅ |
+| Determinism | **True** — same source → same WAT across runs and `PYTHONHASHSEED`s; WASM deterministic; golden ref stable | ✅ |
+| Corpus regression | **0 refusals, 0 AI findings** across 25–28 programs | ✅ |
 | Canonical corpus joint signatures (231-gate) | **469/484 unique; 15 symmetric collisions resolved in 1 step** | ✅ |
 | Semantic + structural dual-stream signatures | **100% unique (484/484)** | ✅ |
 | Single-letter error detection | **100% detection, 100% localization to 2 checksums** | ✅ |
@@ -159,7 +175,10 @@ Known gaps, plainly: REPL state does not persist across blocks; non-array iterat
 | Compiler footprint | hand-written lexer+parser+verifier+WASM backend ≈ **26K lines of Python current codebase** | ✅ |
 | Scaling datasheet | 22,673 verses / 1,172,332 letters analyzed in the corpus spikes | ✅ |
 
-**Not yet measured (plainly):** end-to-end WASM execution latency vs. Rust/AssemblyScript on identical workloads; binary size deltas; any SIMD or PGO speedup (those passes were removed — SVL currently emits scalar code and one tail-call optimization). The benchmark to produce the first two is `examples/run_example.py` + `wasmtime`.
+**Measured, not aspirational:** SVL vs Rust-to-wasm vs C/Python on two workloads —
+compile 3–6× faster than Rust-to-wasm and 4–20× faster than C; runtime at parity with
+Rust-to-wasm on the same runtime (xorshift warm 0.80–1.05×; sieve 1.35–1.94×); artifacts
+159–657 B. Full table in `SVL_FORMAL_RATING.md` §5.
 
 ---
 
@@ -171,7 +190,7 @@ Known gaps, plainly: REPL state does not persist across blocks; non-array iterat
 - **H40 Repair suggestions** — error messages exist; auto-suggested fixes are the next increment.
 - **H31 AOT (Cranelift)** — pipeline started, needs a production path (native codegen from verified WASM).
 - **H2–H16 engines** — most advanced type features are parser-verified today; wiring dedicated engines (effects handler compilation, coherence checker, refinement SMT solving, dependent-bound obligations) is the natural next wave. Reference engines already exist for regions, kinds, type families.
-- **SMT bridge hardening** — Z3-backed checking is additive (graceful fallback to BPSW); formalizing when SMT runs (bounds, refinements, symbolic execution) is the plan.
+- **SMT bridge** — Z3 is on the compile path (`prove=True`, `svlc build --prove`); hardening is formalizing *when* it runs (bounds, refinements, symbolic execution) and its cost envelope.
 
 ### Ecosystem & scale
 - **Standard library**: currently minimal — Neumaier summation as the numerical correctness anchor; growth surface is broad (verified collections, verified I/O, crypto primitives).
