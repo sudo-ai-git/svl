@@ -123,12 +123,15 @@ module prog {
   `case _ => e`), `while` (incl. nested), `for i in a..b`, `if`/`else`, `if…then…else` *expressions*,
   `const`/`var`, `assert`, `print`/`print_int`, **`free(ptr)`** (returns an allocation to the
   free list), `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
-  unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**, and **top-level
-  `import`** (resolved with `base_dir`). Measured 2026-11-12: the 61-test pytest suite assembles
-  **and runs** every construct; the 32-row probe suite is **29 PASS / 0 FAIL / 3 INFO**
+  unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**, **top-level
+  `import`** (resolved with `base_dir`), and **`extern "c" func name(...)`** — a host import
+  you can call like any function. Measured 2026-11-12: the 61-test pytest suite assembles
+  **and runs** every construct; the 33-row probe suite is **30 PASS / 0 FAIL / 3 INFO**
   (`svl-rating/probes.py`).
-- **Command line** — `pip install -e .` then `svlc build|run|check|corpus` (`svl/cli.py`,
-  console script in `pyproject.toml`). First tagged release: **`v0.1.0`**.
+- **Command line** — `pip install -e .` then `svlc build|run|check|corpus|repl|lsp`
+  (`svl/cli.py`, console script in `pyproject.toml`). `build|run --prove` discharges every
+  `assert` with Z3; `check --json` emits machine-readable problems. First tagged release:
+  **`v0.1.0`**, with a GitHub Release carrying an attested `.wasm` asset.
 - ~~**Self-hosting compiler** — bootstraps in 3 stages~~ **RETRACTED**: `svl/compiler_svl.svl` is a
   540-byte stub whose `main()` assigns integer constants and `assert true` — it compiles nothing. There
   is no self-hosted compiler.
@@ -169,9 +172,10 @@ holding an f64 literal (invalid WAT that still parsed) and `x + y` on two floats
   six dead optimizations (SIMD, escape analysis, WASM GC, PGO, LTO, hot reloading) and the RL
   pass-selection compiler (H49) were **removed** on 2026-11-12 rather than left as dead code
   sustaining the claim.
-- **Tooling** — `svlc` CLI (build/run/check/corpus), **LSP server** (boots and registers all
-  handlers), **REPL** (evaluates a block and prints the result), tree-sitter grammar, tactic
-  prover, time-travel debugger, component-model FFI/WIT, package registry with attestations,
+- **Tooling** — `svlc` CLI (`build`/`run`/`check`/`corpus`/`repl`/`lsp`, with `--prove` and
+  `--json`), **LSP server** (boots and registers all handlers), **REPL** (evaluates a block and
+  remembers definitions), **`extern` FFI** (host imports are callable), tree-sitter grammar,
+  tactic prover, time-travel debugger, component-model WIT, package registry with attestations,
   incremental compilation, distributed build cache, LSIF, docs generation, Jupyter kernel.
   Not yet working: non-array iterators are rejected with a clear compile error (only ranges
   and arrays are iterable); allocations are reclaimed only through `free` or the entry-point

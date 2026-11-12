@@ -1098,6 +1098,8 @@ does, is deleted rather than relabelled. Do not re-add one without wiring it int
 | ROLLING channel | `svl/gate231.py` | replaces the degenerate `Π(b+1)` PRODUCT with `H=(H*31+b) mod 231` |
 | Free list | `$alloc` / `$free` (`free(ptr)`) | exact-size blocks are reclaimed and reused; the heap resets at the entry point |
 | Non-array iterators | `_compile_for_stmt` | a non-range, non-array iterable is a clear compile error, not a silent no-op |
+| `extern` host import | `ExternDecl` → `_collect_extern` → `(import "env" ...)` | `extern "c" func name(...)` is callable like any function (first FFI surface) |
+| SMT on the compile path | `compile_file_to_wasm(..., prove=True)` | discharges every `assert` with Z3; raises `SVLVerificationError` on a counterexample |
 
 ---
 
