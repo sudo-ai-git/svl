@@ -30,7 +30,12 @@ class PCCWasmModule:
     source_hash: str  # SHA256 of original source
 
     def to_wasm_with_proofs(self) -> str:
-        """Generate WASM with custom sections containing proofs."""
+        """Deprecated: return WAT text with a `(custom ...)` line.
+
+        This CANNOT assemble — wat2wasm has no custom-section syntax, so the line it
+        inserts is rejected (`expected valid module field`).  Use
+        `to_wasm_bytes_with_proofs()` for a real artifact.
+        """
         # Parse existing WASM to find insertion point
         lines = self.wasm_text.strip().split('\n')
 
@@ -69,6 +74,35 @@ class PCCWasmModule:
         """Verify embedded proofs match source."""
         # Would extract and verify in real implementation
         return all(p.passed for p in self.proofs)
+
+    def to_wasm_bytes_with_proofs(self) -> bytes:
+        """Return a binary WASM module with the proofs in a standard custom section.
+
+        The receiver can re-verify the artifact without the toolchain:
+        `wasmtime.Module(engine, bytes)` validates it, and
+        `extract_proofs_from_wasm_bytes(bytes)` recovers the proof payload.
+        """
+        try:
+            import wasmtime
+        except ImportError as exc:                          # pragma: no cover
+            raise RuntimeError(
+                "wasmtime is required to emit a binary PCC artifact"
+            ) from exc
+        binary = wasmtime.wat2wasm(self.wasm_text)
+        payload = {
+            'source_hash': self.source_hash,
+            'proofs': [
+                {
+                    'layer': p.layer,
+                    'passed': p.passed,
+                    'checksum': p.checksum,
+                    'details': p.details,
+                    'timestamp': p.timestamp,
+                }
+                for p in self.proofs
+            ],
+        }
+        return binary + WasmCustomSection.create_proof_section(payload)
 
 
 class PCCWasmGenerator:
@@ -231,9 +265,56 @@ def extract_proofs_from_wasm(wasm_text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def verify_pcc_wasm(wasm_text: str, source: str) -> Tuple[bool, List[str]]:
-    """Verify PCC WASM against source code."""
-    proofs_data = extract_proofs_from_wasm(wasm_text)
+def extract_proofs_from_wasm_bytes(binary: bytes) -> Optional[Dict[str, Any]]:
+    """Scan a BINARY WASM module for the `svl-proofs` custom section.
+
+    Walks the section table (section id 0 = custom), decodes the LEB128 name length and
+    compares the name.  Returns the parsed JSON payload, or None.
+    """
+    if binary[:4] != b'\x00asm':
+        return None
+    i = 8                                       # skip magic + version
+    while i < len(binary):
+        section_id = binary[i]
+        i += 1
+        size, shift = 0, 0
+        while True:
+            b = binary[i]
+            i += 1
+            size |= (b & 0x7F) << shift
+            shift += 7
+            if not (b & 0x80):
+                break
+        payload = binary[i:i + size]
+        i += size
+        if section_id != 0 or not payload:
+            continue
+        name_len, shift, j = 0, 0, 0
+        while True:
+            b = payload[j]
+            j += 1
+            name_len |= (b & 0x7F) << shift
+            shift += 7
+            if not (b & 0x80):
+                break
+        if payload[j:j + name_len].decode('utf-8', 'replace') != 'svl-proofs':
+            continue
+        try:
+            return json.loads(payload[j + name_len:].decode('utf-8'))
+        except Exception:
+            return None
+    return None
+
+
+def verify_pcc_wasm(wasm, source: str) -> Tuple[bool, List[str]]:
+    """Verify PCC WASM against source code.
+
+    Accepts either WAT text (legacy) or binary bytes (the real artifact).
+    """
+    if isinstance(wasm, (bytes, bytearray)):
+        proofs_data = extract_proofs_from_wasm_bytes(bytes(wasm))
+    else:
+        proofs_data = extract_proofs_from_wasm(wasm)
     if not proofs_data:
         return False, ["No proof custom section found in WASM"]
 

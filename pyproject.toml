@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "svl"
+version = "0.1.0"
+description = "SVL — Self-Verifying Language: deterministic WASM compilation with a three-layer verification gate"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# The hard module-level imports the package already requires (see requirements-dev.txt).
+dependencies = [
+    "numpy>=1.24",
+    "msgpack>=1.0",
+    "cryptography>=41.0",
+    "z3-solver>=4.8",
+    "wasmtime>=20.0",
+]
+
+[project.optional-dependencies]
+lsp = ["pygls>=2.1", "lsprotocol>=2025.0"]
+dev = [
+    "pytest>=7.0",
+    "hypothesis>=6.0",
+    "ipykernel>=6.0",
+]
+
+[project.scripts]
+svlc = "svl.cli:main"
+svl-lsp = "svl.lsp_server:main"
+svl-repl = "svl.repl:run_repl"
+
+[tool.setuptools]
+packages = ["svl"]

@@ -353,16 +353,19 @@ def main():
     
     server = SVLLanguageServer("svl-lsp", "0.1.0")
     
-    # Register handlers
-    server.feature(INITIALIZE)(server.initialize)
-    server.feature(TEXT_DOCUMENT_DID_OPEN)(server.did_open)
-    server.feature(TEXT_DOCUMENT_DID_CHANGE)(server.did_change)
-    server.feature(TEXT_DOCUMENT_DID_CLOSE)(server.did_close)
-    server.feature(TEXT_DOCUMENT_DID_SAVE)(server.did_save)
-    server.feature(TEXT_DOCUMENT_COMPLETION)(server.completion)
-    server.feature(TEXT_DOCUMENT_HOVER)(server.hover)
-    server.feature(TEXT_DOCUMENT_DEFINITION)(server.definition)
-    server.feature(TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL)(server.semantic_tokens_full)
+    # Register handlers.  Pass the UNBOUND functions: `server.feature(NAME)(server.method)`
+    # passes a bound method, and pygls's assign_help_attrs does setattr(f, ATTR_REGISTERED_NAME, ...)
+    # which bound methods reject with
+    # `AttributeError: 'method' object has no attribute 'reg_name'`.
+    server.feature(INITIALIZE)(SVLLanguageServer.initialize)
+    server.feature(TEXT_DOCUMENT_DID_OPEN)(SVLLanguageServer.did_open)
+    server.feature(TEXT_DOCUMENT_DID_CHANGE)(SVLLanguageServer.did_change)
+    server.feature(TEXT_DOCUMENT_DID_CLOSE)(SVLLanguageServer.did_close)
+    server.feature(TEXT_DOCUMENT_DID_SAVE)(SVLLanguageServer.did_save)
+    server.feature(TEXT_DOCUMENT_COMPLETION)(SVLLanguageServer.completion)
+    server.feature(TEXT_DOCUMENT_HOVER)(SVLLanguageServer.hover)
+    server.feature(TEXT_DOCUMENT_DEFINITION)(SVLLanguageServer.definition)
+    server.feature(TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL)(SVLLanguageServer.semantic_tokens_full)
     
     # Run stdio server
     server.start_io()

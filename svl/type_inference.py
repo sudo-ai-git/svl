@@ -17,7 +17,7 @@ from svl.parser_rd import (
     LetStmt, IfStmt, WhileStmt, ForStmt, ReturnStmt, AssertStmt, TryStmt, ExprStmt,
     BinaryExpr, UnaryExpr, CallExpr, MatchExpr, AwaitExpr, LambdaExpr, StructLit, ArrayLit,
     Ident, Literal, CaseClause, Pattern, FieldPattern, FieldInit,
-    Param, Field, TypeExpr, FuncTypeDetail, NodeType
+    Param, Field, TypeExpr, FuncTypeDetail, NodeType, AssignExpr
 )
 
 
@@ -523,6 +523,24 @@ class TypeInferencer:
             func_type = scheme.instantiate()
             # For function calls, return the return type
             if func_type.kind == 'func':
+                params = func_type.args[:-1]
+                # Argument types used to be discarded, so `f("hi")` against
+                # `f(x: int)` passed the gate.  Unify each argument with its
+                # parameter; a mismatch raises UnificationError, which the
+                # checker reports.
+                if len(expr.arguments) != len(params):
+                    raise UnificationError(
+                        f"Argument mismatch: expected {len(params)}, got {len(expr.arguments)}")
+                for arg, param_type in zip(expr.arguments, params):
+                    arg_type = self.synthesize(arg, env)
+                    try:
+                        self.unify(arg_type, param_type)
+                    except UnificationError:
+                        # `int` may annotate an array/tuple handle (the documented style
+                        # writes `func f(a: int)` and passes `[1,2,3]`), the same allowance
+                        # `_check_let_stmt` already applies.
+                        if not TypeChecker._handle_annotation_ok(param_type, arg_type):
+                            raise
                 return func_type.args[-1]  # Last arg is return type
             return func_type
         
@@ -590,8 +608,26 @@ class TypeInferencer:
         return then_type  # simplified
 
     def _synth_match(self, expr: Any, env: TypeEnv) -> Type:
-        return Type.prim('void')
-        return Type.prim('void')
+        """Type a match expression as the common type of its case bodies.
+
+        This used to be a stub returning `void`, which made `let r = match ...` void and
+        then `return r` a false type error once return types were checked.
+        """
+        if getattr(expr, 'subject', None) is not None:
+            self.synthesize(expr.subject, env)
+        result = Type.prim('void')
+        for case in getattr(expr, 'cases', []):
+            body_type = self.synthesize(case.body, env)
+            if getattr(body_type, 'kind', None) == 'prim' and str(body_type) in ('void', 'never'):
+                continue
+            if getattr(result, 'kind', None) == 'prim' and str(result) in ('void', 'never'):
+                result = body_type
+            else:
+                try:
+                    self.unify(result, body_type)
+                except UnificationError:
+                    pass
+        return result
     
     def _synth_await(self, expr: Any, env: TypeEnv) -> Type:
         return self.synthesize(expr.expression, env)
@@ -648,6 +684,11 @@ class TypeChecker:
         # unchanged.
         self._recording = False
         self._current_func: Optional[str] = None
+        # The enclosing function's declared return type, while checking its body.
+        self._current_return_type: Optional[Type] = None
+        # Top-level `const` names, so assignment to one is a compile-time error instead
+        # of an invalid WASM artifact (`global.set` on an immutable global).
+        self._consts: set = set()
         self.recorded_locals: Dict[Tuple[str, str], Type] = {}
         self.recorded_exprs: Dict[int, Type] = {}
         self.recorded_funcs: Dict[str, Type] = {}
@@ -737,10 +778,31 @@ class TypeChecker:
             )
     
     def _check_module(self, module: Any):
-        """Type check a module."""
+        """Type check a module.
+
+        A pre-pass binds every function signature before any body is checked, so
+        recursion and forward references are type-checked instead of silently accepted
+        (the scheme used to be added only *after* the body).
+        """
         if hasattr(module, 'body'):
             for stmt in module.body.statements:
+                if getattr(stmt, 'type', None) == NodeType.FUNC_DECL:
+                    self._prebind_function(stmt)
+            for stmt in module.body.statements:
                 self._check_stmt(stmt)
+
+    def _prebind_function(self, stmt: Any) -> None:
+        if not getattr(stmt, 'return_type', None):
+            return
+        param_types = []
+        for param in stmt.params:
+            param_types.append(
+                self._type_ann_to_type(param.type_ann, self.env) if param.type_ann
+                else Type.var()
+            )
+        return_type = self._type_ann_to_type(stmt.return_type, self.env)
+        scheme = self.env.generalize(Type.func(param_types, return_type), set())
+        self.env = self.env.extend(stmt.name, scheme)
     
     def _check_stmt(self, stmt: Any):
         """Type check a statement."""
@@ -759,8 +821,12 @@ class TypeChecker:
                 self._check_assert_stmt(stmt)
             elif stmt.type == NodeType.TRY_STMT:
                 self._check_try_stmt(stmt)
+            elif stmt.type == NodeType.THROW_STMT:
+                self._check_throw_stmt(stmt)
             elif stmt.type == NodeType.FUNC_DECL:
                 self._check_func_decl(stmt)
+            elif stmt.type == NodeType.EXPR_STMT:
+                self._check_expr_stmt(stmt)
             elif stmt.type == NodeType.STRUCT_DECL:
                 self._check_struct_decl(stmt)
             elif stmt.type == NodeType.CONST_DECL:
@@ -851,8 +917,38 @@ class TypeChecker:
     
     def _check_return_stmt(self, stmt: Any):
         if stmt.value:
-            self.inferencer.synthesize(stmt.value, self.env)
+            value_type = self.inferencer.synthesize(stmt.value, self.env)
+            # The checker used to synthesize the value and DISCARD its type, so
+            # `return "hi"` in a `type int` function passed the gate.
+            declared = getattr(self, '_current_return_type', None)
+            unknown = (value_type is None or
+                       (getattr(value_type, 'kind', None) == 'prim'
+                        and str(value_type) in ('void', 'never')))
+            if declared is not None and not unknown and not (
+                    getattr(declared, 'kind', None) == 'prim' and str(declared) == 'void'):
+                try:
+                    self.inferencer.unify(value_type, declared)
+                except UnificationError as e:
+                    self.errors.append(f"Type mismatch in return: {e}")
     
+    def _check_expr_stmt(self, stmt: Any):
+        """Check an expression statement.
+
+        An `AssignExpr` whose target is a top-level `const` is a compile-time error:
+        the backend would emit `global.set` on an immutable global and produce a module
+        that fails WASM validation.
+        """
+        expr = stmt.expression
+        if isinstance(expr, AssignExpr):
+            name = getattr(expr.target, 'name', None)
+            if name in self._consts:
+                self.errors.append(f"assignment to const '{name}'")
+                return
+            # Check the right-hand side; the assignment node itself has no type.
+            self.inferencer.synthesize(expr.value, self.env)
+            return
+        self.inferencer.synthesize(expr, self.env)
+
     def _check_assert_stmt(self, stmt: Any):
         cond_type = self.inferencer.synthesize(stmt.condition, self.env)
         bool_type = Type.prim('bool')
@@ -861,6 +957,10 @@ class TypeChecker:
         except UnificationError as e:
             self.errors.append(f"Assert condition must be bool: {e}")
     
+    def _check_throw_stmt(self, stmt: Any):
+        """Check the thrown value's type.  Runtime traps stay uncaught by design."""
+        self.inferencer.synthesize(stmt.value, self.env)
+
     def _check_try_stmt(self, stmt: Any):
         # Try block
         for s in stmt.try_block.statements:
@@ -896,20 +996,25 @@ class TypeChecker:
             if self._recording:
                 self.recorded_locals[(stmt.name, param.name)] = param_type
         
-        # Check function body
-        old_env = self.env
-        self.env = func_env
-        for body_stmt in stmt.body.statements:
-            self._check_stmt(body_stmt)
-        self.env = old_env
-        self._current_func = prev_func
-        
-        # Add function to environment
+        # Declared return type, needed while checking the body so `return <value>`
+        # can be unified against it.
         if stmt.return_type:
             return_type = self._type_ann_to_type(stmt.return_type, self.env)
         else:
             return_type = Type.prim('void')
+
+        # Check function body
+        old_env = self.env
+        self.env = func_env
+        prev_return_type = getattr(self, '_current_return_type', None)
+        self._current_return_type = return_type
+        for body_stmt in stmt.body.statements:
+            self._check_stmt(body_stmt)
+        self._current_return_type = prev_return_type
+        self.env = old_env
+        self._current_func = prev_func
         
+        # Add function to environment
         func_type = Type.func(param_types, return_type)
         scheme = self.env.generalize(func_type, set())
         self.env = self.env.extend(stmt.name, scheme)
@@ -938,6 +1043,7 @@ class TypeChecker:
         
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
+        self._consts.add(stmt.name)
         if self._recording:
             self.recorded_locals[(self._current_func, stmt.name)] = value_type
 

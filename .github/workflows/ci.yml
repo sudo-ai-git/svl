@@ -2,7 +2,7 @@ name: svl-ci
 
 on:
   push:
-    branches: [master]
+    branches: [master, main]
   pull_request:
 
 jobs:

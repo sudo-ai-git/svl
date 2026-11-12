@@ -52,7 +52,18 @@ def corpus():
                 yield path
 
 
-def main():
+import argparse
+import json
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="SVL corpus regression check")
+    parser.add_argument("--json", action="store_true",
+                        help="emit the measured counts as JSON")
+    parser.add_argument("--write-baseline", metavar="PATH",
+                        help="persist the measured counts to a JSON baseline file")
+    args = parser.parse_args(argv)
+
     from svl.compiler_wasm import compile_file_to_wasm
     from svl.abstract_interpretation import analyze_program
     from svl.lexer import tokenize
@@ -90,12 +101,27 @@ def main():
         except Exception as exc:                                    # noqa: BLE001
             legacy.append((path, f'roundtrip: {type(exc).__name__}: {str(exc)[:90]}'))
 
-    print(f'files={total} compiled={compiled} refused={refused} '
-          f'ai_findings={ai_findings} roundtrip={roundtrip}')
-    for path, why in gate_regressions:
-        print(f'  GATE REGRESSION {os.path.relpath(path, ROOT)}: {why}')
-    for path, why in legacy:
-        print(f'  legacy (never compiled): {os.path.relpath(path, ROOT)}: {why}')
+    summary = {
+        "files": total, "compiled": compiled, "refused": refused,
+        "ai_findings": ai_findings, "roundtrip": roundtrip,
+        "min_compilable": MIN_COMPILABLE,
+    }
+    if args.json:
+        print(json.dumps(summary, sort_keys=True))
+    else:
+        print(f'files={total} compiled={compiled} refused={refused} '
+              f'ai_findings={ai_findings} roundtrip={roundtrip}')
+    if args.write_baseline:
+        with open(args.write_baseline, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        if not args.json:
+            print(f"  baseline written: {args.write_baseline}")
+    if not args.json:
+        for path, why in gate_regressions:
+            print(f"  GATE REGRESSION {os.path.relpath(path, ROOT)}: {why}")
+        for path, why in legacy:
+            print(f"  legacy (never compiled): {os.path.relpath(path, ROOT)}: {why}")
 
     ok = (refused == 0 and ai_findings == 0 and compiled >= MIN_COMPILABLE)
     if compiled < MIN_COMPILABLE:
