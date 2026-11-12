@@ -119,21 +119,26 @@ def run_spike_s17() -> SpikeResult:
     
     print(f"Available runtimes: {runtimes}")
     
-    if len(runtimes) < 2:
-        print("Need at least 2 runtimes for comparison. Skipping cross-runtime test.")
+    if not runtimes:
+        # A skipped gate must not report success: without an assembler this spike cannot
+        # exercise its own layer, and silently passing is how six backend defects survived.
         return SpikeResult(
             spike_id="S17",
             name="WASM Determinism",
-            passed=True,
-            metrics={'runtimes_available': runtimes, 'note': 'Insufficient runtimes'},
-            notes="Skipped - need wasmtime, wasmer, wasm3 installed"
+            passed=False,
+            metrics={'runtimes_available': []},
+            notes="FAIL - no WASM runtime available (install the wasmtime python module); "
+                  "the emitted WASM cannot be validated"
         )
     
     # Test on golden reference
     ref = get_golden_ref('psalm119_aleph')
     wasm_text = compile_file_to_wasm(ref.source, deterministic=True)
+    wasm_text_2 = compile_file_to_wasm(ref.source, deterministic=True)
+    text_deterministic = wasm_text == wasm_text_2
+    print(f"\nWAT text deterministic across two compilations: {text_deterministic}")
     
-    print(f"\nTesting on {len(runtimes)} runtimes...")
+    print(f"Validating/executing on {len(runtimes)} runtime(s)...")
     results = {}
     for rt in runtimes:
         print(f"  Running {rt}...")
@@ -141,22 +146,38 @@ def run_spike_s17() -> SpikeResult:
         results[rt] = {'sha': sha, 'ok': ok}
         print(f"    OK: {ok}, SHA: {sha[:16]}...")
     
-    # Check all runtimes produce same output
+    # Within one runtime: the compiled artifact must be accepted (assembled + validated).
+    # Across runtimes: the identity must agree, and that comparison needs >= 2 runtimes.
+    all_ok = all(r['ok'] for r in results.values())
     shas = [r['sha'] for r in results.values() if r['ok']]
     all_identical = len(set(shas)) <= 1
+    cross_checked = len(runtimes) >= 2
+    passed = bool(text_deterministic and all_ok and (all_identical if cross_checked else True))
     
+    wasm_bytes = None
+    if all_ok:
+        try:
+            import wasmtime as _wasmtime
+            wasm_bytes = len(_wasmtime.wat2wasm(wasm_text))
+        except Exception:                                         # noqa: BLE001
+            wasm_bytes = None
     metrics = {
         'runtimes_tested': runtimes,
         'results': results,
-        'all_identical': all_identical
+        'all_identical': all_identical,
+        'text_deterministic': text_deterministic,
+        'cross_runtime_compared': cross_checked,
+        'wasm_bytes': wasm_bytes,
     }
     
+    note = (f"Runtimes: {runtimes}, assembly ok: {all_ok}, text deterministic: {text_deterministic}, "
+            f"identical: {all_identical}" + ("" if cross_checked else " (cross-runtime comparison needs >= 2 runtimes)"))
     return SpikeResult(
         spike_id="S17",
         name="WASM Determinism",
-        passed=all_identical,
+        passed=passed,
         metrics=metrics,
-        notes=f"Runtimes: {runtimes}, Identical: {all_identical}"
+        notes=note
     )
 
 
