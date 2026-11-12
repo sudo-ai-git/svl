@@ -100,7 +100,20 @@ class PackageRegistry:
                 data = json.load(f)
                 for pkg_data in data.get("packages", []):
                     metadata = PackageMetadata(**pkg_data["metadata"])
-                    attestations = [VerificationAttestation(**a) for a in pkg_data.get("attestations", [])]
+                    attestations = []
+                    for a in pkg_data.get("attestations", []):
+                        a = dict(a)
+                        # signature/public_key are persisted as hex; without decoding them the
+                        # reloaded attestation can never verify (verification silently broke
+                        # for any registry that was saved and loaded again).
+                        for field in ("signature", "public_key"):
+                            value = a.get(field)
+                            if isinstance(value, str):
+                                try:
+                                    a[field] = bytes.fromhex(value)
+                                except ValueError:
+                                    a[field] = value.encode("utf-8", "replace")
+                        attestations.append(VerificationAttestation(**a))
                     record = PackageRecord(
                         metadata=metadata,
                         attestations=attestations,
@@ -282,8 +295,23 @@ class PackageRegistry:
         if not attestation:
             return False
 
+        # If the package content is a compiled SVL artifact, require its self-attestation to
+        # check out. That is the only check that binds the verification to the actual code
+        # bytes (see svl/attest.py) rather than to a signed claim about a hash.
+        if content[:4] == b"\x00asm":
+            try:
+                from svl.attest import verify_attestation
+                attested_ok, _details = verify_attestation(content)
+            except Exception:                                      # noqa: BLE001
+                attested_ok = False
+            if not attested_ok:
+                return False
+
         try:
-            public_key = serialization.load_der_public_key(attestation.public_key)
+            # SECURITY: verify against the REGISTERED key only. This previously reassigned
+            # `public_key` from `attestation.public_key` — i.e. from the party being verified —
+            # which made the check attacker-controlled: any package could self-sign and be
+            # reported VERIFIED under a trusted verifier's name.
             public_key.verify(
                 attestation.signature,
                 f"{package_name}:{package_version}:{content_hash}".encode(),

@@ -21,9 +21,25 @@ from svl.parser_rd import (
 )
 
 
+# Builtin (host/runtime) function signatures the WASM backend actually supports. The type
+# checker must know them, otherwise every call to one infers `void` and rejects working code.
+# Keep in sync with compiler_wasm.HOST_IMPORT_SIGS plus the codegen builtins (`len`, `zeros`).
+BUILTIN_SIGNATURES = {
+    # 'handle' = a fresh type variable, for parameters that accept any runtime handle
+    # (a string or an array pointer). `len("hi")` and `len(a)` must both type-check.
+    'print':     (['handle'], 'void'),
+    'print_int': (['int'], 'void'),
+    'putc':      (['int'], 'void'),
+    'clear':     ([], 'void'),
+    'read_key':  ([], 'int'),
+    'zeros':     (['int'], 'int'),   # allocates a length-n array, returns its pointer
+    'len':       (['handle'], 'int'),  # length word of an array or string pointer
+}
+
+
 class Type:
     """Unified type representation for inference."""
-    
+
     def __init__(self, kind: str, **kwargs):
         self.kind = kind
         self.args = kwargs.get('args', [])
@@ -404,14 +420,28 @@ class TypeInferencer:
                 return self._synth_struct_lit(expr, env)
             elif node_type == NodeType.ARRAY_LIT:
                 return self._synth_array_lit(expr, env)
-            # Field access and index expressions not yet in parser
-            # elif node_type == NodeType.FIELD_ACCESS:
-            #     return self._synth_field_access(expr, env)
-            # elif node_type == NodeType.INDEX_EXPR:
-            #     return self._synth_index(expr, env)
         
         # Fallback
         return Type.prim('void')
+    
+    def _synth_field_access(self, expr: Any, env: TypeEnv) -> Type:
+        """Type of `p.field`.
+
+        Every struct field is a 4-byte i32 slot in this backend, so the result is `int`.
+        These two rules used to be commented out ("Field access and index expressions not
+        yet in parser" — stale), so any `let t: int = s.x` inferred `void` and the checker
+        reported a false type error.
+        """
+        self.synthesize(expr.left, env)          # still check the base expression
+        return Type.prim('int')
+
+    def _synth_index(self, expr: Any, env: TypeEnv) -> Type:
+        """Type of `a[i]` — the element type when known, else the backend's i32 slot."""
+        base = self.synthesize(expr.left, env)
+        self.synthesize(expr.right, env)         # still check the index expression
+        if base.kind in ('generic', 'array') and base.args:
+            return base.args[0] if isinstance(base.args[0], Type) else Type.prim('int')
+        return Type.prim('int')
     
     def _synth_literal(self, expr: Any) -> Type:
         if expr.value is None:
@@ -438,21 +468,31 @@ class TypeInferencer:
         return Type.prim('void')
     
     def _synth_binary(self, expr: Any, env: TypeEnv) -> Type:
-            left_type = self.synthesize(expr.left, env)
-            right_type = self.synthesize(expr.right, env)
+        left_type = self.synthesize(expr.left, env)
+        right_type = self.synthesize(expr.right, env)
 
-            op = expr.operator
-            if op in ('+', '-', '*', '/', '%'):
-                # Numeric operations
-                return Type.prim('int')
-            elif op in ('<<', '>>', '&', '|', '^'):
-                # Bitwise and shift operations
-                return Type.prim('int')
-            elif op in ('==', '!=', '<', '>', '<=', '>='):
-                return Type.prim('bool')
-            elif op in ('&&', '||'):
-                return Type.prim('bool')
-            return Type.prim('void')
+        op = expr.operator
+        # `a[i]` and `s.x` are parsed as BinaryExpr with operator '[]' / '.' (the parser has
+        # no INDEX_EXPR/FIELD_ACCESS node tag), so they arrive here. Without these cases they
+        # fell through to `void`, which made every `let t: int = a[j]` a false type error.
+        if op == '[]':
+            if left_type.kind in ('generic', 'array') and left_type.args:
+                first = left_type.args[0]
+                return first if isinstance(first, Type) else Type.prim('int')
+            return Type.prim('int')          # backend element slot is i32
+        if op == '.':
+            return Type.prim('int')          # every struct field is an i32 slot
+        if op in ('+', '-', '*', '/', '%'):
+            # Numeric operations
+            return Type.prim('int')
+        elif op in ('<<', '>>', '&', '|', '^'):
+            # Bitwise and shift operations
+            return Type.prim('int')
+        elif op in ('==', '!=', '<', '>', '<=', '>='):
+            return Type.prim('bool')
+        elif op in ('&&', '||'):
+            return Type.prim('bool')
+        return Type.prim('void')
 
     def _synth_unary(self, expr: Any, env: TypeEnv) -> Type:
         operand_type = self.synthesize(expr.operand, env)
@@ -612,10 +652,29 @@ class TypeChecker:
             return False, self.errors
     
     def _init_env(self):
-        """Initialize environment with primitive types."""
+        """Initialize environment with primitive types and the runtime's builtins.
+
+        Without the builtins every call inferred `void`, so the checker rejected working
+        code (`let n: int = len(a)`, `let a: int = zeros(n)`) with "void vs int" — which
+        made a strict compile-time gate unusable (it rejected this repo's own examples).
+        """
         primitives = ['int', 'float', 'bool', 'void', 'never', 'string']
         for p in primitives:
             self.env.bindings[p] = TypeScheme(vars=[], body=Type.prim(p))
+        for name, (params, ret) in BUILTIN_SIGNATURES.items():
+            type_vars: List[Any] = []
+            param_types = []
+            for p in params:
+                if p == 'handle':
+                    tv = TypeVar()
+                    type_vars.append(tv)
+                    param_types.append(tv)
+                else:
+                    param_types.append(Type.prim(p))
+            self.env.bindings[name] = TypeScheme(
+                vars=type_vars,
+                body=Type.func(param_types, Type.prim(ret)),
+            )
     
     def _check_module(self, module: Any):
         """Type check a module."""
@@ -660,10 +719,35 @@ class TypeChecker:
             try:
                 self.inferencer.unify(value_type, expected)
             except UnificationError as e:
-                self.errors.append(f"Type mismatch in let: {e}")
+                if self._handle_annotation_ok(expected, value_type):
+                    pass
+                else:
+                    self.errors.append(f"Type mismatch in let: {e}")
         
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
+
+    @staticmethod
+    def _handle_annotation_ok(expected: Any, actual: Any) -> bool:
+        """`int` may annotate an array/tuple handle.
+
+        This backend represents arrays and tuples as i32 handles (pointers), and the
+        documented style writes `let a: int = [1, 2, 3]`. The checker models an array
+        literal as `List<int>`, so without this the annotation was a false "Kind mismatch:
+        List<int> vs int" that rejected every array-using program, including this repo's
+        own examples.
+
+        Deliberately does NOT cover `string`: `let x: int = "s"` is a genuine error and must
+        keep failing (an earlier, wider version of this rule silently accepted it).
+        """
+        def is_int(t):
+            return t.kind == 'prim' and t.args and t.args[0] == 'int'
+
+        def is_array_handle(t):
+            return t.kind in ('generic', 'array', 'tuple')
+
+        return (is_int(expected) and is_array_handle(actual)) or (
+            is_array_handle(expected) and is_int(actual))
     
     def _check_if_stmt(self, stmt: Any):
         cond_type = self.inferencer.synthesize(stmt.condition, self.env)
