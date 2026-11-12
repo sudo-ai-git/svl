@@ -21,10 +21,11 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 > a *tamper/drift detector against a pinned reference*: it catches a program that **changed**, not one
 > that is **wrong**.
 >
-> **Two advertised layers carry no information and are documented as such** rather than quietly run:
+> **One advertised layer carries no information and is documented as such** rather than quietly run:
 > the BPSW "theorem" layer is constant-true (0/200 random programs fail; every residue of {17,37,73}
-> parities even), the SMT layer never encodes a constraint (`smt_verified` is always True in 0 ms), and
-> the 231-gate's PRODUCT channel is 0 for every real program. See the KB §5.3.2 for the measurements.
+> parities even). The 231-gate's PRODUCT channel is also degenerate for real programs (0 for
+> 2000/2000 random 512-byte windows). The SMT layer is **no longer hollow**: it discharges real
+> `assert`s in Z3 and reports a tri-state (`proven` / `counterexample` / `unverified`). See KB §5.3.2.
 
 ## Quick Start
 
@@ -51,6 +52,10 @@ python3 -c "from svl.compiler_wasm import compile_file_to_wasm; compile_file_to_
 
 # REPL
 python -m svl.repl
+
+# Prove (or refute) every `assert` in a program with Z3 -- opt-in, NOT on the compile path
+python3 -c "from svl.smt_theorem import verify_with_smt; r = verify_with_smt(open('examples/sieve.svl').read()); print(r.status, f'{r.assertions_proven}/{r.assertions_checked} assertions proven')"
+python3 -c "from svl.smt_theorem import verify_with_smt; print(verify_with_smt('module t { func f(a: int) type int { assert a + 1 > a return 0 } }').status)"  # proven
 
 # Interactive LSP server
 python -m svl.lsp_server
@@ -109,7 +114,8 @@ module prog {
 - **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types — **parse-level only.** The
   qualifiers are parsed and then consumed by nothing: `grep "kind == 'linear'"` outside the parser
   returns no engine, and `type_families._match_lhs` is `len(args) > 0` (it matches anything). See KB §11.
-- **Verification extensions** — SMT/Z3, incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: the SMT layer encodes no constraint, PCC embeds a self-declared boolean (and its WAT does not assemble). **One real addition here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256` — see below.
+- **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: PCC embeds a self-declared boolean (and its WAT does not assemble). **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, and the SMT layer (`svl/smt_theorem.py`) now discharges real `assert`s in Z3 — see below.
+- **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model of a program's straight-line arithmetic and discharges every `assert` by refuting its negation: `unsat` → proven, `sat` → a concrete counterexample. Measured: `assert a + 1 > a` is **proven for all `a`**; `assert a > 0` is refuted with the counterexample `a = 0`. It reports a tri-state — `proven`, `counterexample`, `unverified` (loops, `/`/`%`, arrays: modelled with the wrong semantics would be a false proof, so they are declined), and `vacuous` (no assertions). It is **opt-in**, not on the compile path: far more expensive than the interval interpreter, and answering a different question (all inputs vs. provable index bounds).
 - **A canonical program fingerprint that is harnessed** — `svl.serialization.to_canonical_binary` omits the AST's
   source-position fields, so the fingerprint is a function of the *program*: ASCII and Hebrew spellings of the
   same keywords, reformatting, blank lines and comments all give the **same** `ast_sha256` and 231-gate triple

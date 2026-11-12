@@ -494,6 +494,15 @@ essentially any well-formed program (its parity is even unless exactly one of MR
 Treat the 231-gate value as the thing you pin and compare. Do not advertise the layers as proving
 correctness.
 
+**The SMT layer is the exception to "consistency only"** (rewritten 2026-11-12). It builds a z3
+model of the program's straight-line arithmetic and discharges every `assert` by refuting its
+negation: `unsat` → proven, `sat` → a concrete counterexample. Measured: `assert a + 1 > a` is
+**proven for all `a`**; `assert a > 0` is refuted with the counterexample `a = 0`. Its result is a
+**tri-state**, not a boolean: `proven`, `counterexample`, `unverified` (loops need invariants;
+`/`/`%`/arrays are declined rather than modelled with the wrong semantics), and `vacuous` (no
+assertions). `passed` means "no counterexample found" — it does NOT mean verified; read
+`status`/`complete`. It is opt-in (`verify_with_smt`), not on the compile path.
+
 **Also note**: the layers verify the **AST**. Until 2026-11-12 compilation was covered by no layer at
 all, so a program could pass all three and still emit invalid or wrong WASM. It now IS covered:
 
@@ -584,7 +593,7 @@ that produced the artifact (and whose WAT does not assemble) — that checks not
 |---|---|
 | "231-gate = three channels" | **PRODUCT is 0 for every real program** (300/300 sampled; unchanged across 150 single-byte flips) — because `prod(b+1) mod 231` collapses once a byte hits a multiple of 3·7·11. Effective gate is 2 channels, **with a 2-byte collision**: `+3` at byte 0 and `-3` at byte 77 of the serialised AST leave all three checksums identical. |
 | "L3 theorem layer" | **Constant-true.** Parity is 0 for every residue of {17,37,73} (all residues are below 2047, the first base-2 pseudoprime): 0 failures in 200 random programs and 20 000 random blocks. |
-| "SMT/Z3 verification" | **Encodes nothing.** `_extract_arithmetic_constraints` returns `[]` for every input, including a literal false assertion → `smt_verified=True`, 0 ms. |
+| "SMT/Z3 verification" | **Was hollow; rewritten 2026-11-12.** `_extract_arithmetic_constraints` returned `[]` for every input → `smt_verified=True` in 0 ms. It now builds a real z3 model and discharges `assert`s (see §5.3.2). `passed` means no counterexample; `status` is one of `proven` / `counterexample` / `unverified` / `vacuous`. |
 | "Proof-carrying code" | Embeds a self-declared boolean; the emitted WAT does not assemble. Use `svl/attest.py` instead. |
 | "Self-hosting, 3-stage bootstrap" | `compiler_svl.svl` is a 540-byte stub (`assert true`); it compiles nothing. |
 | "Six compiler optimizations wired" | Only SIMD is referenced by `compiler_wasm.py` — and it currently breaks the shape it targets (`unknown local $sum`). |

@@ -157,8 +157,19 @@ class TheoremLayer:
                     smt_verified = smt_result.passed
                     smt_logic = smt_result.logic.value
                     smt_solver_time_ms = smt_result.solver_time_ms
-                    
-                    if not smt_verified and smt_result.error_message:
+
+                    # `passed` means "no counterexample found", NOT "verified".  Say so:
+                    # an unverified result must be visible as a warning rather than silently
+                    # riding along as a green tick.
+                    if smt_result.status == 'unverified':
+                        warnings.append(
+                            "SMT verification is NOT a proof "
+                            f"(status=unverified): {smt_result.error_message or 'not modelled'}")
+                    elif smt_result.status == 'vacuous':
+                        warnings.append(
+                            "SMT verification discharged nothing (the program has no "
+                            "assertions); this is not a proof")
+                    elif not smt_verified and smt_result.error_message:
                         warnings.append(f"SMT verification: {smt_result.error_message}")
                         
                 except Exception as e:
