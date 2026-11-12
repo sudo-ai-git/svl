@@ -11,7 +11,7 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 ## Quick Start
 
 ```bash
-# Full spike suite (48/50 passing, 2026-11-11)
+# Full spike suite (48/50 — the 2 failures are H36/H37, genuinely unimplemented)
 python -m svl.spike_runner
 
 # REPL
@@ -24,7 +24,12 @@ python -m svl.lsp_server
 ## Features
 
 - **22 tokens** mapped to the Hebrew alphabet (+ ASCII aliases)
-- **Deterministic compilation** — bit-identical WASM output across runs
+- **Deterministic compilation** — bit-identical WASM output across runs, with no `PYTHONHASHSEED`
+  pinning required (every value that feeds a checksum, a serialised AST or a program hash is a fixed
+  function of its input)
+- **A WASM backend that actually executes** — `while` (incl. nested), `for i in a..b`, `if`/`else`,
+  `if…then…else` *expressions*, top-level `const`/`var`, `assert`, `print`/`print_int` compile, assemble
+  under wasmtime and run (`svl/compiler_wasm.py`)
 - **Self-hosting compiler** — bootstraps in 3 stages
 - **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types
 - **Verification extensions** — SMT/Z3, incremental 231-gate checksums, proof-carrying code, abstract interpretation, differential verification, property-based testing
@@ -47,6 +52,12 @@ examples/               # Example SVL programs
 2. `python -m svl.spike_s10_self_verify` — 3-stage bootstrap bit-identical + mutations detected
 3. `python -m svl.spike_runner` — no spike regressions (48/50, H36/H37 unimplemented)
 4. Golden refs: `python -c "from svl.golden_refs import verify_all_golden_refs; print(verify_all_golden_refs())"`
+5. `python -m svl.spike_s17_wasm_determinism` — **assembles** the compiler's output with the wasmtime
+   module. A skipped/absent runtime reports FAIL, not success, and a text-level "determinism" check cannot
+   see invalid WAT — which is how a backend that produced unassemblable WASM once looked green.
+6. Assembling is not enough: the emitted module must **run**. Expected values for a quick probe —
+   `while i<=5 { s+=i; i+=1 }` → 15; `for i in 0..5 { s+=i }` → 10; `let r = if c then 10 else 20` with
+   `c=0` → 20; `assert x==5` with `x=5` → no trap (and it must trap when the condition is false).
 
 ## License
 

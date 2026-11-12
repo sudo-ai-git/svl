@@ -353,8 +353,39 @@ verify_wasm_determinism(source, runs=5)  # Returns True/False
 
 **Output**: WASM text format (`.wat`) with:
 - Linear memory (1 page = 64KB)
-- Function imports: `env.print`, `env.malloc`, `env.await`
-- Deterministic output (fixed `PYTHONHASHSEED=0`, ordered maps)
+- Function imports — emitted **only when the module actually calls them** (an unused import still has to be
+  supplied by the host, so emitting them unconditionally would force every host to stub functions it never
+  uses): `env.print(i32,i32)`, `env.print_int(i32)`, `env.malloc(i32)->i32`,
+  `env.iterator_next(i32)->i32`, `env.await(i32)->i32`
+- Deterministic output with **no `PYTHONHASHSEED` pinning needed** (fixed function of the input)
+- Export name `<module>_main`
+
+### 5.3.1 What the WASM backend actually executes
+
+"Compiles to WASM" means **wasmtime accepted and ran it**. Text-level checks cannot see invalid WAT or a
+mis-executing loop, so verify by assembling (`wasmtime.wat2wasm` then `wasmtime.Module` — the `Module` is
+what validates) and invoking the export.
+
+Verified to assemble **and run** (2026-11-12):
+
+| Feature | Probe | Result |
+|---|---|---|
+| `while` (incl. nested) | `while i<=5 { s+=i; i+=1 }` | 15 |
+| `for` over a range | `for i in 0..5 { s+=i }` | 10 |
+| `if…then…else` **expression** | `let r = if c then 10 else 20` with `c=0` | 20 |
+| top-level `const`/`var` | `const one=1 const seven=7  return one+seven` | 8 |
+| `assert` | `assert x==5` with `x=5` | no trap — and it **must** trap when false |
+| `print` / `print_int` | `print("hi")` | assembles + calls the host |
+| early `return` from inside `if`/`while` | — | runs cleanly |
+
+Also working: `void` returns, helper calls, `+ - * %` on i32.
+
+**Not** in the executable subset (parse-level only, or unimplemented): closures/`lambda`, `match`
+expressions, struct/array literals + field/index access on real layout, `try`/`catch`, `async`/`await`,
+SIMD emission for general loops, GC structs, generics at runtime.
+
+**Pitfall — `%` is WASM's truncated remainder (sign of the dividend), not Python's floor modulo.**
+`(-1) % 256` is `-1`, not `255`. Write arithmetic that keeps the operand non-negative.
 
 ### 5.4 Package Manager
 
@@ -537,7 +568,8 @@ func main() type void {
 | `Forbidden function 'sum()'` | Used `sum()` instead of `neumaier_sum()` | Replace with `neumaier_sum()` |
 | `Type checking error` | Type mismatch | Add explicit type annotations |
 | `Theorem verification failed` | Probabilistic - BPSM parity odd | Expected for most programs; Genesis 1:1 is special |
-| `WASM compilation not deterministic` | Non-deterministic compilation | Ensure `PYTHONHASHSEED=0`, ordered maps |
+| `WASM compilation not deterministic` | A process-salted value leaked into a hashed path | Not expected any more — struct buckets use `sha256(name) % 5`, not `hash()`. Do **not** paper over this with `PYTHONHASHSEED=0`: find the salted input |
+| `unknown local: failed to find name $x` | A reference to a name that is not a param/local/const | Fix the name (or declare it); the compiler raises a clear `Unknown identifier` error for this case |
 
 ### Debugging Tips
 

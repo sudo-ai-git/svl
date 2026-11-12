@@ -167,6 +167,7 @@ class TokenType(Enum):
 
 
 # Hebrew token mapping (22 standard letters, no final forms)
+# Code points MUST be the regular (non-final) forms: ן/ץ/ך/ם/ף are NOT tokens.
 HEBREW_TOKENS = {
     '\u05D0': TokenType.LET,      # א
     '\u05D1': TokenType.IF,       # ב
@@ -181,13 +182,13 @@ HEBREW_TOKENS = {
     '\u05DB': TokenType.STRUCT,   # כ
     '\u05DC': TokenType.MODULE,   # ל
     '\u05DE': TokenType.IMPORT,   # מ
-    '\u05DF': TokenType.EXPORT,   # נ
+    '\u05E0': TokenType.EXPORT,   # נ
     '\u05E1': TokenType.CONST,    # ס
     '\u05E2': TokenType.VAR,      # ע
     '\u05E4': TokenType.ASSERT,   # פ
-    '\u05E5': TokenType.TRY,      # צ
-    '\u05E6': TokenType.CATCH,    # ק
-    '\u05E7': TokenType.THROW,    # ר
+    '\u05E6': TokenType.TRY,      # צ
+    '\u05E7': TokenType.CATCH,    # ק
+    '\u05E8': TokenType.THROW,    # ר
     '\u05E9': TokenType.ASYNC,    # ש
     '\u05EA': TokenType.AWAIT,    # ת
 }
@@ -469,10 +470,6 @@ class Lexer:
             self._emit(TokenType.ASSIGN_OR, '|=', 2, start_pos, start_line, start_col)
         elif two_char == '^=':
             self._emit(TokenType.ASSIGN_XOR, '^=', 2, start_pos, start_line, start_col)
-        elif two_char == '<<':
-            self._emit(TokenType.SHIFT_LEFT, '<<', 2, start_pos, start_line, start_col)
-        elif two_char == '>>':
-            self._emit(TokenType.SHIFT_RIGHT, '>>', 2, start_pos, start_line, start_col)
         elif two_char == '..':
             self._emit(TokenType.RANGE, '..', 2, start_pos, start_line, start_col)
         # Single char

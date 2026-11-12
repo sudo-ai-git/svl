@@ -9,9 +9,9 @@ import hashlib
 
 from svl.parser_rd import (
     Program, Module, FuncDecl, StructDecl, Block, LetStmt, IfStmt, WhileStmt,
-    ForStmt, ReturnStmt, AssertStmt, TryStmt, ExprStmt,
+    ForStmt, ReturnStmt, AssertStmt, TryStmt, ExprStmt, ConstDecl, VarDecl,
     BinaryExpr, UnaryExpr, CallExpr, MatchExpr, AwaitExpr, LambdaExpr,
-    StructLit, ArrayLit, Ident, Literal, FieldAccess, IndexExpr,
+    StructLit, ArrayLit, Ident, Literal, FieldAccess, IndexExpr, TernaryExpr,
     TypeExpr, Param, Field, NodeType
 )
 from svl.serialization import to_binary
@@ -127,70 +127,24 @@ class WasmArrayType:
     mutable: bool = False
 
 
-# ============================================================================
-# TYPE LOWERING: Mod-5 Types → WASM ValTypes
-# ============================================================================
-
 from typing import Union
-
-def lower_type_to_wasm(type_expr: TypeExpr) -> WasmValType:
-    """Lower SVL type expression to WASM valtype."""
-    if type_expr.kind == 'prim':
-        prim_map = {
-            'int': WasmValType.I32,
-            'float': WasmValType.F64,
-            'bool': WasmValType.I32,
-            'string': WasmValType.I32,  # pointer to string in linear memory
-            'void': WasmValType.I32,    # dummy
-            'never': WasmValType.I32,   # unreachable
-        }
-        return prim_map.get(type_expr.value, WasmValType.I32)
-    elif type_expr.kind in ('struct', 'generic'):
-        return WasmValType.I32  # pointer to heap object
-    elif type_expr.kind == 'func':
-        return WasmValType.FUNCREF
-    elif type_expr.kind == 'tuple':
-        return WasmValType.I32  # pointer to tuple struct
-    elif type_expr.kind == 'array':
-        return WasmValType.I32  # pointer to array
-    return WasmValType.I32
 
 
 def lower_func_type(params: List[TypeExpr], return_type: TypeExpr) -> WasmFuncType:
-    """Lower function type to WASM function type."""
+    """Lower function type to WASM function type.
+
+    `void` (and `never`) produce NO results. Emitting a dummy i32 result for `void`
+    made every void function invalid: its body leaves nothing on the stack, so the
+    module failed validation ("type mismatch: expected i32 but nothing on stack").
+    """
+    results = []
+    if not (getattr(return_type, 'kind', None) == 'prim'
+            and getattr(return_type, 'value', None) in ('void', 'never')):
+        results.append(lower_type_to_wasm(return_type))
     return WasmFuncType(
         params=[lower_type_to_wasm(p) for p in params],
-        results=[lower_type_to_wasm(return_type)]
+        results=results
     )
-
-
-# WASM GC Proposal Support (H25)
-# Support for struct and array types in WASM GC
-
-class WasmGCType(Enum):
-    """WASM GC types."""
-    STRUCT = "struct"
-    ARRAY = "array"
-    I31 = "i31"  # 31-bit integer for small integers
-    EXTERNREF = "externref"
-    ANYREF = "anyref"
-    EQREF = "eqref"
-    STRUCTREF = "structref"
-    ARRAYREF = "arrayref"
-
-
-@dataclass
-class WasmStructType:
-    """WASM GC struct type."""
-    fields: List[Tuple[str, WasmValType]]  # (name, type)
-    is_final: bool = False  # Whether struct can be subtyped
-
-
-@dataclass
-class WasmArrayType:
-    """WASM GC array type."""
-    element_type: WasmValType
-    mutable: bool = False
 
 
 def lower_type_to_wasm_gc(type_expr: TypeExpr) -> Union[WasmValType, WasmStructType, WasmArrayType]:
@@ -289,9 +243,15 @@ class WasmCompiler:
     def __init__(self, deterministic: bool = True):
         self.deterministic = deterministic
         self.state = CompilerState()
+        # Top-level const/var names whose initializer is not a constant expression
+        # (the WASM MVP cannot lower those).
+        self._non_const_globals = set()
+        # Names resolvable as `local.get $name` in the function being compiled.
+        self._known_locals = None
     
     def compile(self, program: Program) -> str:
         """Compile full SVL program to WASM text format."""
+        self._non_const_globals = set()
         # Phase 1: Collect all declarations
         self._collect_declarations(program)
         
@@ -323,6 +283,19 @@ class WasmCompiler:
                         self.state.simd_loop_info[func_name] = loop
                         break
     
+    def _literal_init_expr(self, expr) -> Optional[str]:
+        """Return a WASM constant expression for a literal initializer, else None."""
+        if isinstance(expr, Literal):
+            if expr.literal_type in ('int', 'bool'):
+                return f'i32.const {int(expr.value)}'
+            if expr.literal_type == 'float':
+                return f'f64.const {float(expr.value)}'
+        if isinstance(expr, UnaryExpr) and expr.operator == '-':
+            inner = self._literal_init_expr(expr.operand)
+            if inner and inner.startswith('i32.const '):
+                return f'i32.const {-int(inner[len("i32.const "):])}'
+        return None
+
     def _collect_declarations(self, program: Program):
         """Collect all modules, functions, structs, globals."""
         for module in program.modules:
@@ -348,6 +321,23 @@ class WasmCompiler:
                 elif isinstance(item, StructDecl):
                     if item.name not in self.state.sorted_structs:
                         self.state.sorted_structs.append(item.name)
+                elif isinstance(item, (ConstDecl, VarDecl)):
+                    # Top-level const/var → a WASM global. Dropping these silently (the
+                    # old behaviour) made every reference emit `local.get $name` and the
+                    # whole module fail validation with "unknown local".
+                    init = self._literal_init_expr(item.value)
+                    if init is None:
+                        self._non_const_globals.add(item.name)
+                        continue
+                    val_type = (lower_type_to_wasm(item.type_ann)
+                                if item.type_ann is not None else WasmValType.I32)
+                    self.state.globals[item.name] = WasmGlobal(
+                        name=item.name,
+                        val_type=val_type,
+                        mutability=(WasmMutability.CONST if isinstance(item, ConstDecl)
+                                    else WasmMutability.VAR),
+                        init_expr=init,
+                    )
         
         # Sort for determinism
         if self.deterministic:
@@ -382,6 +372,10 @@ class WasmCompiler:
                     self.state.current_function = func
                     self.state.local_counter = len(func.params)
                     self.state.label_counter = 0
+                    # Names resolvable as `local.get $name` for this function.
+                    self._known_locals = self._collect_local_names(item.body) | {
+                        n for n, _t in func.params
+                    }
                     
                     # Compile function body
                     self._compile_block(item.body, is_function_body=True)
@@ -401,6 +395,35 @@ class WasmCompiler:
                     func.body.append('drop')  # Drop any leftover value
                 func.body.append('return')
     
+    def _collect_local_names(self, block) -> set:
+        """Collect every local name bound in a function body (params excluded).
+
+        Used by `_compile_ident` to turn a reference to a name that was never declared
+        into a clear compile error instead of `local.get $name` and an "unknown local"
+        assembly failure downstream.
+        """
+        names = set()
+
+        def walk_block(b):
+            if b is None:
+                return
+            for s in getattr(b, 'statements', []):
+                if isinstance(s, LetStmt):
+                    names.add(s.name)
+                elif isinstance(s, IfStmt):
+                    walk_block(s.then_branch)
+                    walk_block(s.else_branch)
+                elif isinstance(s, WhileStmt):
+                    walk_block(s.body)
+                elif isinstance(s, ForStmt):
+                    names.add(s.var)
+                    walk_block(s.body)
+                elif isinstance(s, Block):
+                    walk_block(s)
+
+        walk_block(block)
+        return names
+
     def _compile_stmt(self, stmt):
         """Compile a statement."""
         if isinstance(stmt, LetStmt):
@@ -419,10 +442,28 @@ class WasmCompiler:
             self._compile_try_stmt(stmt)
         elif isinstance(stmt, ExprStmt):
             self._compile_expr(stmt.expression)
-            # Drop result if not used
-            self.state.current_function.body.append('drop')
+            # Drop the leftover value ONLY when the expression actually produces one:
+            # `drop` on an empty stack makes the module invalid, and void calls
+            # (print / print_int / void functions) leave nothing behind.
+            if self._expr_yields_value(stmt.expression):
+                self.state.current_function.body.append('drop')
         elif isinstance(stmt, Block):
             self._compile_block(stmt)
+
+    def _expr_yields_value(self, expr) -> bool:
+        """True if evaluating `expr` leaves exactly one value (i32) on the stack."""
+        if isinstance(expr, CallExpr):
+            return self._callee_yields_value(expr.callee)
+        return True
+
+    def _callee_yields_value(self, name: str) -> bool:
+        """True if calling `name` produces a result value."""
+        if name in ('print', 'print_int'):
+            return False                      # void host imports
+        for fn_name, fn in self.state.functions.items():
+            if fn_name == name or fn_name.endswith(f'${name}'):
+                return bool(fn.func_type.results)
+        return True                           # malloc / iterator_next / await → value
     
     def _compile_let_stmt(self, stmt: LetStmt):
         """Compile let binding."""
@@ -465,8 +506,11 @@ class WasmCompiler:
         func.body.append(f'loop {label_start}')
         func.body.append(f'block {label_end}')
         
-        # Condition
+        # Condition — `br_if` branches on NON-ZERO, so the test must be inverted:
+        # branching on the raw condition exits the loop the moment it becomes TRUE,
+        # which made every `while` body execute zero times.
         self._compile_expr(stmt.condition)
+        func.body.append('i32.eqz')
         func.body.append(f'br_if {label_end}')
         
         # Body
@@ -477,7 +521,7 @@ class WasmCompiler:
         func.body.append('end')
     
     def _compile_for_stmt(self, stmt: ForStmt):
-        """Compile for loop (for x in iterable)."""
+        """Compile for loop."""
         func = self.state.current_function
         
         # Check if this function has a vectorizable loop
@@ -492,12 +536,19 @@ class WasmCompiler:
             self._compile_vectorized_for_loop(stmt, simd_loop)
             return
         
-        # Simplified: compile as while loop with iterator
-        iter_local = f"$iter_{self.state.label_counter}"
+        # Range loops (`for i in start..end`) have well-defined counting semantics;
+        # lower them directly instead of routing through the partial iterator protocol.
+        if self._is_range_loop(stmt):
+            self._compile_range_for_stmt(stmt, stmt.iter_expr.left, stmt.iter_expr.right)
+            return
+        
+        # Iterator protocol. `iterator_next` returns the next handle/element and 0 once
+        # the stream is exhausted, so the loop must exit when the value is 0.
+        iter_local = f"iter_{self.state.label_counter}"
         self.state.label_counter += 1
         self._compile_expr(stmt.iter_expr)
         func.locals.append((iter_local, WasmValType.I32))
-        func.body.append(f'local.set {iter_local}')
+        func.body.append(f'local.set ${iter_local}')
         
         label_start = f"$for_{self.state.label_counter}"
         label_end = f"$for_end_{self.state.label_counter}"
@@ -506,21 +557,63 @@ class WasmCompiler:
         func.body.append(f'loop {label_start}')
         func.body.append(f'block {label_end}')
         
-        # Check iterator has next (simplified - just check not null)
-        func.body.append(f'local.get {iter_local}')
-        func.body.append(f'i32.const 0')
-        func.body.append(f'i32.ne')
+        # Advance the iterator; 0 means exhausted → leave the loop (branch on false).
+        func.body.append(f'local.get ${iter_local}')
+        func.body.append(f'call $iterator_next')
+        func.body.append(f'local.set ${iter_local}')
+        func.body.append(f'local.get ${iter_local}')
+        func.body.append(f'i32.eqz')
         func.body.append(f'br_if {label_end}')
         
-        # Get next element and bind to loop variable
-        func.body.append(f'local.get {iter_local}')
-        # Simplified: assume iterator has 'next' method
-        func.body.append(f'call $iterator_next')
+        # Bind the current element to the loop variable
         func.locals.append((stmt.var, WasmValType.I32))
-        func.body.append(f'local.set {stmt.var}')
+        func.body.append(f'local.get ${iter_local}')
+        func.body.append(f'local.set ${stmt.var}')
         
         # Body
         self._compile_block(stmt.body)
+        
+        func.body.append(f'br {label_start}')
+        func.body.append('end')
+        func.body.append('end')
+    
+    def _compile_range_for_stmt(self, stmt: ForStmt, start_expr, end_expr):
+        """Lower `for <var> in <start>..<end>` to a counting loop over [start, end)."""
+        func = self.state.current_function
+        
+        # var = start
+        func.locals.append((stmt.var, WasmValType.I32))
+        self._compile_expr(start_expr)
+        func.body.append(f'local.set ${stmt.var}')
+        
+        # range_end = end  (evaluated ONCE, before the loop)
+        end_local = f"range_end_{self.state.label_counter}"
+        self.state.label_counter += 1
+        self._compile_expr(end_expr)
+        func.locals.append((end_local, WasmValType.I32))
+        func.body.append(f'local.set ${end_local}')
+        
+        label_start = f"$for_{self.state.label_counter}"
+        label_end = f"$for_end_{self.state.label_counter}"
+        self.state.label_counter += 1
+        
+        func.body.append(f'loop {label_start}')
+        func.body.append(f'block {label_end}')
+        
+        # Exit when index >= end (branch on non-zero = condition true).
+        func.body.append(f'local.get ${stmt.var}')
+        func.body.append(f'local.get ${end_local}')
+        func.body.append('i32.ge_s')
+        func.body.append(f'br_if {label_end}')
+        
+        # Body
+        self._compile_block(stmt.body)
+        
+        # var += 1
+        func.body.append(f'local.get ${stmt.var}')
+        func.body.append('i32.const 1')
+        func.body.append('i32.add')
+        func.body.append(f'local.set ${stmt.var}')
         
         func.body.append(f'br {label_start}')
         func.body.append('end')
@@ -565,10 +658,10 @@ class WasmCompiler:
         func.body.append(f'loop {label_start}')
         func.body.append(f'block {label_end}')
         
-        # Loop condition: index < end
+        # Loop condition: exit when index >= end (`br_if` branches on non-zero).
         func.body.append(f'local.get ${var_name}')
         func.body.append(f'local.get ${end_local}')
-        func.body.append(f'i32.lt_s')
+        func.body.append(f'i32.ge_s')
         func.body.append(f'br_if {label_end}')
         
         # Process array accesses with SIMD loads
@@ -687,7 +780,9 @@ class WasmCompiler:
         """Compile assert statement."""
         func = self.state.current_function
         self._compile_expr(stmt.condition)
-        # If false, trap (unreachable)
+        # Trap when the assertion FAILS: invert the condition before the branch.
+        # (Branching on the raw condition trapped exactly when the assert was satisfied.)
+        func.body.append('i32.eqz')
         func.body.append('if')
         func.body.append('unreachable')
         func.body.append('end')
@@ -732,6 +827,22 @@ class WasmCompiler:
             self._compile_field_access(expr)
         elif isinstance(expr, IndexExpr):
             self._compile_index_expr(expr)
+        elif isinstance(expr, TernaryExpr):
+            self._compile_ternary_expr(expr)
+    
+    def _compile_ternary_expr(self, expr: TernaryExpr):
+        """Compile `if c then a else b` / `c ? a : b` to a WASM value-producing `if`.
+
+        The backend is i32-centric (int → i32), so the arms are typed `i32` here; a
+        f64/i64 arm would need the result type threaded through from the type layer.
+        """
+        func = self.state.current_function
+        self._compile_expr(expr.condition)
+        func.body.append('if (result i32)')
+        self._compile_expr(expr.then_expr)
+        func.body.append('else')
+        self._compile_expr(expr.else_expr)
+        func.body.append('end')
     
     def _compile_binary_expr(self, expr: BinaryExpr):
         self._compile_expr(expr.left)
@@ -757,10 +868,35 @@ class WasmCompiler:
             func.body.append('i32.eqz')
     
     def _compile_call_expr(self, expr: CallExpr):
+        callee = self._resolve_callee(expr.callee)
+        # `print` is a host import taking (ptr: i32, len: i32). A lone string-literal
+        # argument is therefore expanded into its (ptr, len) pair — pushing only the
+        # pointer left the call one operand short and the module failed to validate.
+        if expr.callee == 'print' and len(expr.arguments) == 1:
+            arg = expr.arguments[0]
+            if isinstance(arg, Literal) and arg.literal_type == 'string':
+                func = self.state.current_function
+                self._compile_expr(arg)                                   # -> ptr
+                func.body.append(f'i32.const {len(arg.value.encode("utf-8"))}')  # -> len
+                func.body.append(f'call {callee}')
+                return
         for arg in expr.arguments:
             self._compile_expr(arg)
         func = self.state.current_function
-        func.body.append(f'call ${expr.callee}')
+        func.body.append(f'call {callee}')
+
+    def _resolve_callee(self, callee: str) -> str:
+        """
+        A CallExpr carries the bare name (`fib`) while definitions are keyed by the
+        module-qualified name (`svl_payload$fib`) — emit the qualified one, and fall back
+        to the bare name for host imports (print / malloc / iterator_next / await).
+        """
+        if callee in self.state.functions:
+            return f'${callee}'
+        for name in self.state.sorted_functions:
+            if name == callee or name.endswith(f'${callee}'):
+                return f'${name}'
+        return f'${callee}'
     
     def _compile_match_expr(self, expr: MatchExpr):
         # Simplified: compile as if-else chain
@@ -837,6 +973,21 @@ class WasmCompiler:
     
     def _compile_ident(self, expr: Ident):
         func = self.state.current_function
+        # A top-level const/var is a WASM global.
+        if expr.name in self.state.globals:
+            func.body.append(f'global.get ${expr.name}')
+            return
+        if expr.name in self._non_const_globals:
+            raise SyntaxError(
+                f"const/var '{expr.name}' has a non-constant initializer, which the WASM "
+                f"backend cannot lower (line {getattr(expr, 'line', '?')})"
+            )
+        known = getattr(self, '_known_locals', None)
+        if known is not None and expr.name not in known:
+            raise SyntaxError(
+                f"Unknown identifier '{expr.name}' at line {getattr(expr, 'line', '?')} "
+                f"— not a parameter, a declared local, or a const"
+            )
         func.body.append(f'local.get ${expr.name}')
     
     def _compile_literal(self, expr: Literal):
@@ -899,40 +1050,24 @@ class WasmCompiler:
         
         lines.append('(module')
         
-        # Memory
-        lines.append(f'  (memory (export "memory") {self.state.memory_pages})')
+        # Module fields must appear in the canonical WAT order:
+        #   type, import, func, memory, global, export, data
+        # The memory and data blocks are emitted further down, after the imports and the
+        # function bodies, because a memory declared before an import makes the module
+        # invalid ("import after memory").
         
-        # Data section for string literals
-        if self.state.string_data:
-            lines.append('  (data')
-            for string_val, offset in self.state.string_data:
-                # Length-prefixed UTF-8
-                encoded = string_val.encode('utf-8')
-                length = len(encoded)
-                # Write length as 4-byte little-endian
-                length_bytes = length.to_bytes(4, 'little')
-                data = length_bytes + encoded
-                hex_data = ' '.join(f'{b:02x}' for b in data)
-                lines.append(f'    (i32.const {offset})')
-                lines.append(f'    "{hex_data}"')
-            lines.append('  )')
-        
-        # Function types
+        # Function types — one declaration per distinct signature (a second `(type $tN ...)`
+        # with the same identifier is rejected as a duplicate).
         type_map = {}
         for func_name in self.state.sorted_functions:
             func = self.state.functions[func_name]
             type_sig = self._func_type_to_string(func.func_type)
-            if type_sig not in type_map:
-                type_map[type_sig] = len(type_map)
+            if type_sig in type_map:
+                continue
+            type_map[type_sig] = len(type_map)
             lines.append(f'  (type $t{type_map[type_sig]} (func {type_sig}))')
         
-        # Imports
-        lines.append('  (import "env" "print" (func $print (param i32 i32)))')
-        lines.append('  (import "env" "malloc" (func $malloc (param i32) (result i32)))')
-        lines.append('  (import "env" "iterator_next" (func $iterator_next (param i32) (result i32)))')
-        lines.append('  (import "env" "await" (func $await (param i32) (result i32)))')
-        
-        # GC Struct types (H25)
+        # GC Struct types (H25) — `type` fields come before imports.
         for struct_name in self.state.sorted_structs:
             layout = self.state.struct_layouts.get(struct_name, {})
             if layout:
@@ -942,14 +1077,42 @@ class WasmCompiler:
                 if fields:
                     lines.append(f"  (type ${struct_name} (struct\n{chr(10).join(fields)}\n))")
         
-        # Globals
-        for name, global_def in self.state.globals.items():
-            lines.append(f'  (global ${name} ({global_def.val_type.value}) ({global_def.mutability.value} {global_def.init_expr}))')
+        # Imports — emit ONLY the host functions the module actually calls. An unused
+        # import is still an import: the host must supply it or instantiation fails, so
+        # adding one unconditionally breaks every existing host.
+        host_sigs = {
+            'print': '(func $print (param i32 i32))',
+            'print_int': '(func $print_int (param i32))',
+            'malloc': '(func $malloc (param i32) (result i32))',
+            'iterator_next': '(func $iterator_next (param i32) (result i32))',
+            'await': '(func $await (param i32) (result i32))',
+        }
+        called_hosts = set()
+        for func_name in self.state.sorted_functions:
+            for instr in self.state.functions[func_name].body:
+                if instr.startswith('call $'):
+                    called_hosts.add(instr[len('call $'):])
+        for host_name, host_sig in host_sigs.items():
+            if host_name in called_hosts:
+                lines.append(f'  (import "env" "{host_name}" {host_sig})')
         
-        # Functions
+        # Functions (function definitions come before memory in the canonical field order)
         for func_name in self.state.sorted_functions:
             func = self.state.functions[func_name]
             lines.append(self._generate_wasm_function(func, type_map))
+        
+        # Memory (declared after imports and functions; exported separately below)
+        lines.append(f'  (memory {self.state.memory_pages})')
+        
+        # Globals — canonical WAT: `(global $n <type> (<init>))` when immutable,
+        # `(global $n (mut <type>) (<init>))` when mutable. The old form wrapped the type
+        # as `(i32)` and spelled the initializer `(const i32.const N)`, both invalid.
+        for name, global_def in self.state.globals.items():
+            init = f'({global_def.init_expr})'
+            if global_def.mutability == WasmMutability.VAR:
+                lines.append(f'  (global ${name} (mut {global_def.val_type.value}) {init})')
+            else:
+                lines.append(f'  (global ${name} {global_def.val_type.value} {init})')
         
         # Exports
         for func_name in self.state.sorted_functions:
@@ -960,6 +1123,15 @@ class WasmCompiler:
         
         # Memory export
         lines.append('  (export "memory" (memory 0))')
+        
+        # Data section for string literals: ONE `(data ...)` per literal — a data segment
+        # carries exactly one offset+bytes pair, so stacking pairs inside a single
+        # `(data ...)` emits invalid WAT as soon as a program has two string literals.
+        for string_val, offset in self.state.string_data:
+            encoded = string_val.encode('utf-8')
+            length_bytes = len(encoded).to_bytes(4, 'little')
+            hex_data = ' '.join(f'{b:02x}' for b in (length_bytes + encoded))
+            lines.append(f'  (data (i32.const {offset}) "{hex_data}")')
         
         lines.append(')')
         return '\n'.join(lines)
@@ -976,18 +1148,32 @@ class WasmCompiler:
         type_sig = self._func_type_to_string(func.func_type)
         type_idx = type_map[type_sig]
         
-        lines.append(f'  (func ${func.name} (type $t{type_idx})')
+        # Named parameters must be declared inline: function bodies address them as
+        # `local.get $name`, which only resolves if the header carries `(param $name <t>)`.
+        # An inline signature must also repeat the results, otherwise the function is
+        # declared with no results and no longer matches its type reference.
+        param_sig = ' '.join(f'(param ${n} {t.value})' for n, t in func.params)
+        res_sig = ' '.join(t.value for t in func.func_type.results)
+        header = f'  (func ${func.name} (type $t{type_idx})'
+        if param_sig:
+            header += f' {param_sig}'
+        if res_sig:
+            header += f' (result {res_sig})'
+        lines.append(header)
         
-        # Locals
+        # Locals — one declaration per NAME.
+        # `let x = ...` appends a fresh entry per occurrence, but every access is emitted as
+        # `local.get/set $x`, so grouping duplicates into `(local $x $x i32)` emits invalid
+        # WAT (duplicate identifier). Deduplicate by name, keeping the first type seen.
         if func.locals:
-            local_decls = {}
+            param_names = {n for n, _t in func.params}
+            seen_locals = {}
             for name, val_type in func.locals:
-                if val_type not in local_decls:
-                    local_decls[val_type] = []
-                local_decls[val_type].append(name)
-            
-            for val_type, names in local_decls.items():
-                lines.append(f'    (local {" ".join(f"${n}" for n in names)} {val_type.value})')
+                if name in param_names:
+                    continue                     # a param and a local cannot share a name
+                seen_locals.setdefault(name, val_type)
+            for name, val_type in seen_locals.items():
+                lines.append(f'    (local ${name} {val_type.value})')
         
         # Body
         for instr in func.body:
