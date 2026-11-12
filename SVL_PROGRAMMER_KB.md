@@ -458,7 +458,8 @@ all, so a program could pass all three and still emit invalid or wrong WASM. It 
 ### 5.3.3 The compile-time gate and self-attestation (added 2026-11-12)
 
 **`svl/verify_gate.py`** — `compile_file_to_wasm(source, strict=True)` now runs a gate and **refuses to
-compile** on failure: the AST guard plus the type checker. `strict=False` bypasses it.
+compile** on failure: the AST guard, the type checker, and the interval abstract interpreter (H21 —
+provable out-of-bounds index / zero divisor). `strict=False` bypasses it.
 
 What the gate deliberately excludes, and why:
 - **231-gate / viable-start**: an artifact-integrity check over serialised bytes, not a correctness
@@ -482,6 +483,37 @@ AST hash. `verify_attestation(binary)` reads the section, strips every custom se
 was handed, re-hashes and compares — so any change to the code (or to any non-custom section) fails.
 Try it: `python3 examples/attest.py examples/sieve.svl` then `--verify`.
 
+**The fingerprint is canonical, and that was a real fix.** `svl.serialization.to_binary` writes every
+dataclass field including `line`, `column` and `offset`, so the "AST hash" was a *layout* hash: the same
+function reformatted gave a different sha256 **and a different 231-gate triple** (measured `[38,170,0]`
+vs `[210,108,0]`), and the Hebrew and ASCII spellings of the same keywords differed too. That made it
+useless as a reproducible-build cache key. `svl.serialization.to_canonical_binary(ast)` omits the
+position fields, and `svl.attest.ast_fingerprint(source)` exposes the result:
+`{ast_sha256, gate231, source_sha256, ast_bytes}`. Measured: ASCII, Hebrew, re-indented, blank-line and
+commented variants of one program all give the **same** `ast_sha256` and `gate231`; `to_binary` gave five
+different values. Canonical bytes are one-way (the deserializer is a stub — see §5.3.4).
+
+**Artifact path vs raw compile.** `compile_file_to_wasm(source, attest=True)` returns WAT carrying the
+section; `svl.attest.compile_attested(source)` returns `(wat_with_section, binary, payload)` and is what
+`examples/attest.py` uses. The default stays `attest=False` so a raw compile remains byte-identical — the
+minted spike-102 payload pins the sha256 of its `.wasm`, and flipping the default would invalidate it.
+
+**Custom sections are stripped by design**, so editing one is not a code change and is not flagged (the
+assembler's own `name` section is a custom section too). The `svl.attest` section's *claimed* hash is
+inside a custom section, but tampering with it makes the claim disagree with the recomputed hash, which
+fails verification.
+
+**Registry (`svl/package_registry.py`)** — `publish_package` no longer marks everything `VERIFIED`. A
+compiled SVL artifact is `VERIFIED` only when its own `svl.attest` section checks out; any other content is
+still published and signed but recorded `UNVERIFIED`. For attested artifacts the canonical fingerprint is
+copied onto the attestation (`ast_sha256`, `gate231`), so the registry exposes the reproducible-build
+identity and not just the byte hash.
+
+**Build cache (`svl/distributed_build.py`)** — `SVLBuildActionGenerator._input_hash` keys a source file on
+its canonical AST fingerprint rather than `sha256(text)`, so a reformatted source (or its Hebrew spelling)
+is a cache **hit**. An unparsable source falls back to a `text:`-prefixed hash so the failure is still
+cacheable.
+
 This is deliberately unlike `svl/pcc_wasm.py`, whose "proof" is a boolean produced by the same process
 that produced the artifact (and whose WAT does not assemble) — that checks nothing.
 
@@ -495,7 +527,7 @@ that produced the artifact (and whose WAT does not assemble) — that checks not
 | "Proof-carrying code" | Embeds a self-declared boolean; the emitted WAT does not assemble. Use `svl/attest.py` instead. |
 | "Self-hosting, 3-stage bootstrap" | `compiler_svl.svl` is a 540-byte stub (`assert true`); it compiles nothing. |
 | "Six compiler optimizations wired" | Only SIMD is referenced by `compiler_wasm.py` — and it currently breaks the shape it targets (`unknown local $sum`). |
-| "Registry with cryptographic attestations" | Had an **authentication bypass**: `verify_package` loaded the registered key then overwrote it with `attestation.public_key` (the party being verified). **Fixed 2026-11-12** and proven load-bearing: a copy with the old line restored accepts a self-signed package under a trusted verifier's name; the fixed tree rejects it. `publish` self-attesting as `verifier_id=metadata.author` remains by design, so only registered verifiers should ever be passed to `verify_package`. |
+| "Registry with cryptographic attestations" | Had an **authentication bypass**: `verify_package` loaded the registered key then overwrote it with `attestation.public_key` (the party being verified). **Fixed 2026-11-12** and proven load-bearing: a copy with the old line restored accepts a self-signed package under a trusted verifier's name; the fixed tree rejects it. **Changed again 2026-11-12**: `publish_package` no longer sets `VERIFIED` unconditionally — a compiled SVL artifact is `VERIFIED` only when its own `svl.attest` section checks out; anything else is published and signed but recorded `UNVERIFIED`. `publish` self-attests as `verifier_id=metadata.author` by design, so only registered verifiers should ever be passed to `verify_package`. |
 
 ### 5.4 Package Manager
 

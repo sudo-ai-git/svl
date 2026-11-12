@@ -1533,13 +1533,19 @@ def compile_to_wasm(ast: Program, deterministic: bool = True) -> str:
     return compiler.compile(ast)
 
 
-def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool = True) -> str:
+def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool = True,
+                         attest: bool = False) -> str:
     """Compile SVL source file to WASM.
 
     With ``strict=True`` (the default) the verification gate runs FIRST and the compile is
     refused on failure, so "the layers run on every compilation" is true rather than
     aspirational. Pass ``strict=False`` to compile without the gate (useful for tooling that
     wants to highlight or format a program that does not type-check yet).
+
+    With ``attest=True`` the returned WAT carries an ``svl.attest`` custom section binding the
+    artifact to its canonical AST fingerprint (see `svl.attest`).  The default is False so a
+    raw compile stays byte-identical and artifacts already pinned elsewhere remain valid; use
+    `svl.attest.compile_attested` when producing a shipped artifact.
 
     Verified safe to default on: across all 54 real programs in this repo + the workspace, the
     gate rejects only the files that do not even PARSE (a genuine `f`-instead-of-`func` error);
@@ -1552,7 +1558,11 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     from svl.parser_rd import parse
     tokens = tokenize(source)
     ast = parse(tokens)
-    return compile_to_wasm(ast, deterministic)
+    wat = compile_to_wasm(ast, deterministic)
+    if attest:
+        from svl.attest import attest_wat
+        wat, _payload = attest_wat(source, wat)
+    return wat
 
 
 def verify_wasm_determinism(source: str, runs: int = 3) -> bool:

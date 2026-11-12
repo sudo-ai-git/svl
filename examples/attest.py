@@ -30,8 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-from svl.compiler_wasm import compile_file_to_wasm          # noqa: E402
-from svl.attest import attest, verify_attestation            # noqa: E402
+from svl.attest import compile_attested, verify_attestation            # noqa: E402
 
 
 def main(argv):
@@ -59,9 +58,10 @@ def main(argv):
         return 2
 
     source = open(args.path).read()
-    # The compile path runs the verification gate; a violation raises here.
-    wat = compile_file_to_wasm(source)
-    binary, payload = attest(source, wat)
+    # The compile path runs the verification gate; a violation raises here.  compile_attested
+    # is the artifact-producing entry point: it binds the artifact to its canonical AST
+    # fingerprint via the svl.attest custom section.
+    attested_wat, binary, payload = compile_attested(source)
 
     out = args.out or os.path.splitext(args.path)[0] + ".wasm"
     with open(out, "wb") as fh:
@@ -72,6 +72,7 @@ def main(argv):
     print(f"content_sha256: {payload['content_sha256']}")
     print(f"ast_sha256    : {payload['ast_sha256']}")
     print(f"gate231       : {payload['gate231']}")
+    print(f"wat sha256    : {hashlib.sha256(attested_wat.encode()).hexdigest()}")
     print(f"artifact sha  : {hashlib.sha256(binary).hexdigest()}")
 
     ok, details = verify_attestation(binary)

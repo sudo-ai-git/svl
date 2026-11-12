@@ -110,6 +110,14 @@ module prog {
   qualifiers are parsed and then consumed by nothing: `grep "kind == 'linear'"` outside the parser
   returns no engine, and `type_families._match_lhs` is `len(args) > 0` (it matches anything). See KB §11.
 - **Verification extensions** — SMT/Z3, incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing — **the labels are aspirational**: the SMT layer encodes no constraint, PCC embeds a self-declared boolean (and its WAT does not assemble). **One real addition here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256` — see below.
+- **A canonical program fingerprint that is harnessed** — `svl.serialization.to_canonical_binary` omits the AST's
+  source-position fields, so the fingerprint is a function of the *program*: ASCII and Hebrew spellings of the
+  same keywords, reformatting, blank lines and comments all give the **same** `ast_sha256` and 231-gate triple
+  (the old `to_binary` gave five different values for those five sources). It is the build-cache key
+  (`svl.distributed_build`), the package identity recorded by the registry, and the payload of the
+  `svl.attest` custom section that `svl.attest.compile_attested` embeds in a shipped artifact. The raw
+  `compile_file_to_wasm` stays byte-identical (`attest=False` by default) so artifacts already pinned
+  elsewhere remain valid.
 - **Abstract interpretation that runs** — `svl/abstract_interpretation.py` performs a sound interval
   analysis over the AST (i32-aware: intervals that leave `[-2**31, 2**31-1]` widen to `top` because WASM
   wraps; array lengths tracked per lvalue path; loop fixpoints with widening; a bounded interprocedural
