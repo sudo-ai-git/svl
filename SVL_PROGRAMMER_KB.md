@@ -77,6 +77,22 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 
 **Note**: Final forms (sofit: ך ם ן ף ץ) are **excluded** - 22 standard letters only.
 
+**The alias contract is tested, not just claimed** (`svl/hebrew_alias.py`, added 2026-11-12).
+`verify_mapping()` checks all 22 letters against their intended tokens (expect 22/22).
+`verify_alias(source)` compiles a program and its Hebrew spelling and requires **byte-identical
+WAT** — measured on three programs including `examples/sieve.svl`, identical at 2234, 2715 and
+4778 bytes. `to_hebrew()` rewrites keywords on word boundaries, so an identifier such as `letter`
+is not corrupted by the `let` → א replacement. `verify_sofit_excluded()` pins the documented
+exclusion. All four checks are falsifiable: overwriting `HEBREW_TOKENS['א']` makes the mapping
+check fail.
+
+Context for the "22 of 113 token types" observation: the other 91 are operators and punctuation
+(`+ - * / ( ) { } , ; : = == != < > && || ! & | ^ ~ << >>` and the rest) plus the extended
+type-system keywords, which the README already marks **parse-level only**. Hebrew letters spell
+the 22 keywords; the two spellings are one language, and making them compile differently would
+break the alias contract. "Sofit as erasure" has no specification anywhere in the repo; it was
+**not** implemented rather than invented.
+
 ### 2.2 Grammar Overview (EBNF)
 
 ```ebnf
