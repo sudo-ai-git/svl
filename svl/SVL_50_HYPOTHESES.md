@@ -108,6 +108,20 @@
 
 ---
 
+## Status update (2026-11-12)
+
+The compiler-optimization hypotheses in this document were re-audited against the live
+backend. Result:
+
+| Hypothesis | Outcome |
+|---|---|
+| **H27** Tail Call Optimization | ✅ **WIRED** — a tail `return f(args)` with a matching in-module signature becomes a WASM `return_call`; verified by executing a 20000-deep call that would otherwise trap. |
+| **H25** WASM GC, **H26** SIMD, **H28** escape analysis, **H29** PGO, **H30** LTO, **H32** hot reloading | ❌ **REMOVED** — standalone libraries the compiler never called. Several were stubs that emitted invalid WAT (SIMD hard-coded its loop bounds and a `sum` local; PGO's `optimize` returned its input; LTO's inliner deleted functions that were still called). |
+| **H49** Self-optimizing compiler (RL) | ❌ **REMOVED** — every pass was a no-op. |
+
+The descriptions below are kept for the record; they describe what was attempted, not
+what the artifact does. See `SVL_PROGRAMMER_KB.md` §13 for the current state.
+
 ## Compiler & Runtime Improvements (H25-H32)
 
 **H25: WASM GC Proposal Support**

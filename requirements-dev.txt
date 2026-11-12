@@ -1,0 +1,7 @@
+# SVL test/CI dependencies.
+# The backend and the SMT layer are only fully exercisable with both runtimes:
+#   z3-solver : SMT theorem layer (tests/test_svl_smt.py)
+#   wasmtime  : assemble + run every compiled module (tests/test_svl_*.py)
+z3-solver>=4.8
+wasmtime>=20.0
+pytest>=7.0

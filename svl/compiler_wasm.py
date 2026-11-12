@@ -15,7 +15,10 @@ from svl.parser_rd import (
     AssignExpr, TypeExpr, Param, Field, NodeType
 )
 from svl.serialization import to_binary
-from svl.simd_vectorization import SimdVectorizer, SimdType, LoopInfo
+from svl.type_lowering import (
+    infer_types, type_to_valtype, is_float, is_int, struct_name_of,
+)
+from svl.type_inference import TypeVar
 
 
 # ============================================================================
@@ -98,100 +101,27 @@ def lower_type_to_wasm(type_expr: TypeExpr) -> WasmValType:
     return WasmValType.I32
 
 
-# WASM GC Proposal Support (H25)
-# Support for struct and array types in WASM GC
-
-class WasmGCType(Enum):
-    """WASM GC types."""
-    STRUCT = "struct"
-    ARRAY = "array"
-    I31 = "i31"  # 31-bit integer for small integers
-    EXTERNREF = "externref"
-    ANYREF = "anyref"
-    EQREF = "eqref"
-    STRUCTREF = "structref"
-    ARRAYREF = "arrayref"
-
-
-@dataclass
-class WasmStructType:
-    """WASM GC struct type."""
-    fields: List[Tuple[str, WasmValType]]  # (name, type)
-    is_final: bool = False  # Whether struct can be subtyped
-
-
-@dataclass
-class WasmArrayType:
-    """WASM GC array type."""
-    element_type: WasmValType
-    mutable: bool = False
-
-
-from typing import Union
-
-
-def lower_func_type(params: List[TypeExpr], return_type: TypeExpr) -> WasmFuncType:
+def lower_func_type(params: List[Any], return_type: Any) -> WasmFuncType:
     """Lower function type to WASM function type.
 
     `void` (and `never`) produce NO results. Emitting a dummy i32 result for `void`
     made every void function invalid: its body leaves nothing on the stack, so the
     module failed validation ("type mismatch: expected i32 but nothing on stack").
+
+    `params` entries may already be `WasmValType` (the backend now derives parameter
+    types from the type checker, see `_param_valtype`) or `TypeExpr` annotations.
     """
+    def _param(p):
+        return p if isinstance(p, WasmValType) else lower_type_to_wasm(p)
+
     results = []
     if not (getattr(return_type, 'kind', None) == 'prim'
             and getattr(return_type, 'value', None) in ('void', 'never')):
         results.append(lower_type_to_wasm(return_type))
     return WasmFuncType(
-        params=[lower_type_to_wasm(p) for p in params],
+        params=[_param(p) for p in params],
         results=results
     )
-
-
-def lower_type_to_wasm_gc(type_expr: TypeExpr) -> Union[WasmValType, WasmStructType, WasmArrayType]:
-    """Lower SVL type expression to WASM GC type."""
-    if type_expr.kind == 'prim':
-        prim_map = {
-            'int': WasmValType.I32,
-            'float': WasmValType.F64,
-            'bool': WasmValType.I32,
-            'string': WasmValType.EXTERNREF,
-            'void': WasmValType.I32,
-            'never': WasmValType.I32,
-        }
-        return prim_map.get(type_expr.value, WasmValType.I32)
-    elif type_expr.kind == 'struct':
-        # Return struct type reference
-        return WasmStructType(fields=[], is_final=True)
-    elif type_expr.kind == 'generic':
-        val = type_expr.value
-        if isinstance(val, dict) and val.get('name') == 'Array':
-            elem_type = lower_type_to_wasm_gc(val['args'][0])
-            return WasmArrayType(element_type=elem_type, mutable=True)
-    elif type_expr.kind == 'func':
-        return WasmValType.FUNCREF
-    elif type_expr.kind == 'array':
-        val = type_expr.value
-        if isinstance(val, TypeExpr):
-            elem_type = lower_type_to_wasm_gc(val)
-            return WasmArrayType(element_type=elem_type, mutable=True)
-    return WasmValType.I32
-
-
-def generate_wasm_gc_types(state: 'CompilerState') -> List[str]:
-    """Generate WASM GC type definitions."""
-    lines = []
-    
-    # Generate struct types
-    for struct_name, layout in state.struct_layouts.items():
-        fields = []
-        for field_name, (offset, field_type) in layout.items():
-            fields.append(f"  (field {field_name} {field_type.value})")
-        lines.append(f"(type ${struct_name} (struct\n{''.join(fields)}\n))")
-    
-    # Generate array types
-    # Would need array type info from state
-    
-    return lines
 
 
 # ============================================================================
@@ -219,8 +149,6 @@ class CompilerState:
     sorted_functions: List[str] = field(default_factory=list)
     sorted_structs: List[str] = field(default_factory=list)
     
-    # SIMD vectorization info
-    simd_loop_info: Dict[str, 'LoopInfo'] = field(default_factory=dict)  # func_name -> loop info
 
 
 @dataclass
@@ -268,6 +196,9 @@ class WasmCompiler:
         self._local_struct_types = {}
         self._temp_counter = 0
         self._heap_base = 0
+        # The type checker's inferred types for the program being compiled. Type-directed
+        # lowering reads this; it is None until `compile` runs inference.
+        self.inferred = None
     
     def compile(self, program: Program) -> str:
         """Compile full SVL program to WASM text format."""
@@ -276,11 +207,12 @@ class WasmCompiler:
         self._uses_heap = False
         # (function name, local name) -> struct type name, for field-offset resolution.
         self._local_struct_types = {}
+        # Phase 0: run the type checker and keep its inferred types. This is the point
+        # where the type layer starts driving codegen: locals, arithmetic width, struct
+        # resolution and un-annotated parameters are all lowered from these types.
+        self.inferred = infer_types(program)
         # Phase 1: Collect all declarations
         self._collect_declarations(program)
-        
-        # Phase 1.5: Run SIMD vectorizer to analyze loops
-        self._run_simd_vectorizer(program)
         
         # Phase 2: Compute struct layouts
         self._compute_struct_layouts(program)
@@ -290,22 +222,6 @@ class WasmCompiler:
         
         # Phase 4: Generate WASM module
         return self._generate_wasm_module()
-    
-    def _run_simd_vectorizer(self, program: Program):
-        """Run SIMD vectorizer to find vectorizable loops."""
-        vectorizer = SimdVectorizer()
-        loops = vectorizer.analyze_program(program)
-        
-        # Store loop info keyed by function name
-        for loop in loops:
-            if loop.is_vectorizable:
-                # Find the function this loop belongs to
-                # We'll match by function name pattern: module$func
-                for func_name in self.state.functions:
-                    # Store the first vectorizable loop for each function
-                    if func_name not in self.state.simd_loop_info:
-                        self.state.simd_loop_info[func_name] = loop
-                        break
     
     def _literal_init_expr(self, expr) -> Optional[str]:
         """Return a WASM constant expression for a literal initializer, else None."""
@@ -327,7 +243,7 @@ class WasmCompiler:
                 if isinstance(item, FuncDecl):
                     func_name = f"{module.name}${item.name}"
                     func_type = lower_func_type(
-                        [p.type_ann for p in item.params if p.type_ann],
+                        [self._param_valtype(item.name, p) for p in item.params],
                         item.return_type if item.return_type else TypeExpr(
                             type=NodeType.TYPE_EXPR, line=0, column=0, offset=0,
                             kind='prim', value='void'
@@ -336,7 +252,8 @@ class WasmCompiler:
                     self.state.functions[func_name] = WasmFunction(
                         name=func_name,
                         func_type=func_type,
-                        params=[(p.name, lower_type_to_wasm(p.type_ann)) for p in item.params if p.type_ann],
+                        params=[(p.name, self._param_valtype(item.name, p))
+                                for p in item.params],
                         locals=[],
                         body=[],
                         is_async=False,  # TODO: detect ASYNC
@@ -354,7 +271,10 @@ class WasmCompiler:
                         self._non_const_globals.add(item.name)
                         continue
                     val_type = (lower_type_to_wasm(item.type_ann)
-                                if item.type_ann is not None else WasmValType.I32)
+                                if item.type_ann is not None
+                                else self._valtype_for_inferred(
+                                    self._inferred_local_type(None, item.name),
+                                    WasmValType.I32))
                     self.state.globals[item.name] = WasmGlobal(
                         name=item.name,
                         val_type=val_type,
@@ -369,6 +289,65 @@ class WasmCompiler:
             self.state.sorted_structs = sorted(self.state.sorted_structs)
         else:
             self.state.sorted_functions = list(self.state.functions.keys())
+
+    # ---- type-directed lowering helpers ------------------------------------
+
+    def _inferred_local_type(self, func_name: Optional[str], name: str):
+        """The checker's inferred type for a local/param/const, or None.
+
+        `func_name` is the backend's module-qualified name (`m$main`); the inference keys
+        are the unqualified SVL names (`main`), so the qualified name is tried first and
+        the bare suffix second.
+        """
+        if self.inferred is None:
+            return None
+        t = self.inferred.local_type(func_name, name)
+        if t is not None:
+            return t
+        if func_name and '$' in func_name:
+            return self.inferred.local_type(func_name.split('$')[-1], name)
+        return None
+
+    def _inferred_expr_type(self, expr) -> Optional[Any]:
+        return self.inferred.expr_type(expr) if self.inferred is not None else None
+
+    def _valtype_for_inferred(self, t, default: WasmValType) -> WasmValType:
+        """Lower an inferred type to a WASM valtype, keeping `default` when unknown.
+
+        The conservative direction matters: a type the checker cannot classify must not
+        change codegen, or a program that used to compile would stop compiling.
+        """
+        name = type_to_valtype(t)
+        return WasmValType(name) if name else default
+
+    def _param_valtype(self, func_name: str, p) -> WasmValType:
+        """WASM type for a parameter: its annotation, else the inferred type.
+
+        Un-annotated parameters used to be dropped from the function signature entirely,
+        so a body referencing them emitted `local.get $x` for a param that was never
+        declared -- an "unknown local" assembly failure.
+        """
+        if p.type_ann is not None:
+            return lower_type_to_wasm(p.type_ann)
+        return self._valtype_for_inferred(
+            self._inferred_local_type(func_name, p.name), WasmValType.I32)
+
+    def _arith_kind(self, left, right) -> Optional[str]:
+        """'f64' / 'i32' for a binary arithmetic operand pair, 'mixed' on int+float, None if unknown.
+
+        Only types the checker actually resolved participate. `void` (the checker's
+        answer for an unbound name) and type variables are treated as unknown so that a
+        program the checker could not classify keeps its previous i32 lowering.
+        """
+        def known(t):
+            return (t is not None and not isinstance(t, TypeVar) and t.kind == 'prim'
+                    and bool(t.args) and t.args[0] in ('int', 'float', 'bool'))
+
+        if not (known(left) and known(right)):
+            return None
+        if is_float(left) or is_float(right):
+            return 'mixed' if (is_int(left) or is_int(right)) else 'f64'
+        return 'i32'
     
     def _temp_local(self, func: 'WasmFunction', prefix: str) -> str:
         """Declare a fresh i32 scratch local and return its name.
@@ -527,9 +506,16 @@ class WasmCompiler:
         # Compile value
         self._compile_expr(stmt.value)
         
-        # Store to local
+        # Store to local. The valtype comes from the annotation when there is one, and
+        # from the type checker's inferred type otherwise -- `let x = 1.5` used to emit an
+        # i32 local holding an f64 literal (invalid WAT that still parsed).
         func = self.state.current_function
-        func.locals.append((stmt.name, lower_type_to_wasm(stmt.type_ann) if stmt.type_ann else WasmValType.I32))
+        if stmt.type_ann is not None:
+            val_type = lower_type_to_wasm(stmt.type_ann)
+        else:
+            val_type = self._valtype_for_inferred(
+                self._inferred_local_type(func.name, stmt.name), WasmValType.I32)
+        func.locals.append((stmt.name, val_type))
         func.body.append(f'local.set ${stmt.name}')
         
         # Track the struct type of this local so `p.field` can be resolved later. A named
@@ -542,6 +528,13 @@ class WasmCompiler:
                 struct_name = cand
         if struct_name is None and isinstance(stmt.value, StructLit):
             struct_name = stmt.value.name
+        if struct_name is None:
+            # Type-directed resolution: `let q = p` carries `p`'s struct type even with no
+            # annotation and no literal.
+            inferred = self._inferred_local_type(func.name, stmt.name)
+            cand = struct_name_of(inferred)
+            if cand in self.state.struct_layouts:
+                struct_name = cand
         if struct_name:
             self._local_struct_types[(func.name, stmt.name)] = struct_name
     
@@ -589,18 +582,6 @@ class WasmCompiler:
     def _compile_for_stmt(self, stmt: ForStmt):
         """Compile for loop."""
         func = self.state.current_function
-        
-        # Check if this function has a vectorizable loop
-        simd_loop = self.state.simd_loop_info.get(func.name)
-        is_vectorizable = (
-            simd_loop is not None and 
-            simd_loop.loop_var == stmt.var and
-            self._is_range_loop(stmt)
-        )
-        
-        if is_vectorizable:
-            self._compile_vectorized_for_loop(stmt, simd_loop)
-            return
         
         # Range loops (`for i in start..end`) have well-defined counting semantics;
         # lower them directly instead of routing through the partial iterator protocol.
@@ -691,156 +672,54 @@ class WasmCompiler:
             return False
         return stmt.iter_expr.operator == '..'
     
-    def _compile_vectorized_for_loop(self, stmt: ForStmt, loop_info: LoopInfo):
-        """Compile a vectorized for loop using SIMD instructions."""
-        func = self.state.current_function
-        vt = loop_info.simd_type
-        width = loop_info.vector_width
-        var_name = stmt.var
-        
-        # Extract range bounds (simplified)
-        start_expr = stmt.iter_expr.left
-        end_expr = stmt.iter_expr.right
-        
-        # Initialize loop variable
-        func.locals.append((var_name, WasmValType.I32))
-        self._compile_expr(start_expr)
-        func.body.append(f'local.set ${var_name}')
-        
-        # Compile end bound and store in local
-        end_local = f"{var_name}_end"
-        func.locals.append((end_local, WasmValType.I32))
-        self._compile_expr(end_expr)
-        func.body.append(f'local.set ${end_local}')
-        
-        # The accumulator variable (sum) should already be declared by the let statement
-        sum_local = "sum"
-        
-        # Create vectorized loop
-        label_start = f"$vec_loop_{self.state.label_counter}"
-        label_end = f"$vec_loop_end_{self.state.label_counter}"
-        self.state.label_counter += 1
-        
-        func.body.append(f'loop {label_start}')
-        func.body.append(f'block {label_end}')
-        
-        # Loop condition: exit when index >= end (`br_if` branches on non-zero).
-        func.body.append(f'local.get ${var_name}')
-        func.body.append(f'local.get ${end_local}')
-        func.body.append(f'i32.ge_s')
-        func.body.append(f'br_if {label_end}')
-        
-        # Process array accesses with SIMD loads
-        for array_name, index_var in loop_info.array_accesses:
-            # Load vector from memory: v128.load (local.get $array_name + index * 4)
-            func.body.append(f'local.get ${array_name}')
-            func.body.append(f'local.get ${var_name}')
-            func.body.append(f'i32.const 4')
-            func.body.append(f'i32.mul')
-            func.body.append(f'i32.add')
-            func.body.append(f'v128.load')
-            vec_local = f"{array_name}_vec"
-            func.locals.append((vec_local, WasmValType.I32))  # v128 is represented as i32 in WASM text
-            func.body.append(f'local.set ${vec_local}')
-        
-        # Process computations with SIMD ops
-        # For dot product: multiply vectors, then horizontal add
-        # Only process multiplication operations (the vector computation)
-        result_vec_local = f"{var_name}_result_vec"
-        func.locals.append((result_vec_local, WasmValType.I32))
-        
-        for comp in loop_info.computations:
-            # Only handle multiplication for SIMD (the actual vector computation)
-            if comp.operator != '*':
-                continue
-            simd_op = self._get_simd_op(comp, vt)
-            if simd_op:
-                # Get vector operands
-                for array_name, _ in loop_info.array_accesses:
-                    vec_local = f"{array_name}_vec"
-                    func.body.append(f'local.get ${vec_local}')
-                func.body.append(simd_op.op)
-                func.body.append(f'local.set ${result_vec_local}')
-        
-        # Horizontal reduction to scalar and accumulate into sum
-        if vt == SimdType.I32X4:
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('i32x4.extract_lane 0')
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('i32x4.extract_lane 1')
-            func.body.append('i32.add')
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('i32x4.extract_lane 2')
-            func.body.append('i32.add')
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('i32x4.extract_lane 3')
-            func.body.append('i32.add')
-        elif vt == SimdType.F32X4:
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('f32x4.extract_lane 0')
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('f32x4.extract_lane 1')
-            func.body.append('f32.add')
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('f32x4.extract_lane 2')
-            func.body.append('f32.add')
-            func.body.append(f'local.get ${result_vec_local}')
-            func.body.append('f32x4.extract_lane 3')
-            func.body.append('f32.add')
-        
-        # Add to accumulator (sum)
-        func.body.append(f'local.get ${sum_local}')
-        func.body.append('i32.add')
-        func.body.append(f'local.set ${sum_local}')
-        
-        # Increment loop index by vector width
-        func.body.append(f'local.get ${var_name}')
-        func.body.append(f'i32.const {width}')
-        func.body.append(f'i32.add')
-        func.body.append(f'local.set ${var_name}')
-        
-        func.body.append(f'br {label_start}')
-        func.body.append('end')
-        func.body.append('end')
-    
-    def _get_simd_op(self, comp: BinaryExpr, vt: SimdType) -> Optional[object]:
-        """Get SIMD operation for binary expression."""
-        element_type = 'i32'  # Would infer from type checker
-        
-        # Map parser operators to SIMD operator names
-        op_map = {
-            '+': 'add',
-            '-': 'sub',
-            '*': 'mul',
-            '/': 'div',
-            '%': 'rem',
-        }
-        simd_op_name = op_map.get(comp.operator, comp.operator)
-        key = (element_type, simd_op_name)
-        
-        # Map from simd_vectorization.py
-        SCALAR_TO_SIMD = {
-            ('i32', 'add'): type('SimdOp', (), {'op': 'i32x4.add'})(),
-            ('i32', 'sub'): type('SimdOp', (), {'op': 'i32x4.sub'})(),
-            ('i32', 'mul'): type('SimdOp', (), {'op': 'i32x4.mul'})(),
-            ('i64', 'add'): type('SimdOp', (), {'op': 'i64x2.add'})(),
-            ('i64', 'sub'): type('SimdOp', (), {'op': 'i64x2.sub'})(),
-            ('i64', 'mul'): type('SimdOp', (), {'op': 'i64x2.mul'})(),
-            ('f32', 'add'): type('SimdOp', (), {'op': 'f32x4.add'})(),
-            ('f32', 'sub'): type('SimdOp', (), {'op': 'f32x4.sub'})(),
-            ('f32', 'mul'): type('SimdOp', (), {'op': 'f32x4.mul'})(),
-            ('f64', 'add'): type('SimdOp', (), {'op': 'f64x2.add'})(),
-            ('f64', 'sub'): type('SimdOp', (), {'op': 'f64x2.sub'})(),
-            ('f64', 'mul'): type('SimdOp', (), {'op': 'f64x2.mul'})(),
-        }
-        return SCALAR_TO_SIMD.get(key)
-    
     def _compile_return_stmt(self, stmt: ReturnStmt):
-        """Compile return statement."""
+        """Compile return statement, emitting `return_call` for a tail call.
+
+        Tail-call optimisation is wired into the backend here: a `return f(args)` whose
+        callee is a function in this module and whose signature matches the caller's
+        becomes a WASM `return_call`, which reuses the caller's frame instead of growing
+        the stack. The signature match is a hard guard -- a mismatched `return_call` is
+        invalid WAT, so anything else falls back to a plain `call` + `return`.
+        """
         func = self.state.current_function
-        if stmt.value:
-            self._compile_expr(stmt.value)
+        if stmt.value is None:
+            func.body.append('return')
+            return
+        target = self._tail_call_target(stmt.value)
+        if target is not None:
+            for arg in stmt.value.arguments:
+                self._compile_expr(arg)
+            func.body.append(f'return_call ${target}')
+            return
+        self._compile_expr(stmt.value)
         func.body.append('return')
+
+    def _tail_call_target(self, expr) -> Optional[str]:
+        """The module-qualified callee of a tail `return f(args)`, or None.
+
+        None means "not a tail call this backend may optimise": not a call, a builtin,
+        a host import, or a signature mismatch.
+        """
+        if not isinstance(expr, CallExpr):
+            return None
+        if expr.callee in ('len', 'zeros'):
+            return None
+        name = expr.callee
+        if name in self.state.functions:
+            qualified = name
+        else:
+            qualified = None
+            for fname in self.state.sorted_functions:
+                if fname == name or fname.endswith(f'${name}'):
+                    qualified = fname
+                    break
+        if qualified is None:
+            return None                              # host import
+        callee = self.state.functions[qualified]
+        current = self.state.current_function
+        if callee is None or current is None or callee.func_type != current.func_type:
+            return None
+        return qualified
     
     def _compile_assert_stmt(self, stmt: AssertStmt):
         """Compile assert statement."""
@@ -927,13 +806,19 @@ class WasmCompiler:
                     f"assignment to unknown name '{target.name}' "
                     f"at line {getattr(target, 'line', '?')}"
                 )
+            # A top-level `var`/`const` is a WASM GLOBAL: it used to be assigned with
+            # `local.set`, which emitted `unknown local: failed to find name $x`.
+            is_global = target.name in self.state.globals
+            get_op = 'global.get' if is_global else 'local.get'
+            set_op = 'global.set' if is_global else 'local.set'
             if compound:
-                func.body.append(f'local.get ${target.name}')
+                wasm_op = self._compound_op_for(expr.operator, target.name, is_global)
+                func.body.append(f'{get_op} ${target.name}')
                 self._compile_expr(expr.value)
-                func.body.append(compound)
+                func.body.append(wasm_op)
             else:
                 self._compile_expr(expr.value)
-            func.body.append(f'local.set ${target.name}')
+            func.body.append(f'{set_op} ${target.name}')
             return
 
         if isinstance(target, IndexExpr):
@@ -952,6 +837,39 @@ class WasmCompiler:
             return
 
         raise SyntaxError(f"invalid assignment target at line {getattr(expr, 'line', '?')}")
+
+    def _compound_op_for(self, operator: str, name: str, is_global: bool) -> str:
+        """The WASM op for a compound assignment, following the target's valtype.
+
+        The i32 table cannot be used for a float target: `x += 1.0` on an f64 variable
+        must emit `f64.add`, not `i32.add` on two doubles.
+        """
+        i32_ops = {
+            '+=': 'i32.add', '-=': 'i32.sub', '*=': 'i32.mul', '/=': 'i32.div_s',
+            '%=': 'i32.rem_s', '&=': 'i32.and', '|=': 'i32.or', '^=': 'i32.xor',
+            '<<=': 'i32.shl', '>>=': 'i32.shr_s',
+        }
+        f64_ops = {'+=': 'f64.add', '-=': 'f64.sub', '*=': 'f64.mul', '/=': 'f64.div'}
+        val_type = None
+        if is_global:
+            val_type = self.state.globals[name].val_type
+        else:
+            for local_name, local_type in reversed(self.state.current_function.locals):
+                if local_name == name:
+                    val_type = local_type
+                    break
+        if val_type == WasmValType.F64:
+            wasm_op = f64_ops.get(operator)
+            if wasm_op is None:
+                raise SyntaxError(
+                    f"unsupported compound assignment '{operator}' on a float "
+                    f"(line {getattr(self.state.current_function, 'name', '?')})"
+                )
+            return wasm_op
+        wasm_op = i32_ops.get(operator)
+        if wasm_op is None:
+            raise SyntaxError(f"unsupported assignment operator '{operator}'")
+        return wasm_op
 
     def _emit_store(self, addr_local: str, compound: Optional[str], value_expr, offset: int = 0):
         """Emit `[addr, value] i32.store` for a memory target whose address is in a local."""
@@ -997,7 +915,38 @@ class WasmCompiler:
             '&': 'i32.and', '|': 'i32.or', '^': 'i32.xor',
             '<<': 'i32.shl', '>>': 'i32.shr_s',
         }
-        wasm_op = op_map.get(expr.operator)
+        f64_map = {
+            '+': 'f64.add', '-': 'f64.sub', '*': 'f64.mul', '/': 'f64.div',
+            '==': 'f64.eq', '!=': 'f64.ne',
+            '<': 'f64.lt', '>': 'f64.gt', '<=': 'f64.le', '>=': 'f64.ge',
+        }
+
+        # Type-directed operator selection. `&&`/`||` are boolean and stay i32; the
+        # arithmetic/comparison operators follow the inferred operand types. Emitting
+        # `i32.add` for two floats added the bit patterns of two doubles -- a silently
+        # wrong answer -- and a float compared with `i32.lt_s` is invalid WAT.
+        kind = self._arith_kind(self._inferred_expr_type(expr.left),
+                                self._inferred_expr_type(expr.right))
+        if kind == 'mixed':
+            raise SyntaxError(
+                f"cannot apply '{expr.operator}' to mixed int and float operands "
+                f"at line {getattr(expr, 'line', '?')} — SVL has no implicit numeric "
+                f"conversion; use an explicit cast"
+            )
+        if kind == 'f64' and expr.operator not in ('&&', '||'):
+            if expr.operator == '%':
+                raise SyntaxError(
+                    f"float remainder (%) is not supported by the WASM backend "
+                    f"(at line {getattr(expr, 'line', '?')})"
+                )
+            if expr.operator in ('&', '|', '^', '<<', '>>'):
+                raise SyntaxError(
+                    f"bitwise operator '{expr.operator}' on a float at line "
+                    f"{getattr(expr, 'line', '?')}"
+                )
+            wasm_op = f64_map.get(expr.operator)
+        else:
+            wasm_op = op_map.get(expr.operator)
         if wasm_op is None:
             # Never fall back to an operator. An unmapped op must fail loudly — a silent
             # default turns a missing arm into a plausible-looking wrong result.
@@ -1009,7 +958,12 @@ class WasmCompiler:
     
     def _compile_unary_expr(self, expr: UnaryExpr):
         func = self.state.current_function
+        operand_type = self._inferred_expr_type(expr.operand)
         if expr.operator == '-':
+            if is_float(operand_type):
+                self._compile_expr(expr.operand)
+                func.body.append('f64.neg')
+                return
             # Negation is `0 - operand`. The zero MUST be pushed BEFORE the operand:
             # compiling the operand first made this `operand - 0`, i.e. a silent no-op
             # that returned `5` for `-5`.
@@ -1021,6 +975,10 @@ class WasmCompiler:
         if expr.operator == '!':
             func.body.append('i32.eqz')
         elif expr.operator == '~':
+            if is_float(operand_type):
+                raise SyntaxError(
+                    f"bitwise NOT (~) on a float at line {getattr(expr, 'line', '?')}"
+                )
             # bitwise NOT: x ^ -1
             func.body.append('i32.const -1')
             func.body.append('i32.xor')
@@ -1283,7 +1241,16 @@ class WasmCompiler:
     def _struct_type_of(self, node) -> Optional[str]:
         """Best-effort struct type name of an expression, or None."""
         if isinstance(node, Ident):
-            return self._local_struct_types.get((self.state.current_function.name, node.name))
+            cached = self._local_struct_types.get((self.state.current_function.name, node.name))
+            if cached:
+                return cached
+            # Type-directed: the checker tracked this local's struct type even when there
+            # is no annotation and no struct literal (e.g. a parameter, or `let q = p`).
+            name = struct_name_of(self._inferred_local_type(
+                self.state.current_function.name, node.name))
+            if name and name in self.state.struct_layouts:
+                return name
+            return None
         if isinstance(node, StructLit):
             return node.name
         return None
