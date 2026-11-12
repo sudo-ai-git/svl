@@ -11,6 +11,14 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["svl", "wasm", "verification", "compiler", "self-verifying", "formal-methods"]
 authors = [{ name = "sudo-ai-git" }]
+# The hard module-level imports the package already requires (see requirements-dev.txt).
+dependencies = [
+    "numpy>=1.24",
+    "msgpack>=1.0",
+    "cryptography>=41.0",
+    "z3-solver>=4.8",
+    "wasmtime>=20.0",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -28,15 +36,6 @@ classifiers = [
 Homepage = "https://github.com/sudo-ai-git/svl"
 Repository = "https://github.com/sudo-ai-git/svl"
 Issues = "https://github.com/sudo-ai-git/svl/issues"
-
-# The hard module-level imports the package already requires (see requirements-dev.txt).
-dependencies = [
-    "numpy>=1.24",
-    "msgpack>=1.0",
-    "cryptography>=41.0",
-    "z3-solver>=4.8",
-    "wasmtime>=20.0",
-]
 
 [project.optional-dependencies]
 lsp = ["pygls>=2.1", "lsprotocol>=2025.0"]

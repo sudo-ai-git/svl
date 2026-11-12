@@ -33,7 +33,7 @@ SVL (Self-Verifying Language) is a programming language with **built-in three-la
 ## Quick Start
 
 ```bash
-# Full spike suite (48/50 — the 2 failures are H36/H37, genuinely unimplemented)
+# Full spike suite (41/43 — the 2 failures are H36/H37, genuinely unimplemented)
 python -m svl.spike_runner
 
 # Write and RUN a program (compiles to WASM, executes in wasmtime, prints its output)
@@ -56,7 +56,7 @@ python3 -c "from svl.compiler_wasm import compile_file_to_wasm; compile_file_to_
 # REPL
 python -m svl.repl
 
-# Prove (or refute) every `assert` in a program with Z3 -- opt-in, NOT on the compile path
+# Prove (or refute) every `assert` in a program with Z3 -- opt-in (`prove=True` / `svlc build --prove`)
 python3 -c "from svl.smt_theorem import verify_with_smt; r = verify_with_smt(open('examples/sieve.svl').read()); print(r.status, f'{r.assertions_proven}/{r.assertions_checked} assertions proven')"
 python3 -c "from svl.smt_theorem import verify_with_smt; print(verify_with_smt('module t { func f(a: int) type int { assert a + 1 > a return 0 } }').status)"  # proven
 
@@ -148,7 +148,8 @@ module prog {
   condition and the variable initialisers and then *proved* (entry + preservation) before
   use, and arrays use the z3 `Array` theory (`a[i]`, `zeros(n)`, `len`). `/` and `%` remain
   declined — WASM `i32` division truncates while Z3's is Euclidean, and modelling one as the
-  other would be a false proof. It is **opt-in**, not on the compile path.
+  other would be a false proof. It is **opt-in** — `compile_file_to_wasm(..., prove=True)` /
+  `svlc build|run --prove` — not on by default.
 
 **Codegen IS now affected by the type layer** (2026-11-12): `compiler_wasm.py` runs the type
 checker (`svl/type_lowering.py`) and lowers locals, parameters, globals, arithmetic width and
@@ -233,9 +234,10 @@ requirements-dev.txt    # every dependency the suite and spikes import
     2 fail with `Unknown identifier 'ELSE'`).
 12. **Determinism** — WAT sha256 identical across `PYTHONHASHSEED` 0/1/12345/random, and the
     canonical AST fingerprint is identical for ASCII, Hebrew, re-indented and commented variants.
-13. **Defect probe suite** — `python svl-rating/probes.py` (workspace) runs 32 execution probes
-    that each must be able to fail: **29 PASS / 0 FAIL / 3 INFO**. The three INFO rows are
-    documented scope limits (BPSW constant-true, compile-latency measurement), not failures.
+13. **Defect probe suite** — `python svl-rating/probes.py` (workspace) runs 33 execution probes
+    that each must be able to fail: **30 PASS / 0 FAIL / 3 INFO**. The three INFO rows are
+    documented scope limits (BPSW constant-true, installable-package/`svlc` CLI, compile-latency
+    measurement), not failures.
 14. **CLI** — `pip install -e .` then `svlc version` prints `0.1.0` and `svlc run <file.svl>`
     compiles and executes a program.
 

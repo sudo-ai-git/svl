@@ -24,6 +24,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # The manifest must stay installable: a malformed [project] table makes
+      # `pip install .` fail before any test runs. Verified 2026-11-12: the released
+      # v0.1.0 manifest failed with `project.urls.dependencies must be string`, and
+      # CI never installed the package, so nobody noticed.
+      - name: Package install + CLI
+        run: |
+          pip install .
+          svlc version
+          svlc run examples/sieve.svl
+
       - name: pytest suite
         run: python -m pytest tests -q
 
