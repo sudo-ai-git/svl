@@ -15,6 +15,46 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.exceptions import InvalidSignature
 
 
+def _attestation_payload(package_name: str, package_version: str, content_hash: str) -> bytes:
+    """The exact bytes every attestation signs.
+
+    One construction, used by the signer and by every verifier.  Three separate
+    f-strings that can drift would let an attestation signed by one path verify under
+    another with different bytes.
+    """
+    return f"{package_name}:{package_version}:{content_hash}".encode()
+
+
+def _pss() -> padding.PSS:
+    """The one padding scheme for every attestation."""
+    return padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH)
+
+
+def verify_attestation_signature(signature: bytes, public_key_der: bytes,
+                                 package_name: str, package_version: str,
+                                 content_hash: str) -> bool:
+    """Check `signature` against a REGISTERED public key.
+
+    Returns False on any failure — an attestation that cannot be checked is not a
+    verified one.  Callers must pass the key obtained from ``self.verifiers``, never
+    the key carried by the attestation itself: that key is supplied by the party being
+    verified, so trusting it makes the check attacker-controlled.
+    """
+    try:
+        public_key = serialization.load_der_public_key(public_key_der)
+        if not isinstance(public_key, rsa.RSAPublicKey):
+            return False
+        public_key.verify(
+            signature,
+            _attestation_payload(package_name, package_version, content_hash),
+            _pss(),
+            hashes.SHA256()
+        )
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
 class PackageType(Enum):
     """Type of package."""
     LIBRARY = "library"
@@ -251,13 +291,9 @@ class PackageRegistry:
             return False
 
         # Create attestation
-        attestation_data = f"{metadata.name}:{metadata.version}:{content_hash}".encode()
         signature = private_key.sign(
-            attestation_data,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
+            _attestation_payload(metadata.name, metadata.version, content_hash),
+            _pss(),
             hashes.SHA256()
         )
 
@@ -320,11 +356,8 @@ class PackageRegistry:
         if record.verified_content_hash and record.verified_content_hash != content_hash:
             return False
 
-        # Verify signature
+        # Verify signature against the REGISTERED key.
         public_key_der = self.verifiers[verifier_id]
-        public_key = serialization.load_der_public_key(public_key_der)
-
-        attestation_data = f"{package_name}:{package_version}:{content_hash}".encode()
 
         # Find attestation by this verifier
         attestation = None
@@ -348,37 +381,40 @@ class PackageRegistry:
             if not attested_ok:
                 return False
 
-        try:
-            # SECURITY: verify against the REGISTERED key only. This previously reassigned
-            # `public_key` from `attestation.public_key` — i.e. from the party being verified —
-            # which made the check attacker-controlled: any package could self-sign and be
-            # reported VERIFIED under a trusted verifier's name.
-            public_key.verify(
-                attestation.signature,
-                f"{package_name}:{package_version}:{content_hash}".encode(),
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
-                hashes.SHA256()
-            )
-            return True
-        except (InvalidSignature, Exception):
-            return False
+        # Verify signature against the REGISTERED key.  The previous code loaded the key
+        # into a local and called `.verify` inline; it is now the same helper every other
+        # path uses, so the signed bytes cannot drift between signer and verifiers.
+        return verify_attestation_signature(
+            attestation.signature, public_key_der, package_name, package_version, content_hash
+        )
 
     def add_verification(self, package_name: str, package_version: str,
                          content_hash: str, verifier_id: str,
                          signature: bytes, public_key: bytes) -> bool:
-        """Add a verification attestation from a registered verifier."""
+        """Add a verification attestation from a registered verifier.
+
+        The signature is CHECKED against the REGISTERED key over
+        ``name:version:content_hash``.  The previous version compared only the
+        caller-supplied ``public_key`` bytes to the registered key and then wrote
+        ``status=VERIFIED`` without verifying anything — so anyone who knew a registered
+        public key could attest arbitrary content, **and** pin its hash as the record's
+        ``verified_content_hash``, which later makes ``verify_package`` compare real
+        bytes against the attacker's hash.
+
+        A failed check now refuses the attestation and leaves the record untouched.
+        """
         if package_name not in self.packages:
             return False
 
         if verifier_id not in self.verifiers:
             return False
 
-        # Verify the signature matches the registered verifier
         verifier_pk_der = self.verifiers[verifier_id]
         if public_key != verifier_pk_der:
+            return False
+
+        if not verify_attestation_signature(signature, verifier_pk_der, package_name,
+                                            package_version, content_hash):
             return False
 
         attestation = VerificationAttestation(

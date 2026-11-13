@@ -5,6 +5,8 @@ Subcommands:
   svlc build <file.svl>   compile to WAT (add --wasm for a binary, --prove for SMT,
                          --interface to write the .svli contract)
   svlc run   <file.svl>   compile and execute, printing the result
+                         (--link MODULE.wasm to satisfy `extern "c"` imports from a
+                         compiled foreign module; repeatable)
   svlc check <file.svl>   run the verification gate and report
   svlc diff <a> <b>      prove or refute that two functions are equivalent
   svlc corpus             run the corpus regression check
@@ -57,7 +59,8 @@ def cmd_run(args) -> int:
     src = open(args.file, encoding="utf-8").read()
     try:
         wat = compile_file_to_wasm(src, strict=not args.no_strict, prove=args.prove)
-        rv, out = run_wat(wat)
+        foreign = _load_links(args.link)
+        rv, out = run_wat(wat, foreign=foreign)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -66,6 +69,25 @@ def cmd_run(args) -> int:
     if rv is not None:
         print(f"[main() returned {rv}]")
     return 0
+
+
+def _load_links(paths):
+    """Read each `--link` target as compiled `.wasm` bytes.
+
+    A missing file or a WAT-text file is an error, not a silent skip: the program
+    declares the `extern`, so silently dropping it would trap at run time instead of
+    failing where the mismatch is visible.
+    """
+    if not paths:
+        return None
+    out = []
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                out.append(f.read())
+        except OSError as exc:
+            raise SystemExit(f"error: cannot read --link target {p!r}: {exc}")
+    return out
 
 
 def cmd_check(args) -> int:
@@ -134,6 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("file")
     r.add_argument("--prove", action="store_true")
     r.add_argument("--no-strict", action="store_true")
+    r.add_argument("--link", action="append", metavar="MODULE.wasm",
+                   help="link a compiled foreign module to satisfy `extern \"c\"` "
+                        "imports (repeatable)")
     r.set_defaults(func=cmd_run)
 
     c = sub.add_parser("check", help="run the verification gate")
