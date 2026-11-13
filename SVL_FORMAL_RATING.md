@@ -389,8 +389,9 @@ compile-latency measurement), not failures.
 - **No component-model runtime.** `extern "c" func ...` gives a callable host import (the FFI
   surface), but there is no WASM component-model runtime, so SVL cannot yet call into a
   C/Rust *library* — only functions the host chooses to expose.
-- **Releases.** `v0.1.0` is tagged, pushed, and has a **GitHub Release** with an attested
-  `.wasm` asset.
+- **Releases.** `v0.1.0` was the first tagged release (GitHub Release with an attested
+  `.wasm` asset); **`v0.2.0`** is the current one, carrying the contract-prover soundness
+  pass.
 - **Re-run after the fixes:** `python -m svl.spike_runner` → **41/43** (exit 2 = the two
   self-declared stubs H36/H37), no regressions; `python -m svl.spike_s17_wasm_determinism`
   → **Passed: True** (assembly ok, text deterministic).
@@ -582,9 +583,10 @@ here — so 8 is the honest ceiling for this phase, not a soft pass.
 
 ### 14.4 Rank impact
 
-`6.00` ties SVL with Python 3 (5.85) in this rubric and remains below Dafny (6.30) and
-OCaml (6.50). Rust remains 8.20. The ecosystem moat (D6/D7) is untouched; this increment
-raises only the verification axis.
+`6.00` edges past Python 3 (5.85) — 0.15 above, so "ties" would be wrong — and remains
+below Dafny (6.30) and OCaml (6.50). Rust remains 8.20. Ranked on the §12.3 table, SVL is
+**6th of 9**. The ecosystem moat (D6/D7) is untouched; this increment raises only the
+verification axis.
 
 ### 14.5 Soundness pass — the first version proved false theorems
 
