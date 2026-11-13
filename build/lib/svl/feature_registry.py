@@ -50,10 +50,12 @@ FEATURES: Dict[str, Feature] = {
     'array': Feature('array types', 'array', ENFORCED,
                      'element type is checked'),
     # -- engine-only: an engine exists but is not on the compile path ---------------
-    'linear': Feature('linear types', 'linear', ENGINE_ONLY,
-                      'svl/linear_regions.py is not wired into the compile path'),
-    'unique': Feature('uniqueness types', 'unique', ENGINE_ONLY,
-                      'svl/linear_regions.py is not wired into the compile path'),
+    'linear': Feature('linear types', 'linear', ENFORCED,
+                      'svl/linear_regions.py enforces the move discipline on the '
+                      'compile path: a moved value may not be used or moved again'),
+    'unique': Feature('uniqueness types', 'unique', ENFORCED,
+                      'svl/linear_regions.py enforces the move discipline on the '
+                      'compile path; affine, so an unconsumed one is not a warning'),
     'kind_star': Feature('higher-kinded types (*)', 'kind_star', ENGINE_ONLY,
                          'svl/kind_inference.py is not wired into the compile path'),
     'kind_arrow': Feature('kind arrows', 'kind_arrow', ENGINE_ONLY,

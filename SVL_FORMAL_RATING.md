@@ -395,9 +395,10 @@ compile-latency measurement), not failures.
   surface), but there is no WASM component-model runtime, so SVL cannot yet call into a
   C/Rust *library* — only functions the host chooses to expose.
 - **Releases.** `v0.1.0` was the first tagged release (GitHub Release with an attested
-  `.wasm` asset); **`v0.4.0`** is the current one, carrying the contract-prover
+  `.wasm` asset); **`v0.5.0`** is the current one, carrying the contract-prover
   soundness pass, the D6 work (unforgeable attestation, foreign-module linking,
-  packages) and the D2 refinement-type checker.
+  packages), the D2 refinement-type checker and the enforced linear/unique
+  discipline.
 - **Re-run after the fixes:** `python -m svl.spike_runner` → **41/43** (exit 2 = the two
   self-declared stubs H36/H37), no regressions; `python -m svl.spike_s17_wasm_determinism`
   → **Passed: True** (assembly ok, text deterministic).
