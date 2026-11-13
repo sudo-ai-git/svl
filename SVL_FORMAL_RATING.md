@@ -392,19 +392,25 @@ compile-latency measurement), not failures.
 
 ### 11.5 Still open, plainly
 
-- **No garbage collection.** Reclamation is `free` or the entry-point reset; a long-running
-  loop that allocates without freeing still grows memory.
+- **Garbage collection.** *Superseded by §20:* `gc()` now runs a conservative mark-sweep
+  collector (see §20.4 for its exact contract). The older statement — "no garbage
+  collection; reclamation is `free` or the entry-point reset" — described the state
+  before §20 and must not be quoted.
 - **No component-model runtime.** `extern "c" func ...` gives a callable host import (the FFI
   surface), but there is no WASM component-model runtime, so SVL cannot yet call into a
   C/Rust *library* — only functions the host chooses to expose.
 - **Releases.** `v0.1.0` was the first tagged release (GitHub Release with an attested
-  `.wasm` asset); **`v0.7.0`** is the current one, carrying the contract-prover
-  soundness pass, the D6 work (unforgeable attestation, foreign-module linking,
-  packages), the D2 refinement-type checker, the enforced linear/unique discipline,
-  kind-correct/vec-bound enforcement, and the D4 band-9 pair (compilation
+  `.wasm` asset); **`v0.8.0`** is the current one, carrying parametric polymorphism
+  (monomorphised), the conservative collector, project tooling (`svlc new`/`agent`/
+  `explore`, lockfile), real LSP diagnostic spans, and the AST explorer / automated tactic
+  search that complete the spike suite. Earlier releases: **`v0.7.0`** added the
+  contract-prover soundness pass, the D6 work (unforgeable attestation, foreign-module
+  linking, packages), the D2 refinement-type checker, the enforced linear/unique
+  discipline, kind-correct/vec-bound enforcement, and the D4 band-9 pair (compilation
   certificate + whole-program specification).
-- **Re-run after the fixes:** `python -m svl.spike_runner` → **41/43** (exit 2 = the two
-  self-declared stubs H36/H37), no regressions; `python -m svl.spike_s17_wasm_determinism`
+- **Re-run after the fixes:** `python -m svl.spike_runner` → **43/43** (H36/H37 were the
+  two self-declared stubs and now run real code; H37 is deterministic search, not
+  LLM-guided), no regressions; `python -m svl.spike_s17_wasm_determinism`
   → **Passed: True** (assembly ok, text deterministic).
 
 ---
@@ -1143,4 +1149,111 @@ Comparison-language scores are structured assessment against published specifica
    much as about correctness.
 5. The linear discipline remains static (§17.6); refinement remains QF_LIA over int/bool
    (§16.6); `kind_star`/`kind_arrow` remain engine-only (§18.3).
+
+---
+
+## 20. Re-score after the D1/D5 passes — **6.90 / 10**, still **4th of 9**
+
+Same seven dimensions, same weights, same anchors as §2. Every gate below was run
+**this session on this tree**. §19.5 predicted the next moves; two of them landed and one
+(the GC) is deliberately narrower than first advertised.
+
+### 20.1 Gates run this session
+
+| Gate | Command | Result |
+|---|---|---|
+| pytest | `python -m pytest tests -o addopts="" -q` | **419 passed** (was 319 at §19) |
+| Spike suite | `python -m svl.spike_runner` | **43/43** — H36/H37 were the declared stubs; both now run real code |
+| Probe suite | `python svl-rating/probes.py` | **30 PASS / 0 FAIL / 3 INFO** |
+| Golden references | `verify_all_golden_refs()` | **2/2 True** |
+| Corpus | `python -m svl.corpus_check --json` | 25 files, **22 compiled / 0 refused**, 0 AI findings |
+| Determinism | WAT sha256 × `PYTHONHASHSEED` 0/1/12345/random | **1 distinct hash** |
+| Compile latency | `compile_file_to_wasm` on sieve.svl, warm | **~20 ms** (artifact 6,969 B) |
+| Parametric polymorphism | `tests/test_svl_generics.py` | **24/24** (int/float/array/struct instances, nested generics, recursion, refusals, cross-seed determinism) |
+| Conservative collector | `tests/test_svl_gc.py` | **15/15** (roots survive, dead frames reclaimed, memory growth, capacity trap) |
+| Project tooling | `tests/test_svl_project_tooling.py` | **14/14** (`new`, lockfile drift, agent JSON) |
+| LSP spans | `tests/test_svl_lsp_spans.py` | **6/6** (real lines, fallbacks, no blanket line 0) |
+| Explorer / proof search | `tests/test_svl_explorer_and_proof_search.py` | **11/11** |
+
+### 20.2 Dimension scores — re-derived
+
+| Dim | Weight | §19 | **§20** | Evidence |
+|---|---|---|---|---|
+| **D1** | **20%** | 6 | **7** | Closures (real `\(x:T)->` capture-by-value), parametric polymorphism monomorphised per call site (including symbolic instantiation inside another generic and recursion), and a conservative mark-sweep collector with compiler-recorded roots. All three cited in §19.5 as the band-7 requirement are delivered. Remaining gaps: no effect system, error model is still lexical-`throw` + traps. |
+| D2 | 15% | 8 | **8** | Unchanged. Generics are a language-semantics feature, not new type-system machinery; `kind_star`/`kind_arrow` stay engine-only and there is still no enforced effect/type-class layer. |
+| D3 | 15% | 6 | **6** | Unchanged. Correct WASM, TCO, bounds checks, free list, deterministic output — but still no packed-array layout, no SIMD/AOT/native target. |
+| D4 | 20% | 9 | **9** | Unchanged: compilation certificate plus whole-program specification, both attested. |
+| **D5** | **10%** | 6 | **7** | `svlc` now covers `new`, `run`, `build`, `check`, `publish`, `install`, `add`, `diff`, `corpus`, `repl`, `lsp`, `explore`, `agent`; a project model with `svl.toml` + byte-pinning `svl.lock`; LSP diagnostics on the offending line instead of line 0; deterministic HTML AST explorer; JSON agent report. Still no `svlc test` and the editor story is one server. |
+| D6 | 10% | 4 | **4** | Unchanged. WIT generation, registry, FFI signature gate and package workflow exist; a component-model runtime still does not. |
+| D7 | 10% | 5 | **5** | Unchanged: releases and CI exist, the release process is still manual and there is no semver enforcement across dependencies. |
+
+**Weighted: `0.20×7 + 0.15×8 + 0.15×6 + 0.20×9 + 0.10×7 + 0.10×4 + 0.10×5 = 6.90 / 10`**
+
+### 20.3 Rank — **4th of 9**, above OCaml, below Haskell
+
+| Language | Weighted |
+|---|---|
+| Rust 1.99 | 8.20 |
+| Lean 4 | 7.50 |
+| Haskell (GHC) | 7.00 |
+| **SVL** | **6.90** |
+| OCaml 5 | 6.50 |
+| Dafny | 6.30 |
+| Python 3 | 5.85 |
+| C (gcc 13) | 5.65 |
+| AssemblyScript | 5.05 |
+
+### 20.4 What the three features actually guarantee (and what they do not)
+
+* **Parametric polymorphism.** One definition, one emitted function per distinct
+  instantiation. Calls whose type arguments cannot be determined by their arguments are
+  **refused**, not guessed. Generic entry points are refused. A generic call inside
+  another generic resolves symbolically through the enclosing substitution.
+* **Garbage collection.** Conservative, non-moving, opt-in via `gc()`. It can retain
+  garbage and it runs only at an explicit safepoint — a pointer held only in a temporary
+  on the WASM operand stack is **not** a root, so implicit collection during expression
+  evaluation would be able to free something live. That restriction is stated in
+  `svl/gc_runtime.py` and in the docs rather than papered over.
+* **Project tooling.** `svl.toml` records *which versions*; `svl.lock` records *which
+  bytes*. `build`/`run`/`check`/`agent` refuse on lock drift. The lock is written on
+  install from the bytes actually copied, and verified before compiling.
+
+### 20.5 What would move it next
+
+| Change | Effect | Cost |
+|---|---|---|
+| Component runtime (load a real C/Rust component, marshal via WIT) | D6 4 → 5 ⇒ **+0.10 ⇒ 7.00** | L (needs the component binary format or `wasm-tools`; neither is installed here) |
+| Semver/constraint enforcement across dependencies + `svlc release` | D7 5 → 6 ⇒ **+0.10 ⇒ 7.00** | M |
+| Packed arrays (unboxed `u8`/`i16` elements) | D3 6 → 7 ⇒ **+0.10 ⇒ 7.00** | M |
+| Proof the WASM refines the source (translation validation of semantics) | D4 9 → 10? ⇒ up to **+0.20** | L (research-grade) |
+
+### 20.6 Why "beat Rust" is still out of reach — stated plainly
+
+Rust's 8.20 comes from D5/D6/D7 = 9/9/9: cargo/crates.io, rust-analyzer and two decades
+of ecosystem. SVL cannot reach those numbers without an ecosystem, and no amount of
+compiler work in one session substitutes for one. Beating 8.20 would require roughly
+D1-D4 ≥ 8.4 average **and** D5 ≥ 8 **and** D6/D7 ≥ 6 — i.e. both architecture-scale
+verification items *and* real adoption.
+
+The defensible claim is the niche from `SVL_BEAT_RUST_PLAN.md`: verification-critical,
+tiny, fast-compiling WASM modules, where SVL leads on compile latency (~20 ms vs
+97–228 ms for Rust-to-wasm), artifact size, deterministic rebuilds and automatic
+assertion/interval checking on the compile path. On a like-for-like memory-bound kernel
+it is still 1.35–1.94× slower than safe Rust-to-wasm.
+
+### 20.7 Caveats
+
+1. Dimension scores are **expert assessment** backed by the gates above; only SVL is
+   execution-measured. Comparison-language scores are structured assessment, not
+   measurements.
+2. The collector is **conservative and safepoint-only**; it is not a complete
+   automatic memory manager and its contract is deliberately narrower (§20.4).
+3. GC-enabled programs start with a 131-page memory (8 MiB heap cap plus reserved
+   bitmap/mark/shadow regions). A program needing more traps honestly; programs that
+   never call `gc()` keep byte-identical artifacts.
+4. The shadow stack holds 8192 word-sized roots and traps beyond that rather than
+   dropping a root silently.
+5. Monomorphisation duplicates generic bodies per instantiation; a program instantiating
+   one generic at many types pays for it in artifact size.
+
 
