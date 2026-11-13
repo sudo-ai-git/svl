@@ -411,6 +411,11 @@ class TypeInferencer:
             # Returning T keeps unification working; `svl.linear_regions.
             # check_linear_usage` enforces the discipline on the compile path.
             return self._type_ann_to_type(ann.value, env)
+        elif ann.kind == 'vec':
+            # `vec<T, n>` is an array of T with a checked bound.  It returns the same
+            # shape an array literal synthesizes to (`List<T>`), so `let v: vec<T, n>
+            # = [..]` unifies; `svl/vec_bounds.py` checks the bound on the compile path.
+            return Type.generic('List', [self._type_ann_to_type(ann.value['element_type'], env)])
         if self.strict:
             from svl.feature_registry import status_of
             feature = status_of(getattr(ann, 'kind', '?'))
@@ -1268,6 +1273,11 @@ class TypeChecker:
             # Returning T keeps unification working; `svl.linear_regions.
             # check_linear_usage` enforces the discipline on the compile path.
             return self._type_ann_to_type(ann.value, env)
+        elif ann.kind == 'vec':
+            # `vec<T, n>` is an array of T with a checked bound.  It returns the same
+            # shape an array literal synthesizes to (`List<T>`), so `let v: vec<T, n>
+            # = [..]` unifies; `svl/vec_bounds.py` checks the bound on the compile path.
+            return Type.generic('List', [self._type_ann_to_type(ann.value['element_type'], env)])
         if self.strict:
             from svl.feature_registry import status_of
             feature = status_of(getattr(ann, 'kind', '?'))
