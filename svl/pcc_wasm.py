@@ -15,11 +15,14 @@ from svl.compiler_wasm import compile_to_wasm
 @dataclass
 class ProofArtifact:
     """Verification proof artifact to embed in WASM."""
-    layer: str  # 'syntax', 'types', 'theorem'
+    layer: str  # 'syntax', 'types', 'theorem', 'smt'
     passed: bool
     checksum: str  # SHA256 of the AST that was verified
     details: Dict[str, Any]
     timestamp: str  # ISO format
+    # True for layers that are reported for information only and must not be
+    # presented as evidence (the BPSW monodromy check is constant-true).
+    informational: bool = False
 
 
 @dataclass
@@ -48,7 +51,8 @@ class PCCWasmModule:
                     'passed': p.passed,
                     'checksum': p.checksum,
                     'details': p.details,
-                    'timestamp': p.timestamp
+                    'timestamp': p.timestamp,
+                    'informational': p.informational,
                 }
                 for p in self.proofs
             ]
@@ -98,6 +102,7 @@ class PCCWasmModule:
                     'checksum': p.checksum,
                     'details': p.details,
                     'timestamp': p.timestamp,
+                    'informational': p.informational,
                 }
                 for p in self.proofs
             ],
@@ -169,6 +174,22 @@ class PCCWasmGenerator:
                     },
                     'parities': {str(k): v.parity for k, v in verification_result.monodromy_results.items()}
                 },
+                timestamp=__import__('datetime').datetime.utcnow().isoformat() + 'Z',
+                # Constant-true (0/60 valid programs fail it): reported for information
+                # only, never as evidence.  `verify_pcc_wasm` ignores informational layers.
+                informational=True,
+            ),
+            ProofArtifact(
+                layer='smt',
+                passed=verification_result.smt_verified,
+                checksum=(verification_result.program_hash_hex[:32]
+                          if verification_result.program_hash_hex else '0' * 32),
+                details={
+                    'status': verification_result.smt_status,
+                    'complete': verification_result.smt_complete,
+                    'assertions_checked': getattr(verification_result.smt_result, 'assertions_checked', None),
+                    'assertions_proven': getattr(verification_result.smt_result, 'assertions_proven', None),
+                },
                 timestamp=__import__('datetime').datetime.utcnow().isoformat() + 'Z'
             )
         ]
@@ -229,6 +250,22 @@ class PCCWasmGenerator:
                         for k, v in verification_result.monodromy_results.items()
                     },
                     'parities': {str(k): v.parity for k, v in verification_result.monodromy_results.items()}
+                },
+                timestamp=__import__('datetime').datetime.utcnow().isoformat() + 'Z',
+                # Constant-true (0/60 valid programs fail it): reported for information
+                # only, never as evidence.  `verify_pcc_wasm` ignores informational layers.
+                informational=True,
+            ),
+            ProofArtifact(
+                layer='smt',
+                passed=verification_result.smt_verified,
+                checksum=(verification_result.program_hash_hex[:32]
+                          if verification_result.program_hash_hex else '0' * 32),
+                details={
+                    'status': verification_result.smt_status,
+                    'complete': verification_result.smt_complete,
+                    'assertions_checked': getattr(verification_result.smt_result, 'assertions_checked', None),
+                    'assertions_proven': getattr(verification_result.smt_result, 'assertions_proven', None),
                 },
                 timestamp=__import__('datetime').datetime.utcnow().isoformat() + 'Z'
             )
@@ -354,8 +391,12 @@ def verify_pcc_wasm(wasm, source: str) -> Tuple[bool, List[str]]:
     except Exception as exc:                                          # noqa: BLE001
         errors.append(f"re-derived SMT verdict: could not re-derive ({type(exc).__name__}: {exc})")
 
-    # The embedded claims must not contradict the re-derivation.
+    # The embedded claims must not contradict the re-derivation.  `informational`
+    # layers (the constant-true BPSW monodromy check) are reported but carry no
+    # evidentiary weight, so they cannot make an artifact pass or fail.
     for proof in proofs_data.get('proofs', []):
+        if proof.get('informational', False):
+            continue
         if not proof.get('passed', False):
             errors.append(f"Proof for layer '{proof['layer']}' did not pass")
 

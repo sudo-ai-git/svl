@@ -38,8 +38,9 @@ SEARCH = [
 
 # Measured 2026-11-12 on this corpus. A drop below it means a program that used to
 # compile no longer does -- a real regression, as opposed to the legacy fixtures that
-# never compiled at all.
-MIN_COMPILABLE = 20
+# never compiled at all.  (Raised from 20 to 22 the same day: the two `bit_transform_*`
+# fixtures carried a stray duplicate `else { }` and were repaired.)
+MIN_COMPILABLE = 22
 
 
 def corpus():

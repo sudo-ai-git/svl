@@ -635,10 +635,20 @@ def spike_h20_pcc_wasm() -> SpikeResult:
     wasm_with_proofs = pcc_module.to_wasm_with_proofs()
     extracted = extract_proofs_from_wasm(wasm_with_proofs)
 
-    has_custom_section = extracted is not None and len(extracted.get('proofs', [])) == 3
+    proofs = extracted.get('proofs', []) if extracted else []
+    layers = {p.get('layer') for p in proofs}
+    # Four layers now: syntax, types, the constant-true BPSW check (marked
+    # `informational`), and the real SMT verdict.
+    has_custom_section = (
+        extracted is not None
+        and len(proofs) == 4
+        and {'syntax', 'types', 'theorem', 'smt'} <= layers
+        and any(p.get('layer') == 'theorem' and p.get('informational') for p in proofs)
+    )
 
     return SpikeResult("H20", "Proof-Carrying Code for WASM", has_custom_section,
-                      metrics={'wasm_length': len(wasm_with_proofs), 'has_custom_section': has_custom_section, 'proofs_count': len(extracted.get('proofs', [])) if extracted else 0},
+                      metrics={'wasm_length': len(wasm_with_proofs), 'has_custom_section': has_custom_section,
+                               'proofs_count': len(proofs), 'layers': sorted(layers)},
                       notes="PCC WASM with custom sections implemented")
 
 # H21: Abstract Interpretation for Type Layer

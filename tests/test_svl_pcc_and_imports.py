@@ -80,3 +80,43 @@ def test_valid_pcc_artifact_verifies(wasmtime_module):
     artifact = PCCWasmGenerator().generate(src).to_wasm_bytes_with_proofs()
     ok, errors = verify_pcc_wasm(artifact, src)
     assert ok is True, errors
+
+
+# ---------------------------------------------------------------------------
+# P0.4 — the decorative layers are demoted, not presented as proofs
+# ---------------------------------------------------------------------------
+
+def test_unverified_smt_is_not_reported_as_passed():
+    """`unverified` means the prover DECLINED — it must not read as a green tick."""
+    from svl.theorem_layer import verify_theorem_layer
+
+    src = ("module t { func f() type int { let s = 0 for i in 0..10 { s += i }"
+           "  assert s == 45 return 0 } }")
+    result = verify_theorem_layer(src)
+    assert result.smt_status == "unverified"
+    assert result.smt_complete is False
+    assert result.passed is False
+
+
+def test_proven_program_is_complete():
+    from svl.theorem_layer import verify_theorem_layer
+
+    src = "module t { func f() type int { let x: int = 42  assert x == 42 return 0 } }"
+    result = verify_theorem_layer(src)
+    assert result.smt_status == "proven"
+    assert result.smt_complete is True
+    assert result.passed is True
+
+
+def test_pcc_payload_marks_bpsw_informational(wasmtime_module):
+    """The constant-true BPSW layer is carried as information, not as evidence."""
+    from svl.pcc_wasm import PCCWasmGenerator, extract_proofs_from_wasm_bytes
+
+    src = "module m { func main() type int { return 7 } }"
+    artifact = PCCWasmGenerator().generate(src).to_wasm_bytes_with_proofs()
+    payload = extract_proofs_from_wasm_bytes(artifact)
+    by_layer = {p['layer']: p for p in payload['proofs']}
+
+    assert by_layer['theorem']['informational'] is True
+    assert 'smt' in by_layer
+    assert by_layer['smt']['details']['status'] in ('proven', 'vacuous', 'unverified', 'not_run')

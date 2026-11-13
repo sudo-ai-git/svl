@@ -1,7 +1,7 @@
 module m {
   func xor_128(x: int) type int { return (x + 128) % 256 }
   func xor_1(x: int) type int {
-    if x % 2 == 0 then { return (x + 1) % 256 } else { return (x - 1) % 256 } else { }
+    if x % 2 == 0 then { return (x + 1) % 256 } else { return (x - 1) % 256 }
   }
   func pb(x: int, m: int) type void {
     let d: int = x / m

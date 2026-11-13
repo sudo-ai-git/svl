@@ -18,7 +18,7 @@ Three layers of proof run automatically on every compile:
 
 | Layer | What it proves | How |
 |-------|---------------|-----|
-| **L1 · Syntax** | The program is structurally intact — no corruption, no tampering, no accidental or malicious mutation | 231-gate checksums (SUM / LINEAR / PRODUCT mod 231) + AST guard |
+| **L1 · Syntax** | The program is structurally intact — no corruption, no tampering, no accidental or malicious mutation | 231-gate checksums (SUM / LINEAR / ROLLING mod 231) + AST guard |
 | **L2 · Types** | The program is type-sound under a dual-stream semantic + structural type system | Mod-5 buckets + Z/2 negation, 100% unique signatures |
 | **L3 · Theorem** | The program's hash is checked for primality/monodromy parity — **informational only, not a program proof** | SHA-256 + BPSW over primes {37, 73, 17}; the real prover is the opt-in Z3 SMT layer |
 
@@ -44,7 +44,7 @@ SVL closes exactly that gap.
 
 ### 3.1 Three automatic verification layers on every compile ✅
 
-- **L1 231-gate syntax checksums:** the full program is fingerprinted through three independent channels (SUM, LINEAR, PRODUCT mod 231). Joint signatures are **469/484 unique** on canonical corpora — a single-letter tamper breaks the fingerprint. ✅
+- **L1 231-gate syntax checksums:** the full program is fingerprinted through three independent channels (SUM, LINEAR, ROLLING mod 231). Joint signatures are **469/484 unique** on canonical corpora — a single-letter tamper breaks the fingerprint. ✅
 - **L2 Mod-5 dual-stream types:** every type maps to one of five buckets with a Z/2 negation involution (B0↔B4, B1↔B3, B2 fixed). The semantic stream + structural stream together give **100% unique signatures** (484/484) — no two distinct programs collide. ✅
 - **L3 BPSW monodromy layer — demoted, honestly.** The hash is reduced mod {37, 73, 17} and checked with Miller–Rabin + Lucas, but the tested value is always below 73, so the layer is **constant-true** (0/60 programs fail it). It is reported as `bpsw_status="informational"`, is **not** part of `passed`, and is not evidence. The real prover is the Z3 SMT layer (tri-state: `proven` / `counterexample` / `unverified`). ✅
 

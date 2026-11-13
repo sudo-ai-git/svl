@@ -21,6 +21,19 @@ from svl.parser_rd import (
 )
 
 
+class UnsupportedTypeAnnotationError(Exception):
+    """Strict mode: a type annotation kind with no registered checker.
+
+    The checker used to fall back to `int` for every unrecognized kind, so
+    `linear int`, `{v: int | v > 0}` and `int & string` all compiled as plain
+    `int` — the advertised type-system surface was worth nothing.
+    """
+
+
+class UnknownIdentifierError(Exception):
+    """Strict mode: an identifier the checker cannot resolve."""
+
+
 # Builtin (host/runtime) function signatures the WASM backend actually supports. The type
 # checker must know them, otherwise every call to one infers `void` and rejects working code.
 # Keep in sync with compiler_wasm.HOST_IMPORT_SIGS plus the codegen builtins (`len`, `zeros`).
@@ -243,10 +256,13 @@ class UnificationError(Exception):
 class TypeInferencer:
     """Bidirectional type inference engine."""
     
-    def __init__(self):
+    def __init__(self, strict: bool = True):
         self.type_vars: Dict[int, TypeVar] = {}
         self.substitutions: Dict[TypeVar, Type] = {}
         self.env = TypeEnv()
+        # Strict mode refuses what it cannot check (unsupported annotations,
+        # unknown identifiers) instead of silently assuming `int`/`void`.
+        self.strict = strict
     
     def fresh_var(self) -> TypeVar:
         """Create fresh type variable."""
@@ -382,7 +398,11 @@ class TypeInferencer:
             return Type.tuple([self._type_ann_to_type(a, env) for a in ann.args])
         elif ann.kind == 'array':
             return Type.array(self._type_ann_to_type(ann.args[0], env))
-        return Type.prim('int')  # fallback
+        if self.strict:
+            raise UnsupportedTypeAnnotationError(
+                f"unsupported type annotation kind '{getattr(ann, 'kind', '?')}' "
+                f"(no checker is registered for it)")
+        return Type.prim('int')  # lenient fallback (`strict=False`)
     
     def infer_type(self, expr: Any, env: TypeEnv, expected: Optional[Type] = None) -> Type:
         """Bidirectional type inference: check if expected, else synthesize."""
@@ -474,13 +494,22 @@ class TypeInferencer:
         if name in ('int', 'float', 'bool', 'void', 'never', 'string'):
             return Type.prim(name)
         # Unknown identifier
+        if self.strict:
+            raise UnknownIdentifierError(f"unknown identifier '{name}'")
         return Type.prim('void')
     
     def _synth_binary(self, expr: Any, env: TypeEnv) -> Type:
+        op = expr.operator
+        # `s.x` is parsed as BinaryExpr('.', Ident(s), Ident(x)): the right side is a
+        # FIELD NAME, not an expression, so it must NOT be synthesized.  Synthesizing it
+        # made every struct-field read an "unknown identifier" under strict mode.
+        if op == '.':
+            self.synthesize(expr.left, env)
+            return Type.prim('int')          # every struct field is an i32 slot
+
         left_type = self.synthesize(expr.left, env)
         right_type = self.synthesize(expr.right, env)
 
-        op = expr.operator
         # `a[i]` and `s.x` are parsed as BinaryExpr with operator '[]' / '.' (the parser has
         # no INDEX_EXPR/FIELD_ACCESS node tag), so they arrive here. Without these cases they
         # fell through to `void`, which made every `let t: int = a[j]` a false type error.
@@ -489,8 +518,6 @@ class TypeInferencer:
                 first = left_type.args[0]
                 return first if isinstance(first, Type) else Type.prim('int')
             return Type.prim('int')          # backend element slot is i32
-        if op == '.':
-            return Type.prim('int')          # every struct field is an i32 slot
         if op in ('+', '-', '*', '/', '%'):
             # Numeric operations. The type must PROPAGATE: returning a hard-coded `int`
             # here made `1.5 + 2.5` infer `int`, so type-directed lowering could never
@@ -672,17 +699,26 @@ class TypeInferencer:
         return Type.prim('void')
     
     def check(self, expr: Any, expected: Type, env: TypeEnv) -> Type:
-        """Check expression against expected type."""
-        raise NotImplementedError("check not fully implemented")
+        """Check an expression against an expected type: synthesize, then unify.
+
+        A `NotImplementedError` here meant the bidirectional half of the checker did
+        not exist; callers that used `check` would crash rather than report a mismatch.
+        Unification errors propagate to the caller, which records them as diagnostics.
+        """
+        actual = self.synthesize(expr, env)
+        self.unify(actual, expected)
+        return actual
 
 
 class TypeChecker:
     """Full type checker with bidirectional inference and Mod-5 verification."""
     
-    def __init__(self):
-        self.inferencer = TypeInferencer()
+    def __init__(self, strict: bool = True):
+        self.inferencer = TypeInferencer(strict=strict)
         self.env = TypeEnv()
         self.errors: List[str] = []
+        # Strict mode refuses what it cannot check instead of silently assuming.
+        self.strict = strict
         # Recording of inferred types for type-directed lowering (see svl/type_lowering.py).
         # Populated only while `infer_program` is running, so `check_program` alone is
         # unchanged.
@@ -703,10 +739,23 @@ class TypeChecker:
             # Setup initial environment with primitives
             self._init_env()
             
+            # Bind top-level externs and function signatures FIRST: a module body may
+            # call an `extern "c"` declared at the top level, and forward references
+            # between top-level funcs must resolve.
+            if hasattr(ast, 'items'):
+                for item in ast.items:
+                    if getattr(item, 'type', None) == NodeType.EXTERN_DECL:
+                        self._check_extern_decl(item)
+                    elif getattr(item, 'type', None) == NodeType.FUNC_DECL:
+                        self._prebind_function(item)
             # Type check each top-level declaration
             if hasattr(ast, 'modules'):
                 for module in ast.modules:
                     self._check_module(module)
+            # Then check the top-level bodies (externs have no body).
+            if hasattr(ast, 'items'):
+                for item in ast.items:
+                    self._check_stmt(item)
             
             return len(self.errors) == 0, self.errors
         except Exception as e:
@@ -839,6 +888,25 @@ class TypeChecker:
                 self._check_var_decl(stmt)
             elif stmt.type == NodeType.TYPE_ALIAS:
                 self._check_type_alias(stmt)
+            elif stmt.type == NodeType.EXTERN_DECL:
+                self._check_extern_decl(stmt)
+    
+    def _check_extern_decl(self, stmt: Any):
+        """Bind an `extern "c" func` signature so calls to it type-check.
+
+        Without this the checker could not resolve the name and, in strict mode,
+        refused every FFI program (`extern "c" func host_add(...)` + `host_add(2,3)`).
+        """
+        param_types = []
+        for param in stmt.params:
+            param_types.append(
+                self._type_ann_to_type(param.type_ann, self.env) if param.type_ann
+                else Type.var()
+            )
+        return_type = (self._type_ann_to_type(stmt.return_type, self.env)
+                       if stmt.return_type else Type.prim('void'))
+        scheme = self.env.generalize(Type.func(param_types, return_type), set())
+        self.env = self.env.extend(stmt.name, scheme)
     
     def _check_let_stmt(self, stmt: Any):
         """Type check let binding."""
@@ -914,10 +982,23 @@ class TypeChecker:
     
     def _check_for_stmt(self, stmt: Any):
         iter_type = self.inferencer.synthesize(stmt.iter_expr, self.env)
-        # Should be iterable type (List, Array, etc.)
-        # For now, just check body
-        for s in stmt.body.statements:
-            self._check_stmt(s)
+        # The loop variable must be bound, or every reference to it is an unknown
+        # identifier under strict mode.  Its type is the element type when the
+        # iterable is an array/list, else the backend's i32 slot.
+        elem_type = Type.prim('int')
+        if iter_type.kind in ('generic', 'array') and iter_type.args:
+            first = iter_type.args[0]
+            if isinstance(first, Type):
+                elem_type = first
+        loop_env = TypeEnv(bindings=dict(self.env.bindings), parent=self.env)
+        loop_env.bindings[stmt.var] = TypeScheme(vars=[], body=elem_type)
+        old_env = self.env
+        self.env = loop_env
+        try:
+            for s in stmt.body.statements:
+                self._check_stmt(s)
+        finally:
+            self.env = old_env
     
     def _check_return_stmt(self, stmt: Any):
         if stmt.value:
@@ -1103,7 +1184,11 @@ class TypeChecker:
             return Type.tuple([self._type_ann_to_type(a, env) for a in ann.args])
         elif ann.kind == 'array':
             return Type.array(self._type_ann_to_type(ann.args[0], env))
-        return Type.prim('int')  # fallback
+        if self.strict:
+            raise UnsupportedTypeAnnotationError(
+                f"unsupported type annotation kind '{getattr(ann, 'kind', '?')}' "
+                f"(no checker is registered for it)")
+        return Type.prim('int')  # lenient fallback (`strict=False`)
 
 
 # Spike S6: Compare Hindley-Milner vs Bidirectional

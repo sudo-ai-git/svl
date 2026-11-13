@@ -20,8 +20,6 @@ module bit_transform_demo {
       return (val + 1) % 256
     } else {
       return (val - 1) % 256
-    } else {
-      // empty else
     }
   }
 
