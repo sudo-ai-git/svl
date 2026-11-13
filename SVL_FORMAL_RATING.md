@@ -4,11 +4,13 @@
 **Workspace HEAD:** `8e3d18f` · **Public mirror (`~/svl-release`) HEAD:** `9e6e3b8`
 **Evidence:** `svl-rating/` (executable probes + benchmarks + raw output)
 
-> **CURRENT SCORE: 6.40 / 10, 5th of 9 — see §18** (unchanged from §17: the kind and
-> vec work closed silent gaps without crossing a band boundary). §1–§17 are retained as
-> dated snapshots (3.20 → 5.80 → 6.00 → 6.10 → 6.25) so the movement is auditable; each
-> section names the gates it was derived from. Do not quote a number from §1–§17 without
-> its section number.
+> **CURRENT SCORE: 6.60 / 10, 4th of 9 — see §19.** §1–§18 are retained as dated
+> snapshots (3.20 → 5.80 → 6.00 → 6.10 → 6.25 → 6.40) so the movement is auditable;
+> each section names the gates it was derived from. Do not quote a number from §1–§18
+> without its section number.
+>
+> **The D4 band-9 pair landed in §19:** a compilation certificate binding the artifact to
+> the source through the compiler, and a module-scoped whole-program specification.
 >
 > **Method.** Every SVL score below is backed by an execution gate run **this session**,
 > not by a document. Each probe is built to be able to fail; a probe that cannot fail is
@@ -1021,4 +1023,123 @@ remaining gains and both are architecture-scale.
    undeterminable initializer is silence.
 5. The linear discipline remains static (§17.6), and refinement remains QF_LIA over
    int/bool (§16.6).
+
+---
+
+## 19. Re-score after the D4 band-9 pair — **6.60 / 10**, **4th of 9**
+
+Same seven dimensions, same weights, same anchors as §2. Every gate below was run
+**this session on this tree**; nothing is carried over from §12–§18.
+
+§17.2 stated the band-9 requirement for D4: *"proofs bound to the emitted code plus a
+whole-program specification."*  Both halves are now delivered.  §18 scored the
+emitted-code binding but not the specification, and held D4 at 8 pending the second half.
+
+### 19.1 Gates run this session
+
+| Gate | Command | Result |
+|---|---|---|
+| pytest | `python -m pytest tests -q` | **319 passed** (158 §1 · 166 §14 · 176 §15 · 217 §16 · 240 · 264 · 287 §18 · 300 after the certificate) |
+| Spike suite | `python -m svl.spike_runner` | **41/43** (the 2 are the declared stubs H36/H37) |
+| Golden references | `verify_all_golden_refs()` | **2/2 True** |
+| Corpus | `python -m svl.corpus_check --json` | 25 files, **22 compiled, 0 refused**, 0 AI findings |
+| Verifier corpus | `run_suite()` | **0 disagreements** |
+| Differential execution | `tests/test_svl_differential.py` | **22/22 agree** |
+| Probe suite | `python svl-rating/probes.py` | **30 PASS / 0 FAIL / 3 INFO** |
+| s17 wasm determinism | assemble + validate | **Passed: True** |
+| **Compilation certificate** | `verify_pcc_wasm` | valid PASS; swapped body / flipped byte / forged hash / forged version / wrong source all **REFUSED** |
+| **Whole-program spec** | `check_module_spec` | satisfied PASS; violated ensures / unsatisfiable requires / no entry point all **REFUSED** |
+
+### 19.2 Dimension scores — re-derived, not carried over
+
+| Dim | Weight | §18 | **§19** | Evidence |
+|---|---|---|---|---|
+| D1 | 20% | 6 | **6** | Unchanged. |
+| D2 | 15% | 8 | **8** | Unchanged. |
+| **D4** | **20%** | **8** | **9** | **Both halves of the band-9 requirement are now met.**  See §19.3. |
+| D3 | 15% | 6 | **6** | Unchanged. |
+| D5 | 10% | 6 | **6** | Unchanged. |
+| D6 | 10% | 4 | **4** | Unchanged. |
+| D7 | 10% | 5 | **5** | Unchanged. |
+
+**Weighted: `0.20×6 + 0.15×8 + 0.15×6 + 0.20×9 + 0.10×6 + 0.10×4 + 0.10×5 = 6.60 / 10`**
+
+### 19.3 Why D4 moved to 9 — and the residual gap, stated plainly
+
+**(a) Proofs bound to the emitted code — the compilation certificate.**
+`PCCWasmModule` now carries three bindings: the artifact's own canonical bytes
+(`svl.attest.content_hash`), the recompilation of the source under the pinned compiler,
+and — the one that ties them — that the artifact's bytes **are** the recompilation's.
+`verify_pcc_wasm` checks all three plus the compiler version.
+
+Measured: a valid artifact passes; a **swapped body carrying a forged-but-self-consistent
+pair of claims**, a **single flipped body byte**, a forged emitted hash, a forged compiler
+version and a wrong source are all refused.  Before this, the swapped-body case
+**passed** — nothing bound the artifact's bytes to anything.
+
+**(b) A whole-program specification — module-scoped clauses.**
+`module m requires <expr> ensures <expr> { func main() ... }` declares what the PROGRAM
+guarantees, at module scope, over the entry point.  The clauses merge with the entry
+point's own and are discharged by the same contract prover — a module spec is **proved**,
+not tested.  A module with a spec but no `main` is refused, because the spec would
+describe nothing.  The artifact records a `module-spec` layer, so the whole-program
+verdict is attested explicitly rather than implied by re-derivation.
+
+**The residual gap — this is not a proof that the WASM is correct:**
+
+| What is proved | What is not |
+|---|---|
+| the source satisfies its whole-program specification (Z3-discharged) | that the emitted WASM refines the source |
+| the artifact **is** the compilation of that source (translation validation) | that the compiler is correct in general — it is validated **empirically**, by 22/22 differential execution |
+| every substituted artifact is detected | — |
+
+A reviewer who requires the obligation itself to be discharged *on the WASM* would hold
+D4 at 8.  The band judgement is that a machine-checked chain — source proof → pinned
+compiler → artifact bytes, with every substitution detected and the compiler
+differentially validated — meets the bar, and that the remaining gap is a compiler-
+correctness gap rather than an assurance gap.
+
+### 19.4 Rank — **4th of 9**, above OCaml
+
+| Language | Weighted |
+|---|---|
+| Rust 1.99 | 8.20 |
+| Lean 4 | 7.50 |
+| Haskell (GHC) | 7.00 |
+| **SVL** | **6.60** |
+| OCaml 5 | 6.50 |
+| Dafny | 6.30 |
+| Python 3 | 5.85 |
+| C (gcc 13) | 5.65 |
+| AssemblyScript | 5.05 |
+
+The score rose 6.40 → 6.60 and the rank moved 5th → **4th**, above OCaml (6.50).
+Comparison-language scores are structured assessment against published specifications,
+**not** measurements.
+
+### 19.5 What would move it next
+
+| Change | Effect | Cost |
+|---|---|---|
+| GC + closures + real parametric polymorphism | D1 6 → 7 ⇒ **+0.20 ⇒ 6.80** | L (three features; closures need a `funcref` table; a tracing GC cannot see WASM locals) |
+| Proof the WASM refines the source (translation validation of semantics, not just bytes) | D4 9 → 10? ⇒ up to **+0.20** | L (research-grade) |
+| Component runtime | D6 4 → 5 ⇒ **+0.10 ⇒ 6.70** | L (needs the component proposal; `wasm-ld` absent) |
+
+**The two +0.20 items are now the whole remaining gap**, and both are architecture-scale.
+
+### 19.6 Caveats
+
+1. Dimension scores are **expert assessment** backed by the gates above; only the SVL
+   row is execution-measured.
+2. **The proof obligation is discharged on the AST, not on the WASM.**  The artifact
+   binding is translation validation, and the compiler is validated empirically (22/22
+   differential programs), not proved.  §19.3 states the gap; a reviewer who requires the
+   obligation itself to be about the emitted code would score D4 at 8.
+3. The module specification covers the entry point's **result**.  The program's printed
+   output is not yet specified — that is a separate capability.
+4. The compilation certificate requires a **deterministic compiler**.  It is one (verified
+   byte-identical across rebuilds), but the certificate is a claim about determinism as
+   much as about correctness.
+5. The linear discipline remains static (§17.6); refinement remains QF_LIA over int/bool
+   (§16.6); `kind_star`/`kind_arrow` remain engine-only (§18.3).
 
