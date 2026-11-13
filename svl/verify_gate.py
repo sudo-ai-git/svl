@@ -136,6 +136,13 @@ def verify_program(source: str, ast: Any = None) -> List[str]:
     except Exception as exc:                                          # noqa: BLE001
         problems.append(f"vec bound check error: {exc}")
 
+    # 9. Whole-program specification: module-scoped clauses over the entry point.
+    try:
+        from svl.module_spec import check_module_spec
+        problems.extend(check_module_spec(ast))
+    except Exception as exc:                                          # noqa: BLE001
+        problems.append(f"module specification error: {exc}")
+
     return problems
 
 
