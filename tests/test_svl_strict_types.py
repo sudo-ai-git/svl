@@ -15,9 +15,14 @@ from svl.verify_gate import SVLVerificationError
 
 UNSUPPORTED = {
     "linear": "module t { func main() type int { let x: linear int = 5  return x } }",
-    "refinement": "module t { func main() type int { let x: {v: int | v > 0} = -5  return x } }",
     "intersection": "module t { func main() type int { let x: int & string = 5  return x } }",
 }
+
+# Refinement types are NOT unsupported any more: `svl/refinement_types.py` discharges
+# their obligations on the compile path, so the kind is `enforced` in the feature
+# registry.  A refinement is refused when its OBLIGATION is violated, which is a
+# different message from "unsupported type annotation kind" — see
+# tests/test_svl_refinement_types.py.
 
 
 @pytest.mark.parametrize("kind", sorted(UNSUPPORTED))

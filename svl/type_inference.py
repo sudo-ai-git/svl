@@ -399,6 +399,13 @@ class TypeInferencer:
             return Type.tuple([self._type_ann_to_type(a, env) for a in ann.args])
         elif ann.kind == 'array':
             return Type.array(self._type_ann_to_type(ann.args[0], env))
+        elif ann.kind == 'refinement':
+            # A refinement `{ v: T | P(v) }` IS the base type plus an obligation.
+            # Returning T keeps ordinary unification working; the predicate is
+            # discharged on the compile path by
+            # `svl.refinement_types.check_refinements`, which is why this kind is
+            # registered as `enforced` rather than refused.
+            return self._type_ann_to_type(ann.value['base_type'], env)
         if self.strict:
             from svl.feature_registry import status_of
             feature = status_of(getattr(ann, 'kind', '?'))
@@ -1244,6 +1251,13 @@ class TypeChecker:
             return Type.tuple([self._type_ann_to_type(a, env) for a in ann.args])
         elif ann.kind == 'array':
             return Type.array(self._type_ann_to_type(ann.args[0], env))
+        elif ann.kind == 'refinement':
+            # A refinement `{ v: T | P(v) }` IS the base type plus an obligation.
+            # Returning T keeps ordinary unification working; the predicate is
+            # discharged on the compile path by
+            # `svl.refinement_types.check_refinements`, which is why this kind is
+            # registered as `enforced` rather than refused.
+            return self._type_ann_to_type(ann.value['base_type'], env)
         if self.strict:
             from svl.feature_registry import status_of
             feature = status_of(getattr(ann, 'kind', '?'))
