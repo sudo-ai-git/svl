@@ -270,16 +270,23 @@ def spike_h3_linear_types() -> SpikeResult:
 
 # H4: Dependent Types for Array Bounds
 def spike_h4_dependent_types() -> SpikeResult:
-    """Test dependent type syntax (Vec<T, n>)."""
+    """Test dependent type syntax (`Vec<T, n>`) and its bound enforcement.
+
+    `vec` became ENFORCED (svl/vec_bounds.py checks the bound against the
+    initializer when both sides are literal), so the honest contract is no longer
+    "strict refuses": a matching bound is ACCEPTED and a mismatched one is REFUSED.
+    """
     from svl.parser_rd import parse
     from svl.lexer import tokenize
-    
+    from svl.compiler_wasm import compile_file_to_wasm
+    from svl.verify_gate import SVLVerificationError
+
     test_cases = [
         'func f() type int { let v: vec<int, 10> = [1,2,3,4,5,6,7,8,9,10]; return v[0] }',
         'func g() type int { let v: vec<int, 5> = [1,2,3,4,5]; return v[0] }',
         'func h() type int { let v: vec<vec<int, 3>, 2> = [[1,2,3],[4,5,6]]; return v[0][0] }',
     ]
-    
+
     results = {}
     for tc in test_cases:
         try:
@@ -288,15 +295,28 @@ def spike_h4_dependent_types() -> SpikeResult:
             results[tc] = True
         except Exception as e:
             results[tc] = False
-            
-    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
-    all_pass = (all(results.values()) and refused == len(test_cases)
-                and lenient_ok == len(test_cases))
+
+    well_formed_ok = True
+    for tc in test_cases:
+        try:
+            compile_file_to_wasm(tc)
+        except Exception:                                         # noqa: BLE001
+            well_formed_ok = False
+
+    violated = ('func f() type int { let v: vec<int, 3> = [1,2]; return v[0] }')
+    violated_refused = False
+    try:
+        compile_file_to_wasm(violated)
+    except (SVLVerificationError, SyntaxError):
+        violated_refused = True
+
+    all_pass = (all(results.values()) and well_formed_ok and violated_refused)
     return SpikeResult("H4", "Dependent Types for Array Bounds", all_pass,
-                      metrics={'parse_tests': results, 'strict_refused': refused,
-                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
-                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
-                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
+                      metrics={'parse_tests': results,
+                               'well_formed_accepted': well_formed_ok,
+                               'violated_refused': violated_refused},
+                      notes=f"parse ok; well-formed accepted: {well_formed_ok}; "
+                            f"violated refused: {violated_refused}")
 
 # H5: Gradual Typing with Blame Calculus
 def spike_h5_gradual_typing() -> SpikeResult:

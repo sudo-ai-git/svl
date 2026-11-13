@@ -57,15 +57,19 @@ FEATURES: Dict[str, Feature] = {
                       'svl/linear_regions.py enforces the move discipline on the '
                       'compile path; affine, so an unconsumed one is not a warning'),
     'kind_star': Feature('higher-kinded types (*)', 'kind_star', ENGINE_ONLY,
-                         'svl/kind_inference.py is not wired into the compile path'),
+                         'svl/kind_inference.py is not wired into the compile path; '
+                         'constructor ARITY is now checked, but `*` has no type-level '
+                         'meaning in SVL yet'),
     'kind_arrow': Feature('kind arrows', 'kind_arrow', ENGINE_ONLY,
-                          'svl/kind_inference.py is not wired into the compile path'),
+                          'svl/kind_inference.py is not wired into the compile path; '
+                          'no type syntax uses kind arrows yet'),
     'refinement': Feature('refinement types', 'refinement', ENFORCED,
                           'svl/refinement_types.py discharges { v: T | P(v) } obligations '
                           'through Z3 on the compile path'),
     # -- parse-only: nothing checks it ---------------------------------------------
-    'vec': Feature('dependent array bounds', 'vec', PARSE_ONLY,
-                   'vec<int, n> parses; no bound obligation is generated'),
+    'vec': Feature('dependent array bounds', 'vec', ENFORCED,
+                   'svl/vec_bounds.py checks vec<T, n> against an array literal or '
+                   'zeros(k) initializer when both sides are literal'),
     'dynamic': Feature('gradual typing (?)', 'dynamic', PARSE_ONLY,
                        'the wildcard type parses; no cast checking'),
     'forall': Feature('quantified constraints', 'forall', PARSE_ONLY,

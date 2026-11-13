@@ -362,6 +362,101 @@ class KindInference:
         return vars_set
 
 
+# ---------------------------------------------------------------------------
+# Compile-path enforcement
+# ---------------------------------------------------------------------------
+#
+# `KindInference` on its own is PERMISSIVE: `_apply_kind_one` returns `KindExpr.star()`
+# on a kind mismatch and `unify_kinds` "defaults to *", so applying a `*`-kinded
+# constructor to an argument, or passing too many arguments, reports nothing.  The
+# functions below add the discipline the engine's model supports:
+#
+#   * a `type Name<p1, ..., pn> = ...` alias declares a constructor of kind
+#     `* -> ... -> *` with arity n;
+#   * every `Name<a1, ..., am>` application of a DECLARED constructor must have
+#     exactly arity n type arguments.
+#
+# Undeclared names are NOT checked here.  Whether an unknown type constructor is an
+# error is a separate question (unknown identifiers), and guessing would risk
+# rejecting programs that are currently accepted.
+
+def _iter_nodes(node, want_types, acc=None):
+    if acc is None:
+        acc = []
+    if node is None:
+        return acc
+    if isinstance(node, want_types):
+        acc.append(node)
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _iter_nodes(item, want_types, acc)
+    elif hasattr(node, '__dataclass_fields__'):
+        for f in node.__dataclass_fields__:
+            if f in ('line', 'column', 'offset', 'type'):
+                continue
+            _iter_nodes(getattr(node, f, None), want_types, acc)
+    return acc
+
+
+def collect_type_constructors(ast) -> Dict[str, int]:
+    """name -> arity for every `type Name<p1..pn> = ...` alias in the program."""
+    from svl.parser_rd import TypeAlias
+    out: Dict[str, int] = {}
+    for alias in _iter_nodes(ast, (TypeAlias,)):
+        out[alias.name] = len(alias.type_params)
+    return out
+
+
+def constructor_kind(arity: int) -> KindExpr:
+    """`* -> * -> ... -> *` with `arity` arguments."""
+    kind = KindExpr.star()
+    for _ in range(arity):
+        kind = KindExpr.arrow(KindExpr.star(), kind)
+    return kind
+
+
+def check_kind_correctness(ast) -> List[str]:
+    """Every application of a DECLARED type constructor must match its arity.
+
+    Returns a list of problems (empty = well-kinded).
+    """
+    from svl.parser_rd import TypeExpr
+
+    arity = collect_type_constructors(ast)
+    if not arity:
+        return []
+
+    problems: List[str] = []
+    for te in _iter_nodes(ast, (TypeExpr,)):
+        value = te.value
+        is_application = te.kind == 'generic' and isinstance(value, dict)
+        # A bare name parses as `struct` (the parser has no separate `ident` kind for
+        # type annotations), so an incomplete application shows up as `struct`.
+        is_bare_name = te.kind in ('ident', 'struct')
+
+        if is_application:
+            name = str(value.get('name', ''))
+            args = value.get('args') or []
+            if name not in arity:
+                continue
+            expected = arity[name]
+            if len(args) != expected:
+                problems.append(
+                    f"line {getattr(te, 'line', '?')}: '{name}' takes {expected} type "
+                    f"argument(s) but was given {len(args)}")
+        elif is_bare_name:
+            # A bare `Box` where `type Box<a> = ...` declares a constructor is an
+            # incomplete application: it names a `* -> *` thing where a type (`*`)
+            # is required.
+            name = str(value)
+            expected = arity.get(name)
+            if expected:
+                problems.append(
+                    f"line {getattr(te, 'line', '?')}: '{name}' is a type constructor "
+                    f"taking {expected} argument(s) and cannot be used as a type")
+    return problems
+
+
 # HKT Application AST node
 @dataclass
 class HKTApplication:
