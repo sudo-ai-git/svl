@@ -158,20 +158,25 @@ module prog {
   at `let`, call and `return` sites, and a violated obligation is a compile error —
   `let x: {v: int | v > 0} = -5` is refused, `= 5` compiles, and a refined parameter may be
   used as an assumption inside its body. Predicates are QF_LIA over `int`/`bool`; anything
-  the encoder declines (`/`, `%`, calls, arrays) is silence, never a discharge. Support
-  matrix (2026-11-12):
+  the encoder declines (`/`, `%`, calls, arrays) is silence, never a discharge.
+  **`linear`/`unique` are enforced too**: a static move discipline (Rust-shaped, over
+  variable usage rather than memory, since SVL has value semantics) — a bare variable in a
+  move position (a `let` RHS, an argument, a `return`) consumes it, and a moved value may
+  not be used or moved again. An unconsumed `linear` warns; `unique` is affine.
+  Support matrix (2026-11-12):
 
   | enforced (checked) | engine-only (not on the compile path) | parse-only |
   |---|---|---|
-  | `int`/`float`/`bool`/`string`, struct, named, `fn(...) -> ...`, generic, tuple, array, **refinement** | `linear`, `unique`, `*`, `* -> *` | `vec<T,n>`, `?`, `forall`, intersection, union |
+  | `int`/`float`/`bool`/`string`, struct, named, `fn(...) -> ...`, generic, tuple, array, **refinement**, **linear**, **unique** | `*`, `* -> *` | `vec<T,n>`, `?`, `forall`, intersection, union |
 
   Declaration-level features (macros, module types/functors, algebraic effects, type
   classes/instances) parse and are refused by the structural checksum. See KB §11.
 - **Formal rating** — `SVL_FORMAL_RATING.md` scores SVL against Rust, Lean, Haskell, OCaml,
   Dafny, Python, C and AssemblyScript on a 7-dimension rubric, execution-measured against the
-  gates in `svl-rating/`. Current score: **6.25/10**, **6th of 9** (§16; 0.05 below Dafny,
-  above Python 3 at 5.85, C and AssemblyScript; Rust leads at 8.20). The comparison-language
-  scores are structured assessment from published specifications, not measurements.
+  gates in `svl-rating/`. Current score: **6.40/10**, **5th of 9** (§17; past Dafny at
+  6.30, above Python 3 at 5.85, C and AssemblyScript; Rust leads at 8.20). The
+  comparison-language scores are structured assessment from published specifications, not
+  measurements.
 - **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing. **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract. **PCC is real as of 2026-11-12**: `PCCWasmModule.to_wasm_bytes_with_proofs()` emits a binary module with a standard `svl-proofs` custom section that `wasmtime.Module` validates, and `extract_proofs_from_wasm_bytes()` recovers the payload (the old WAT-text form is deprecated — wat2wasm has no custom-section syntax).
 - **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model
   of a program's arithmetic and discharges every `assert` by refuting its negation: `unsat` →
