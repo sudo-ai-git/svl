@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import hashlib
 
 try:
     import tomllib
@@ -27,8 +29,25 @@ except ImportError:                                       # Python 3.10
         tomllib = None                                  # type: ignore[assignment]
 
 MANIFEST = "svl.toml"
+LOCKFILE = "svl.lock"
 MODULES_DIR = "svl_modules"
 SOURCE_NAME = "source.svl"
+
+# The scaffold written by `svlc new`.  It is a REAL program: it compiles, runs and
+# returns 42, so a freshly created project is verified rather than assumed working.
+STARTER_SOURCE = """module {name} {{
+  func main() type int {{
+    return 42
+  }}
+}}
+"""
+
+STARTER_MANIFEST = """[package]
+name = "{name}"
+version = "{version}"
+
+[dependencies]
+"""
 
 
 class ManifestError(Exception):
@@ -162,3 +181,134 @@ def record_dependency(project: Project, name: str, version: str) -> Path:
     """Add `name@version` to the manifest and write it."""
     project.dependencies[name] = version
     return save_project(project)
+
+
+# -- lockfile ------------------------------------------------------------
+#
+# `svl.toml` records which versions were installed; `svl.lock` records WHICH BYTES
+# those versions were.  A rebuild is reproducible only if both agree, so `build`/`run`
+# verify the installed tree against the lock when one is present and refuse on drift.
+
+LOCK_VERSION = 1
+
+
+@dataclass
+class LockedDependency:
+    version: str
+    source_sha256: str = ""
+    wasm_sha256: str = ""
+
+
+@dataclass
+class Lockfile:
+    version: int = LOCK_VERSION
+    dependencies: Dict[str, LockedDependency] = field(default_factory=dict)
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "version": self.version,
+            "dependencies": {
+                name: asdict(dep) for name, dep in sorted(self.dependencies.items())
+            },
+        }, indent=2) + "\n"
+
+    @classmethod
+    def from_json(cls, text: str) -> "Lockfile":
+        data = json.loads(text)
+        deps = {name: LockedDependency(**dep)
+                for name, dep in data.get("dependencies", {}).items()}
+        return cls(version=int(data.get("version", LOCK_VERSION)), dependencies=deps)
+
+
+def lockfile_path(root) -> Path:
+    return Path(root) / LOCKFILE
+
+
+def load_lockfile(root) -> Optional[Lockfile]:
+    """Read `<root>/svl.lock`; None when there is no lockfile (a fresh project)."""
+    path = lockfile_path(root)
+    if not path.is_file():
+        return None
+    try:
+        return Lockfile.from_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:                                # noqa: BLE001
+        raise ManifestError(f"cannot parse {path}: {exc}") from exc
+
+
+def save_lockfile(root, lock: Lockfile) -> Path:
+    path = lockfile_path(root)
+    path.write_text(lock.to_json(), encoding="utf-8")
+    return path
+
+
+def locked_dependency(project: Project, name: str, version: str,
+                      source_bytes: bytes, wasm_text: str) -> LockedDependency:
+    """Build a lock entry from the bytes that were actually installed."""
+    from svl.compiler_wasm import wasm_sha256
+    return LockedDependency(
+        version=version,
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        wasm_sha256=wasm_sha256(wasm_text),
+    )
+
+
+def verify_lockfile(root) -> List[str]:
+    """Check every locked dependency's installed bytes against the lock.
+
+    Returns a list of problems (empty = the tree matches).  A missing module is a
+    problem: the manifest says it is installed, the lock says which bytes, and neither
+    is true any more.
+    """
+    root = Path(root)
+    lock = load_lockfile(root)
+    if lock is None:
+        return []
+    project = load_project(root)
+    problems: List[str] = []
+    for name, dep in sorted(lock.dependencies.items()):
+        path = project.modules_dir / name / dep.version
+        source_file = path / SOURCE_NAME
+        wasm_file = path / "module.wasm"
+        if not source_file.is_file():
+            problems.append(f"{name}@{dep.version}: locked source is missing at {source_file}")
+            continue
+        got_source = hashlib.sha256(source_file.read_bytes()).hexdigest()
+        if dep.source_sha256 and got_source != dep.source_sha256:
+            problems.append(
+                f"{name}@{dep.version}: source hash mismatch "
+                f"(lock {dep.source_sha256[:12]}…, found {got_source[:12]}…)")
+        if dep.wasm_sha256:
+            if not wasm_file.is_file():
+                problems.append(f"{name}@{dep.version}: locked artifact is missing at {wasm_file}")
+                continue
+            from svl.compiler_wasm import wasm_sha256
+            got_wasm = wasm_sha256(wasm_file.read_text(encoding="utf-8"))
+            if got_wasm != dep.wasm_sha256:
+                problems.append(
+                    f"{name}@{dep.version}: artifact hash mismatch "
+                    f"(lock {dep.wasm_sha256[:12]}…, found {got_wasm[:12]}…)")
+    return problems
+
+
+def create_project(name: str, version: str = "0.1.0", root=None) -> Project:
+    """Scaffold `<root|./>/<name>/` with an `svl.toml` and a runnable `source.svl`.
+
+    `root` is the PARENT directory; the project directory is `<root>/<name>`.  An
+    existing non-empty target is refused rather than overwritten.
+    """
+    parent = Path(root) if root else Path.cwd()
+    target = parent / name
+    if target.exists() and any(target.iterdir()):
+        raise ManifestError(f"{target} already exists and is not empty")
+    target.mkdir(parents=True, exist_ok=True)
+    project = Project(root=target, name=name, version=version)
+    save_project(project)
+    (target / SOURCE_NAME).write_text(
+        STARTER_SOURCE.format(name=name), encoding="utf-8")
+    return project
+
+
+def project_source_path(root) -> Optional[Path]:
+    """The default source file for a project (`<root>/source.svl`), if present."""
+    candidate = Path(root) / SOURCE_NAME
+    return candidate if candidate.is_file() else None

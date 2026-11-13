@@ -184,6 +184,16 @@ class TypeScheme:
         """Instantiate with fresh type variables."""
         subst = {v: TypeVar() for v in self.vars}
         return self._substitute(self.body, subst)
+
+    def instantiate_with(self, subst: Dict[TypeVar, TypeVar]) -> Type:
+        """Instantiate, recording the original→fresh variable map in `subst`.
+
+        The map is what a caller needs to recover WHICH concrete type each quantified
+        variable was solved to at a particular call site, so it can monomorphise.
+        """
+        for v in self.vars:
+            subst[v] = TypeVar()
+        return self._substitute(self.body, subst)
     
     def _substitute(self, t: Type, subst: Dict[TypeVar, TypeVar]) -> Type:
         if isinstance(t, TypeVar):
@@ -308,6 +318,15 @@ class TypeInferencer:
         # Strict mode refuses what it cannot check (unsupported annotations,
         # unknown identifiers) instead of silently assuming `int`/`void`.
         self.strict = strict
+        # Generic call sites resolved during this run:
+        #   id(CallExpr) -> (callee, [(type-parameter name, concrete type), ...])
+        # Read by the backend's monomorphisation pass; cleared per program.
+        self.call_specializations: Dict[int, Tuple[str, List[Tuple[str, Type]]]] = {}
+        # Type parameters of the function body currently being checked.  A generic call
+        # may legitimately be instantiated with one of them (`id(x)` inside
+        # `twice<T>`); such an instantiation is SYMBOLIC until the enclosing function
+        # is itself specialised, so it must not be mistaken for an unsolved variable.
+        self.active_type_params: set = set()
     
     def fresh_var(self) -> TypeVar:
         """Create fresh type variable."""
@@ -317,6 +336,10 @@ class TypeInferencer:
     
     def find(self, var: TypeVar) -> TypeVar:
         """Find representative of type variable (with path compression)."""
+        # A binding may already point at a CONCRETE type (set by `unify`), which has no
+        # `bound` attribute; it is its own representative.
+        if not isinstance(var, TypeVar):
+            return var
         if var.bound is None:
             return var
         var.bound = self.find(var.bound)
@@ -416,6 +439,12 @@ class TypeInferencer:
         elif ann.kind == 'struct':
             # Check if this is a user-defined struct (in env.structs)
             struct_name = ann.value
+            # A bare identifier may also be a bound TYPE PARAMETER (`func id<T>(x: T)`).
+            # It must resolve to the parameter's type variable, not to a struct named T.
+            if env is not None:
+                scheme = env.lookup(struct_name)
+                if scheme is not None and isinstance(scheme.body, TypeVar):
+                    return scheme.body
             if env and env.lookup_struct(struct_name):
                 return Type.generic(struct_name, [])
             return Type.struct(struct_name)
@@ -630,7 +659,9 @@ class TypeInferencer:
         callee_name = expr.callee
         scheme = env.lookup(callee_name)
         if scheme:
-            func_type = scheme.instantiate()
+            subst: Dict[TypeVar, TypeVar] = {}
+            func_type = (scheme.instantiate_with(subst) if scheme.vars
+                         else scheme.instantiate())
             # For function calls, return the return type
             if func_type.kind == 'func':
                 params = func_type.args[:-1]
@@ -660,6 +691,27 @@ class TypeInferencer:
                         # `_check_let_stmt` already applies.
                         if not TypeChecker._handle_annotation_ok(param_type, arg_type):
                             raise
+                if subst:
+                    # A generic call: record which concrete type each quantified
+                    # variable was solved to, so the backend can monomorphise this
+                    # call site.  An unsolved variable means the instantiation is not
+                    # determined by the arguments; the caller must say which one it
+                    # wants, which SVL cannot express yet — refuse rather than guess.
+                    #
+                    # Recorded by NAME, not by variable identity: a call site resolved
+                    # against the pre-bound scheme and one resolved against the
+                    # fully-checked scheme hold different `TypeVar` objects for the
+                    # same parameter, and the name is what both share.
+                    pairs: List[Tuple[str, Type]] = []
+                    for orig, fresh in subst.items():
+                        resolved = self._prune(fresh)
+                        if isinstance(resolved, TypeVar) and resolved not in self.active_type_params:
+                            raise UnificationError(
+                                f"type parameter '{orig.name}' is not determined by "
+                                f"the arguments of this call",
+                                resolved, func_type)
+                        pairs.append((orig.name or f"t{orig.id}", resolved))
+                    self.call_specializations[id(expr)] = (callee_name, pairs)
                 return func_type.args[-1]  # Last arg is return type
             return func_type
         
@@ -817,6 +869,12 @@ class TypeChecker:
         self.inferencer = TypeInferencer(strict=strict)
         self.env = TypeEnv()
         self.errors: List[str] = []
+        # Parallel to `errors`: the 1-based source line of the AST node being checked
+        # when each error was recorded (None when it is not attributable).  The LSP uses
+        # this to place a diagnostic on the offending line instead of line 0.
+        self.error_lines: List[Optional[int]] = []
+        # The 1-based line of the statement currently being checked.
+        self._current_item_line: Optional[int] = None
         # Strict mode refuses what it cannot check instead of silently assuming.
         self.strict = strict
         # Recording of inferred types for type-directed lowering (see svl/type_lowering.py).
@@ -832,10 +890,33 @@ class TypeChecker:
         self.recorded_locals: Dict[Tuple[str, str], Type] = {}
         self.recorded_exprs: Dict[int, Type] = {}
         self.recorded_funcs: Dict[str, Type] = {}
+        # Generic functions: name -> the quantified variables of its scheme, in the
+        # order the specialisation key is built from.
+        self.generic_vars: Dict[str, List[TypeVar]] = {}
+        # Call-site specialisations: id(CallExpr) -> (callee, [(type-param, concrete)]).
+        # Written by `_synth_call`, consumed by the backend's monomorphisation pass.
+        self.call_specializations: Dict[int, Tuple[str, List[Tuple[str, Type]]]] = {}
     
+    def _add_error(self, message: str):
+        """Record a diagnostic with the line of the statement being checked."""
+        self.errors.append(message)
+        self.error_lines.append(self._current_item_line)
+
+    def errors_with_spans(self) -> List[tuple]:
+        """`(message, line)` pairs; `line` is None when not attributable."""
+        return list(zip(self.errors, self.error_lines))
+
     def check_program(self, ast: Any) -> Tuple[bool, List[str]]:
         """Type check entire program."""
         try:
+            # A checker instance may be reused (the type layer keeps one); stale
+            # diagnostics from a previous run must not leak into this verdict.
+            self.errors = []
+            self.error_lines = []
+            self._current_item_line = None
+            self.generic_vars = {}
+            self.call_specializations = {}
+            self.inferencer.call_specializations = {}
             # Setup initial environment with primitives
             self._init_env()
             
@@ -864,10 +945,23 @@ class TypeChecker:
             if hasattr(ast, 'items'):
                 for item in ast.items:
                     self._check_stmt(item)
-            
+
+            # The entry point is called by the host with no arguments, so there is no
+            # way to infer its type parameters — a generic `main` would compile to an
+            # exported function that does not exist.
+            if hasattr(ast, 'modules'):
+                for module in ast.modules:
+                    for stmt in getattr(getattr(module, 'body', None), 'statements', []):
+                        if (getattr(stmt, 'type', None) == NodeType.FUNC_DECL
+                                and stmt.name == 'main'
+                                and getattr(stmt, 'type_params', None)):
+                            self._add_error(
+                                "the entry point 'main' cannot be generic: its type "
+                                "parameters cannot be inferred from a call")
+
             return len(self.errors) == 0, self.errors
         except Exception as e:
-            self.errors.append(f"Type checking error: {e}")
+            self._add_error(f"Type checking error: {e}")
             return False, self.errors
 
     def infer_program(self, ast: Any):
@@ -911,6 +1005,8 @@ class TypeChecker:
             local_types=dict(self.recorded_locals),
             expr_types=dict(self.recorded_exprs),
             func_types=dict(self.recorded_funcs),
+            generic_vars=dict(self.generic_vars),
+            call_specializations=dict(self.inferencer.call_specializations),
         )
     
     def _init_env(self):
@@ -955,18 +1051,47 @@ class TypeChecker:
     def _prebind_function(self, stmt: Any) -> None:
         if not getattr(stmt, 'return_type', None):
             return
-        param_types = []
-        for param in stmt.params:
-            param_types.append(
-                self._type_ann_to_type(param.type_ann, self.env) if param.type_ann
-                else Type.var()
-            )
-        return_type = self._type_ann_to_type(stmt.return_type, self.env)
-        scheme = self.env.generalize(Type.func(param_types, return_type), set())
-        self.env = self.env.extend(stmt.name, scheme)
+        # Bind the function's own type parameters first, so `func id<T>(x: T) -> T`
+        # prebinds a scheme whose parameter and result are the same variable.
+        saved_env = self.env
+        type_param_vars: Dict[str, TypeVar] = {}
+        if getattr(stmt, 'type_params', None):
+            for name in stmt.type_params:
+                tv = TypeVar(name)
+                type_param_vars[name] = tv
+                self.env = self.env.extend(name, TypeScheme(vars=[], body=tv))
+        try:
+            param_types = []
+            for param in stmt.params:
+                param_types.append(
+                    self._type_ann_to_type(param.type_ann, self.env) if param.type_ann
+                    else Type.var()
+                )
+            return_type = self._type_ann_to_type(stmt.return_type, self.env)
+            func_type = Type.func(param_types, return_type)
+            if type_param_vars:
+                ordered = [type_param_vars[n] for n in stmt.type_params]
+                seen = set(ordered)
+                for var in sorted(TypeEnv()._free_vars(func_type), key=lambda v: v.id):
+                    if var not in seen:
+                        ordered.append(var)
+                        seen.add(var)
+                self.generic_vars[stmt.name] = list(ordered)
+                scheme = TypeScheme(vars=ordered, body=func_type)
+            else:
+                scheme = self.env.generalize(func_type, set())
+        finally:
+            # Drop the parameter bindings; the FUNCTION binding below is added to the
+            # outer environment, not to this one.
+            self.env = saved_env
+        # Extend the outer environment, which does not carry the type parameters.
+        self.env = saved_env.extend(stmt.name, scheme)
     
     def _check_stmt(self, stmt: Any):
         """Type check a statement."""
+        # Attribute any diagnostic raised while checking this statement (or one nested
+        # inside it) to the statement's own source line.
+        self._current_item_line = getattr(stmt, 'line', None)
         if hasattr(stmt, 'type'):
             if stmt.type == NodeType.LET_STMT:
                 self._check_let_stmt(stmt)
@@ -1016,10 +1141,19 @@ class TypeChecker:
         scheme = self.env.generalize(Type.func(param_types, return_type), set())
         self.env = self.env.extend(stmt.name, scheme)
     
+    def _prune_type(self, t: Any) -> Any:
+        """Follow a type variable's existing bindings before it is stored.
+
+        Without this, `let p: int = a(1)` bound `p` to an unsolved variable whose
+        binding was `int`; every later use of `p` instantiated a FRESH variable, so a
+        generic call receiving `p` could not see the concrete type at all.
+        """
+        return self.inferencer._prune(t)
+
     def _check_let_stmt(self, stmt: Any):
         """Type check let binding."""
         value_type = self.inferencer.synthesize(stmt.value, self.env)
-        
+
         if stmt.type_ann:
             expected = self._type_ann_to_type(stmt.type_ann, self.env)
             try:
@@ -1028,8 +1162,9 @@ class TypeChecker:
                 if self._handle_annotation_ok(expected, value_type):
                     pass
                 else:
-                    self.errors.append(f"Type mismatch in let: {e}")
-        
+                    self._add_error(f"Type mismatch in let: {e}")
+
+        value_type = self._prune_type(value_type)
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
 
@@ -1064,7 +1199,7 @@ class TypeChecker:
         try:
             self.inferencer.unify(cond_type, bool_type)
         except UnificationError as e:
-            self.errors.append(f"Condition must be bool: {e}")
+            self._add_error(f"Condition must be bool: {e}")
         
         then_env = TypeEnv(bindings=dict(self.env.bindings), parent=self.env)
         self.env = then_env
@@ -1083,7 +1218,7 @@ class TypeChecker:
         try:
             self.inferencer.unify(cond_type, bool_type)
         except UnificationError as e:
-            self.errors.append(f"While condition must be bool: {e}")
+            self._add_error(f"While condition must be bool: {e}")
         
         for s in stmt.body.statements:
             self._check_stmt(s)
@@ -1122,7 +1257,7 @@ class TypeChecker:
                 try:
                     self.inferencer.unify(value_type, declared)
                 except UnificationError as e:
-                    self.errors.append(f"Type mismatch in return: {e}")
+                    self._add_error(f"Type mismatch in return: {e}")
     
     def _check_expr_stmt(self, stmt: Any):
         """Check an expression statement.
@@ -1135,7 +1270,7 @@ class TypeChecker:
         if isinstance(expr, AssignExpr):
             name = getattr(expr.target, 'name', None)
             if name in self._consts:
-                self.errors.append(f"assignment to const '{name}'")
+                self._add_error(f"assignment to const '{name}'")
                 return
             # Check the right-hand side; the assignment node itself has no type.
             self.inferencer.synthesize(expr.value, self.env)
@@ -1148,7 +1283,7 @@ class TypeChecker:
         try:
             self.inferencer.unify(cond_type, bool_type)
         except UnificationError as e:
-            self.errors.append(f"Assert condition must be bool: {e}")
+            self._add_error(f"Assert condition must be bool: {e}")
     
     def _check_throw_stmt(self, stmt: Any):
         """Check the thrown value's type.  Runtime traps stay uncaught by design."""
@@ -1212,25 +1347,37 @@ class TypeChecker:
         self.env = old_env
     
     def _check_func_decl(self, stmt: Any):
+        # `func id<T>(x: T) -> T` — bind each type parameter name to a FRESH type
+        # variable for the duration of this declaration.  The bindings live in the
+        # enclosing environment (so both the parameter annotations and the return
+        # annotation resolve through it) and are removed again before returning.
+        outer_env = self.env
+        type_param_vars: Dict[str, TypeVar] = {}
+        if getattr(stmt, 'type_params', None):
+            for name in stmt.type_params:
+                tv = TypeVar(name)
+                type_param_vars[name] = tv
+                outer_env = outer_env.extend(name, TypeScheme(vars=[], body=tv))
+
         # Create new environment for function body
-        func_env = TypeEnv(parent=self.env)
+        func_env = TypeEnv(parent=outer_env)
         prev_func = self._current_func
         if self._recording:
             self._current_func = stmt.name
-        
+
         # Add parameter bindings
         param_types = []
         for param in stmt.params:
-            param_type = self._type_ann_to_type(param.type_ann, self.env) if param.type_ann else Type.var()
+            param_type = self._type_ann_to_type(param.type_ann, outer_env) if param.type_ann else Type.var()
             param_types.append(param_type)
             func_env = func_env.extend(param.name, TypeScheme(vars=[], body=param_type))
             if self._recording:
                 self.recorded_locals[(stmt.name, param.name)] = param_type
-        
+
         # Declared return type, needed while checking the body so `return <value>`
         # can be unified against it.
         if stmt.return_type:
-            return_type = self._type_ann_to_type(stmt.return_type, self.env)
+            return_type = self._type_ann_to_type(stmt.return_type, outer_env)
         else:
             return_type = Type.prim('void')
 
@@ -1239,16 +1386,32 @@ class TypeChecker:
         self.env = func_env
         prev_return_type = getattr(self, '_current_return_type', None)
         self._current_return_type = return_type
+        saved_type_params = self.inferencer.active_type_params
+        self.inferencer.active_type_params = set(type_param_vars.values())
         for body_stmt in stmt.body.statements:
             self._check_stmt(body_stmt)
+        self.inferencer.active_type_params = saved_type_params
         self._current_return_type = prev_return_type
         self.env = old_env
         self._current_func = prev_func
-        
+
         # Add function to environment
         func_type = Type.func(param_types, return_type)
-        scheme = self.env.generalize(func_type, set())
-        self.env = self.env.extend(stmt.name, scheme)
+        if type_param_vars:
+            # Quantify the declared parameters FIRST, in declaration order, then any
+            # other free variables (un-annotated parameters).  A fixed order is what
+            # makes the compiler's specialisation key deterministic.
+            ordered = [type_param_vars[n] for n in stmt.type_params]
+            seen = set(ordered)
+            for var in sorted(TypeEnv()._free_vars(func_type), key=lambda v: v.id):
+                if var not in seen:
+                    ordered.append(var)
+                    seen.add(var)
+            scheme = TypeScheme(vars=ordered, body=func_type)
+            self.generic_vars[stmt.name] = list(ordered)
+        else:
+            scheme = outer_env.generalize(func_type, set())
+        self.env = outer_env.extend(stmt.name, scheme)
         if self._recording:
             self.recorded_funcs[stmt.name] = func_type
     
@@ -1270,8 +1433,9 @@ class TypeChecker:
             try:
                 self.inferencer.unify(value_type, expected)
             except UnificationError as e:
-                self.errors.append(f"Const type mismatch: {e}")
-        
+                self._add_error(f"Const type mismatch: {e}")
+
+        value_type = self._prune_type(value_type)
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
         self._consts.add(stmt.name)
@@ -1285,8 +1449,9 @@ class TypeChecker:
             try:
                 self.inferencer.unify(value_type, expected)
             except UnificationError as e:
-                self.errors.append(f"Var type mismatch: {e}")
-        
+                self._add_error(f"Var type mismatch: {e}")
+
+        value_type = self._prune_type(value_type)
         scheme = self.env.generalize(value_type, set())
         self.env = self.env.extend(stmt.name, scheme)
         if self._recording:
@@ -1310,6 +1475,12 @@ class TypeChecker:
         elif ann.kind == 'struct':
             # Check if this is a user-defined struct (in env.structs)
             struct_name = ann.value
+            # A bare identifier may also be a bound TYPE PARAMETER (`func id<T>(x: T)`).
+            # It must resolve to the parameter's type variable, not to a struct named T.
+            if env is not None:
+                scheme = env.lookup(struct_name)
+                if scheme is not None and isinstance(scheme.body, TypeVar):
+                    return scheme.body
             if env and env.lookup_struct(struct_name):
                 return Type.generic(struct_name, [])
             return Type.struct(struct_name)

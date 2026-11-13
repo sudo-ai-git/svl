@@ -36,6 +36,10 @@ class TypeVerifyResult:
     semantic_bucket_match: bool = True
     golden_ref_match: bool = True
     errors: List[str] = field(default_factory=list)
+    # Parallel to `errors`: 1-based source line per diagnostic (None when not
+    # attributable).  Populated from the checker's span tracking for the `errors`
+    # entries that come from it; other layers' errors stay None.
+    error_lines: List[Optional[int]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
 
@@ -76,11 +80,13 @@ class TypeLayer:
 
             # Type check
             ok, errors = self.type_checker.check_program(ast)
+            checker_lines = list(self.type_checker.error_lines)
 
             if not ok:
                 return TypeVerifyResult(
                     passed=False,
-                    errors=errors
+                    errors=errors,
+                    error_lines=checker_lines + [None] * (len(errors) - len(checker_lines))
                 )
 
             # Dual-stream verification
@@ -112,6 +118,9 @@ class TypeLayer:
 
             all_ok = ok and mod5_ok and z2_ok and structural_ok and dual_ok and contract_ok and golden_ref_match
             all_errors = errors + mod5_errors + z2_errors + struct_errors + contract_errors
+            # Only the checker's own diagnostics carry a line; the other layers' errors
+            # are structural (a checksum, a bucket), not tied to a source position.
+            all_lines = (checker_lines + [None] * (len(all_errors) - len(checker_lines)))
 
             return TypeVerifyResult(
                 passed=all_ok,
@@ -120,13 +129,15 @@ class TypeLayer:
                 structural_match=structural_ok,
                 dual_stream_agreement=dual_ok,
                 golden_ref_match=golden_ref_match,
-                errors=all_errors
+                errors=all_errors,
+                error_lines=all_lines
             )
 
         except Exception as e:
             return TypeVerifyResult(
                 passed=False,
-                errors=[f"Type verification error: {e}"]
+                errors=[f"Type verification error: {e}"],
+                error_lines=[None]
             )
 
     def _run_dual_stream(self, ast: Any) -> DualStreamResult:

@@ -176,6 +176,10 @@ class FuncDecl(ASTNode):
     effects: Optional['EffectRow'] = None
     requires: Optional['Expr'] = None   # precondition: must hold on entry
     ensures: Optional['Expr'] = None    # postcondition: may refer to `result` and params
+    # `func id<T>(x: T) -> T` — the function is parametric in these type names.
+    # They are bound as fresh type variables while checking the body and generalised
+    # into the function's type scheme, so one definition serves every instantiation.
+    type_params: Optional[List[str]] = None
 
 
 @dataclass
@@ -1032,10 +1036,18 @@ class Parser:
     def parse_func_decl(self) -> FuncDecl:
         name_tok = self.expect(TokenType.IDENT)
         name = name_tok.value
+        # Optional type parameters: `func id<T, U>(...)`.  These bind the names used in
+        # the annotations that follow; they are not arguments.
+        type_params = self.parse_type_params()
         self.expect(TokenType.LPAREN)
         params = self.parse_params()
         return_type = None
         if self.match(TokenType.TYPE):
+            return_type = self.parse_type_expr()
+        elif self.match(TokenType.ARROW):
+            # `func id<T>(x: T) -> T` — the arrow form reads naturally for a
+            # parametric signature and is unambiguous here: the parameter list has
+            # just closed, so the next token cannot be a comparison.
             return_type = self.parse_type_expr()
         effects = None
         if self.match(TokenType.EXCLAMATION):
@@ -1048,8 +1060,22 @@ class Parser:
             type=NodeType.FUNC_DECL,
             line=name_tok.line, column=name_tok.column, offset=name_tok.offset,
             name=name, params=params, return_type=return_type, body=body, effects=effects,
-            requires=requires, ensures=ensures
+            requires=requires, ensures=ensures, type_params=type_params
         )
+
+    def parse_type_params(self) -> Optional[List[str]]:
+        """`<T, U>` immediately after a function name, or None."""
+        if not self.match(TokenType.LT):
+            return None
+        names: List[str] = []
+        if not (self.current and self.current.type == TokenType.GT):
+            while True:
+                tok = self.expect(TokenType.IDENT)
+                names.append(tok.value)
+                if not self.match(TokenType.COMMA):
+                    break
+        self.expect(TokenType.GT)
+        return names
 
     def parse_contract_clauses(self):
         """Parse optional `requires <expr>` / `ensures <expr>` clauses.

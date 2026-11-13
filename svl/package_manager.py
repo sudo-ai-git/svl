@@ -320,9 +320,21 @@ class PackageManager:
         if hashlib.sha256((dest / "source.svl").read_bytes()).hexdigest() != meta.get("source_sha256", ""):
             raise ValueError("install failed: written source does not match the registry hash")
 
-        from svl.project import load_project, record_dependency
+        from svl.project import (load_project, record_dependency,
+                                 load_lockfile, save_lockfile, locked_dependency,
+                                 Lockfile)
         project = load_project(into)
         record_dependency(project, name, version)
+
+        # Pin the exact bytes that were installed.  `svl.toml` says WHICH versions;
+        # `svl.lock` says WHICH BYTES, so a later build can prove the tree has not
+        # drifted from the one that was verified.
+        lock = load_lockfile(into) or Lockfile()
+        lock.dependencies[name] = locked_dependency(
+            project, name, version,
+            source_bytes=(dest / "source.svl").read_bytes(),
+            wasm_text=(dest / "module.wasm").read_text(encoding="utf-8"))
+        save_lockfile(into, lock)
         return dest / "source.svl"
 
     def list_installed(self) -> List[PackageMetadata]:

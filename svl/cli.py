@@ -52,6 +52,27 @@ def _project_context(file_path, base_dir=None):
     return base, extra
 
 
+def _resolve_source(path):
+    """Accept a source file OR a project directory; return the `.svl` file to compile."""
+    if os.path.isdir(path):
+        from svl.project import project_source_path, SOURCE_NAME
+        found = project_source_path(path)
+        if found is None:
+            raise SystemExit(f"error: {path} has no {SOURCE_NAME}")
+        return str(found)
+    return path
+
+
+def _lock_problems(file_path):
+    """Lockfile drift for the project enclosing `file_path` (empty when consistent)."""
+    try:
+        from svl.project import find_project_root, verify_lockfile
+        root = find_project_root(file_path)
+        return verify_lockfile(root) if root is not None else []
+    except Exception as exc:                                    # noqa: BLE001
+        return [f"could not read the project lockfile: {exc}"]
+
+
 def cmd_version(args) -> int:
     from svl import __version__
     print(__version__)
@@ -59,15 +80,23 @@ def cmd_version(args) -> int:
 
 
 def cmd_build(args) -> int:
-    src = open(args.file, encoding="utf-8").read()
+    path = _resolve_source(args.file)
+    src = open(path, encoding="utf-8").read()
     if args.interface:
         from svl.interface import generate_interface, interface_path_for, write_interface
-        out_path = interface_path_for(args.file)
+        out_path = interface_path_for(path)
         write_interface(out_path, generate_interface(src))
         print(f"interface written: {out_path}")
         return 0
+    drift = _lock_problems(path)
+    if drift:
+        for problem in drift:
+            print(f"error: {problem}", file=sys.stderr)
+        print("error: the installed dependency tree does not match svl.lock",
+              file=sys.stderr)
+        return 1
     from svl.compiler_wasm import compile_file_to_wasm
-    base, extra = _project_context(args.file, getattr(args, "base_dir", None))
+    base, extra = _project_context(path, getattr(args, "base_dir", None))
     try:
         wat = compile_file_to_wasm(src, strict=not args.no_strict, prove=args.prove,
                                    base_dir=base, extra_dirs=extra)
@@ -89,9 +118,15 @@ def cmd_build(args) -> int:
 def cmd_run(args) -> int:
     from svl.compiler_wasm import compile_file_to_wasm
     from svl.repl import run_wat
-    src = open(args.file, encoding="utf-8").read()
+    path = _resolve_source(args.file)
+    src = open(path, encoding="utf-8").read()
+    drift = _lock_problems(path)
+    if drift:
+        for problem in drift:
+            print(f"error: {problem}", file=sys.stderr)
+        return 1
     try:
-        base, extra = _project_context(args.file, getattr(args, "base_dir", None))
+        base, extra = _project_context(path, getattr(args, "base_dir", None))
         wat = compile_file_to_wasm(src, strict=not args.no_strict, prove=args.prove,
                                    base_dir=base, extra_dirs=extra)
         foreign = _load_links(args.link)
@@ -127,8 +162,10 @@ def _load_links(paths):
 
 def cmd_check(args) -> int:
     from svl.verify_gate import verify_program
-    src = open(args.file, encoding="utf-8").read()
-    base, extra = _project_context(args.file, getattr(args, "base_dir", None))
+    path = _resolve_source(args.file)
+    src = open(path, encoding="utf-8").read()
+    drift = _lock_problems(path)
+    base, extra = _project_context(path, getattr(args, "base_dir", None))
     try:
         from svl.compiler_wasm import compile_file_to_wasm
         # Compiling runs the gate on the LINKED program (imports included), so the
@@ -137,9 +174,10 @@ def cmd_check(args) -> int:
         problems = verify_program(src)
     except Exception as exc:
         problems = [str(exc)]
+    problems = list(drift) + list(problems)
     if args.json:
         import json
-        print(json.dumps({"file": args.file, "ok": not problems,
+        print(json.dumps({"file": path, "ok": not problems,
                           "problems": problems}, indent=2))
     elif not problems:
         print("verified: no problems found")
@@ -254,6 +292,103 @@ def cmd_lsp(args) -> int:
     return 0
 
 
+def cmd_new(args) -> int:
+    """Scaffold a project and prove the starter program compiles and runs."""
+    from svl.project import create_project, ManifestError, SOURCE_NAME
+    try:
+        project = create_project(args.name, args.version, root=args.dir)
+    except ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    src = (project.root / SOURCE_NAME).read_text(encoding="utf-8")
+    # The scaffold is verified, not assumed: compile it, then run it.
+    try:
+        from svl.compiler_wasm import compile_file_to_wasm
+        from svl.repl import run_wat
+        wat = compile_file_to_wasm(src, strict=True)
+        rv, out = run_wat(wat)
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"error: the generated starter did not verify: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"created {project.root}")
+    print(f"  {project.manifest_path()}")
+    print(f"  {project.root / SOURCE_NAME}")
+    print(f"starter verified: main() returned {rv}")
+    if out:
+        sys.stdout.write(out.decode("utf-8", "replace"))
+    print("run it with: svlc run", project.root)
+    return 0
+
+
+def cmd_agent(args) -> int:
+    """Machine-readable compile/run/verify report for one source file.
+
+    This is the agent interface: a single JSON document on stdout with no prose, so an
+    automated caller can branch on `ok` without parsing human output.  `--wat` adds the
+    binary artifact as base64.
+    """
+    import base64
+    import json
+    import time
+
+    path = _resolve_source(args.file)
+    src = open(path, encoding="utf-8").read()
+    drift = _lock_problems(path)
+    base, extra = _project_context(path, getattr(args, "base_dir", None))
+
+    report = {
+        "file": path,
+        "ok": False,
+        "compiled": False,
+        "wat_sha256": None,
+        "wat_bytes": None,
+        "result": None,
+        "stdout": None,
+        "problems": [],
+        "timings_ms": {},
+    }
+    if args.wat:
+        report["wasm_base64"] = None
+
+    t0 = time.perf_counter()
+    try:
+        from svl.compiler_wasm import compile_file_to_wasm, wasm_sha256
+        wat = compile_file_to_wasm(src, strict=not args.no_strict, prove=args.prove,
+                                   base_dir=base, extra_dirs=extra)
+        report["compiled"] = True
+        report["wat_sha256"] = wasm_sha256(wat)
+        report["wat_bytes"] = len(wat.encode("utf-8"))
+    except Exception as exc:                                    # noqa: BLE001
+        report["problems"].append(str(exc))
+        report["timings_ms"]["compile"] = round((time.perf_counter() - t0) * 1000, 3)
+        report["problems"].extend(drift)
+        print(json.dumps(report, indent=2))
+        return 1
+    report["timings_ms"]["compile"] = round((time.perf_counter() - t0) * 1000, 3)
+
+    t1 = time.perf_counter()
+    try:
+        from svl.repl import run_wat
+        foreign = _load_links(args.link) if getattr(args, "link", None) else None
+        rv, out = run_wat(wat, foreign=foreign)
+        report["result"] = rv
+        report["stdout"] = out.decode("utf-8", "replace") if out else ""
+    except Exception as exc:                                    # noqa: BLE001
+        report["problems"].append(f"run: {exc}")
+    report["timings_ms"]["run"] = round((time.perf_counter() - t1) * 1000, 3)
+
+    if args.wat:
+        import wasmtime
+        report["wasm_base64"] = base64.b64encode(wasmtime.wat2wasm(wat)).decode("ascii")
+
+    report["problems"].extend(drift)
+    report["ok"] = not report["problems"]
+    print(json.dumps(report, indent=2))
+    return 0 if report["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="svlc",
@@ -331,6 +466,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("corpus", help="run the corpus regression check").set_defaults(func=cmd_corpus)
     sub.add_parser("repl", help="interactive shell").set_defaults(func=cmd_repl)
     sub.add_parser("lsp", help="language server over stdio").set_defaults(func=cmd_lsp)
+
+    n = sub.add_parser("new", help="scaffold a project (svl.toml + source.svl)")
+    n.add_argument("name", help="project name (a directory of this name is created)")
+    n.add_argument("--version", default="0.1.0", help="initial version (default 0.1.0)")
+    n.add_argument("--dir", default=None,
+                   help="parent directory (default: create ./<name>)")
+    n.set_defaults(func=cmd_new)
+
+    ag = sub.add_parser("agent", help="JSON compile/run/verify report for an agent")
+    ag.add_argument("file", help="source file, or a project directory")
+    ag.add_argument("--prove", action="store_true")
+    ag.add_argument("--no-strict", action="store_true")
+    ag.add_argument("--wat", action="store_true",
+                    help="include the binary artifact as base64")
+    ag.add_argument("--link", action="append", metavar="MODULE.wasm")
+    ag.add_argument("--base-dir", default=None)
+    ag.set_defaults(func=cmd_agent)
     return p
 
 

@@ -41,6 +41,11 @@ class InferredTypes:
     local_types: Dict[Tuple[str, str], Type] = field(default_factory=dict)
     expr_types: Dict[int, Type] = field(default_factory=dict)
     func_types: Dict[str, Type] = field(default_factory=dict)
+    # Generic functions and the concrete instantiations their call sites require:
+    #   generic_vars: name -> quantified variables, in specialisation-key order
+    #   call_specializations: id(CallExpr) -> (callee, [(type-param name, concrete type)])
+    generic_vars: Dict[str, List[TypeVar]] = field(default_factory=dict)
+    call_specializations: Dict[int, Tuple[str, List[Tuple[str, Type]]]] = field(default_factory=dict)
 
     def local_type(self, func_name: str, name: str) -> Optional[Type]:
         return self.local_types.get((func_name, name))

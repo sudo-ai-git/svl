@@ -2,7 +2,10 @@
 # Language Server Protocol for SVL (Spike S12)
 # pygls-based implementation with real-time verification diagnostics
 
-from typing import Optional, List, Dict, Any, Union
+from __future__ import annotations
+
+import re
+from typing import Optional, List, Dict, Any, Union, Tuple
 from dataclasses import dataclass, field
 import asyncio
 import json
@@ -31,6 +34,38 @@ from svl.theorem_layer import verify_theorem_layer, TheoremVerificationConfig, T
 from svl.compiler_wasm import compile_file_to_wasm, wasm_sha256
 from svl.lexer import tokenize
 from svl.parser_rd import parse
+
+
+_LINE_RE = re.compile(r"line[= ](\d+)", re.IGNORECASE)
+
+
+def _range_for(message: str, source_lines: List[str],
+               line: Optional[int] = None) -> Range:
+    """The LSP range for a diagnostic.
+
+    `line` is the checker's 1-based statement line when it has one.  Otherwise the
+    message itself may carry a token position (`... line=3 ...`), and failing that a
+    quoted name in the message is searched for in the source.  A diagnostic with no
+    derivable position is reported at line 0 — published, not silently dropped.
+    """
+    one_based = None
+    if line is not None and line > 0:
+        one_based = line
+    else:
+        match = _LINE_RE.search(message)
+        if match:
+            one_based = int(match.group(1))
+        else:
+            for name in re.findall(r"'([^']+)'", message):
+                for index, text in enumerate(source_lines):
+                    if name in text:
+                        one_based = index + 1
+                        break
+                if one_based:
+                    break
+    zero_based = max(one_based - 1, 0) if one_based else 0
+    return Range(start=Position(line=zero_based, character=0),
+                 end=Position(line=zero_based, character=0))
 
 
 @dataclass
@@ -132,15 +167,23 @@ class SVLLanguageServer(LanguageServer):
             self._verify_document(uri, full=True)
 
     def _verify_document(self, uri: str, full: bool = False):
-        """Run verification and publish diagnostics."""
+        """Run verification and publish diagnostics.
+
+        Every diagnostic carries a real source range when one can be derived: type
+        errors come from the checker's per-statement span tracking, parse errors from
+        the token's own line (with a text search as a fallback).  A diagnostic that
+        genuinely has no position is still published at line 0 rather than dropped.
+        """
         doc_state = self.documents.get(uri)
         if not doc_state:
             return
-        
+
         # Skip if already verified this version (unless full)
         if not full and doc_state.last_verified_version == doc_state.version:
             return
-        
+
+        source_lines = doc_state.content.splitlines()
+
         # Parse and verify
         try:
             tokens = tokenize(doc_state.content)
@@ -150,61 +193,63 @@ class SVLLanguageServer(LanguageServer):
         except Exception as e:
             self._publish_diagnostics(uri, [
                 Diagnostic(
-                    range=Range(start=Position(line=0, character=0), end=Position(line=0, character=0)),
+                    range=_range_for(str(e), source_lines),
                     severity=DiagnosticSeverity.Error,
                     message=f"Parse error: {e}",
                     source="svl"
                 )
             ])
             return
-        
+
         # Run verification layers
         source = doc_state.content
         diagnostics = []
-        
+
         # Layer 1: Syntax
         syntax_result = verify_syntax(source, self.syntax_config)
         if not syntax_result.passed:
             for error in syntax_result.ast_guard_violations:
                 diagnostics.append(Diagnostic(
-                    range=Range(start=Position(line=0, character=0), end=Position(line=0, character=0)),
+                    range=_range_for(error, source_lines),
                     severity=DiagnosticSeverity.Error,
                     message=f"Syntax: {error}",
                     source="svl-syntax"
                 ))
             if syntax_result.error_message:
                 diagnostics.append(Diagnostic(
-                    range=Range(start=Position(line=0, character=0), end=Position(line=0, character=0)),
+                    range=_range_for(syntax_result.error_message, source_lines),
                     severity=DiagnosticSeverity.Error,
                     message=f"Syntax: {syntax_result.error_message}",
                     source="svl-syntax"
                 ))
-        
-        # Layer 2: Types
+
+        # Layer 2: Types — `error_lines` is parallel to `errors`.
         type_result = verify_type(source, self.type_config)
         if not type_result.passed:
-            for error in type_result.errors:
+            lines = getattr(type_result, "error_lines", []) or []
+            for index, error in enumerate(type_result.errors):
+                line = lines[index] if index < len(lines) else None
                 diagnostics.append(Diagnostic(
-                    range=Range(start=Position(line=0, character=0), end=Position(line=0, character=0)),
+                    range=_range_for(error, source_lines, line),
                     severity=DiagnosticSeverity.Error,
                     message=f"Type: {error}",
                     source="svl-types"
                 ))
-        
+
         # Layer 3: Theorem
         theorem_result = verify_theorem_layer(source, self.theorem_config)
         if not theorem_result.passed:
             for error in theorem_result.errors:
                 diagnostics.append(Diagnostic(
-                    range=Range(start=Position(line=0, character=0), end=Position(line=0, character=0)),
+                    range=_range_for(error, source_lines),
                     severity=DiagnosticSeverity.Warning,  # Theorem is probabilistic
                     message=f"Theorem: {error}",
                     source="svl-theorem"
                 ))
-        
+
         # Update verified version
         doc_state.last_verified_version = doc_state.version
-        
+
         # Publish diagnostics
         self._publish_diagnostics(uri, diagnostics)
 

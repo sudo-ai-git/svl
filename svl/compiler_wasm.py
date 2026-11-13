@@ -19,7 +19,7 @@ from svl.serialization import to_binary
 from svl.type_lowering import (
     infer_types, type_to_valtype, is_float, is_int, struct_name_of,
 )
-from svl.type_inference import TypeVar
+from svl.type_inference import Type, TypeVar
 
 
 # ============================================================================
@@ -230,6 +230,16 @@ class WasmCompiler:
         self._closure_sigs = {}
         self._closure_types = []
         self._closure_type_map = {}
+        # Parametric polymorphism: generic function templates, the concrete
+        # instantiations their call sites need, and the stack of substitutions active
+        # while a specialised body is being compiled.  The stack is what makes nested
+        # generics work: `twice<int>` bodies see `{T: int}`, so a call inside them that
+        # was recorded symbolically as `id<T>` resolves to `id<int>`.
+        self._generic_decls: Dict[str, Tuple[Any, Any]] = {}
+        self._specializations: List[Tuple[str, str, Dict[int, Any]]] = []
+        self._spec_names: set = set()
+        self._pending_specializations: List[Tuple[str, str, Dict[int, Any]]] = []
+        self._subst_stack: List[Dict[int, Any]] = []
     
     def compile(self, program: Program) -> str:
         """Compile full SVL program to WASM text format."""
@@ -240,6 +250,11 @@ class WasmCompiler:
         self._local_struct_types = {}
         self._array_locals = set()
         self._try_stack = []
+        self._generic_decls = {}
+        self._specializations = []
+        self._spec_names = set()
+        self._pending_specializations = []
+        self._subst_stack = []
         # Phase 0: run the type checker and keep its inferred types. This is the point
         # where the type layer starts driving codegen: locals, arithmetic width, struct
         # resolution and un-annotated parameters are all lowered from these types.
@@ -248,13 +263,32 @@ class WasmCompiler:
         self._collect_declarations(program)
         # Phase 1b: Closure analysis — every lambda, its index and its captures.
         self._collect_lambdas(program)
-        
+
         # Phase 2: Compute struct layouts
         self._compute_struct_layouts(program)
-        
+
+        # Phase 2b: Monomorphisation plan — one concrete function per distinct
+        # (generic, instantiation) pair its call sites require.
+        self._plan_specializations(program)
+
         # Phase 3: Compile functions
         self._compile_functions(program)
-        
+
+        # Phase 3a: Compile one concrete body per planned generic instantiation.  A
+        # body may call another generic with a symbolic argument, which plans a further
+        # instance; repeat until no new ones appear.
+        done_specializations = set()
+        while self._specializations:
+            qualified, name, mapping = self._specializations.pop(0)
+            if name in done_specializations:
+                continue
+            done_specializations.add(name)
+            self._compile_specialization(qualified, name, mapping)
+            if self._pending_specializations:
+                self._specializations.extend(self._pending_specializations)
+                self._pending_specializations = []
+                self._specializations.sort(key=lambda item: item[1])
+
         # Phase 3b: Compile the generated closure functions.
         self._compile_lambdas()
 
@@ -444,6 +478,12 @@ class WasmCompiler:
                     self._collect_extern(item)
                 elif isinstance(item, FuncDecl):
                     func_name = f"{module.name}${item.name}"
+                    if getattr(item, 'type_params', None):
+                        # A generic function has no single WASM signature: each call site
+                        # instantiates it with concrete types (Phase 2b).  Keep the
+                        # template; it is compiled once per distinct instantiation.
+                        self._generic_decls[func_name] = (module, item)
+                        continue
                     func_type = lower_func_type(
                         [self._param_valtype(item.name, p) for p in item.params],
                         item.return_type if item.return_type else TypeExpr(
@@ -500,18 +540,21 @@ class WasmCompiler:
         `func_name` is the backend's module-qualified name (`m$main`); the inference keys
         are the unqualified SVL names (`main`), so the qualified name is tried first and
         the bare suffix second.
+
+        While a generic function's body is being specialised, quantified type variables
+        in the recorded type are replaced by the concrete types of this instantiation.
         """
         if self.inferred is None:
             return None
         t = self.inferred.local_type(func_name, name)
         if t is not None:
-            return t
+            return self._subst_type(t)
         if func_name and '$' in func_name:
-            return self.inferred.local_type(func_name.split('$')[-1], name)
+            return self._subst_type(self.inferred.local_type(func_name.split('$')[-1], name))
         return None
 
     def _inferred_expr_type(self, expr) -> Optional[Any]:
-        return self.inferred.expr_type(expr) if self.inferred is not None else None
+        return self._subst_type(self.inferred.expr_type(expr) if self.inferred is not None else None)
 
     def _valtype_for_inferred(self, t, default: WasmValType) -> WasmValType:
         """Lower an inferred type to a WASM valtype, keeping `default` when unknown.
@@ -534,9 +577,18 @@ class WasmCompiler:
         Un-annotated parameters used to be dropped from the function signature entirely,
         so a body referencing them emitted `local.get $x` for a param that was never
         declared -- an "unknown local" assembly failure.
+
+        A bare type parameter (`x: T`) lowers to i32 by default; inside a
+        specialisation the concrete instantiation is known, so the substituted inferred
+        type decides (e.g. `T = float` must be an f64 parameter).
         """
         if p.type_ann is not None:
-            return lower_type_to_wasm(p.type_ann)
+            default = lower_type_to_wasm(p.type_ann)
+            if self._subst_stack and getattr(p.type_ann, 'kind', None) == 'struct':
+                inferred = self._inferred_local_type(func_name, p.name)
+                if inferred is not None:
+                    return self._valtype_for_inferred(inferred, default)
+            return default
         return self._valtype_for_inferred(
             self._inferred_local_type(func_name, p.name), WasmValType.I32)
 
@@ -587,12 +639,201 @@ class WasmCompiler:
                     # Round the size up to 4 bytes so consecutive allocations stay aligned.
                     self.state.struct_sizes[item.name] = (offset + 3) // 4 * 4
     
+    # ---- parametric polymorphism (monomorphisation) ----------------------
+
+    def _plan_specializations(self, program: Program) -> None:
+        """Plan concrete instances for call sites in NON-generic code.
+
+        Calls inside a generic body are planned lazily while that body's own
+        instantiation is compiled: their arguments may mention the enclosing type
+        parameters (`id(x)` inside `twice<T>`), so their instantiation is symbolic
+        until the outer function's substitution is known.
+        """
+        from svl.parser_rd import CallExpr
+
+        self._specializations = []
+        if self.inferred is None or not self.inferred.call_specializations:
+            return
+
+        seen = set()
+        for node in self._top_level_calls(program):
+            spec = self.inferred.call_specializations.get(id(node))
+            if spec is None:
+                continue
+            callee_name, pairs = spec
+            qualified = self._qualified_generic(callee_name)
+            if qualified is None:
+                continue
+            entry = self._generic_decls.get(qualified)
+            if entry is None:
+                continue
+            key = self._specialization_key(entry[1], pairs)
+            name = f"{qualified}${key}"
+            if name not in seen:
+                seen.add(name)
+                # The substitution codegen applies is keyed by the body's own
+                # variables, recovered from the (name, concrete) pairs.
+                self._specializations.append(
+                    (qualified, name, self._mapping_from_pairs(entry[1], pairs)))
+        self._spec_names = set(seen)
+        self._specializations.sort(key=lambda item: item[1])
+
+    def _top_level_calls(self, program: Program):
+        """Every CallExpr belonging to non-generic top-level code, pre-order."""
+        from svl.closures import walk
+        from svl.parser_rd import CallExpr
+
+        stack = []
+        for module in getattr(program, 'modules', []):
+            for stmt in getattr(getattr(module, 'body', None), 'statements', []):
+                stack.append(stmt)
+        for item in getattr(program, 'items', []):
+            stack.append(item)
+        for stmt in stack:
+            if isinstance(stmt, FuncDecl) and getattr(stmt, 'type_params', None):
+                continue
+            for node in walk(stmt):
+                if isinstance(node, CallExpr):
+                    yield node
+
+    def _specialization_key(self, decl: FuncDecl, pairs: List[Tuple[str, Any]]) -> str:
+        """A deterministic name fragment for one instantiation of `decl`.
+
+        Declared type parameters come first, in declaration order; any remaining
+        solved variables follow sorted by name.  Using names (not variable identity)
+        keeps the key stable across call sites resolved against different schemes.
+        """
+        by_name = dict(pairs)
+        parts: List[str] = []
+        used = set()
+        for name in (getattr(decl, 'type_params', None) or []):
+            if name in by_name:
+                parts.append(self._mangle_type(by_name[name]))
+                used.add(name)
+        for name in sorted(by_name):
+            if name not in used:
+                parts.append(self._mangle_type(by_name[name]))
+        return "_".join(parts)
+
+    def _mapping_from_pairs(self, decl: FuncDecl,
+                            pairs: List[Tuple[str, Any]]) -> Dict[int, Any]:
+        """Turn (name, concrete) pairs into an id-keyed substitution for codegen.
+
+        The function body's recorded types reference the variables of its fully
+        checked scheme (`generic_vars`), so names are resolved against that list.
+        """
+        by_name = dict(pairs)
+        mapping: Dict[int, Any] = {}
+        for var in ((self.inferred.generic_vars if self.inferred else None) or {}).get(decl.name, []):
+            concrete = by_name.get(var.name or f"t{var.id}")
+            if concrete is not None:
+                # Resolve through the enclosing specialisations: a symbolic `id<T>`
+                # inside `twice<int>` becomes `id<int>` here.
+                mapping[id(var)] = self._subst_type(concrete)
+        return mapping
+
+    @staticmethod
+    def _mangle_type(t: Any) -> str:
+        """A WAT-identifier-safe fragment naming a type."""
+        if t is None:
+            return "unknown"
+        if isinstance(t, TypeVar):
+            return t.name or "var"
+        kind = getattr(t, 'kind', None)
+        args = getattr(t, 'args', []) or []
+        if kind == 'prim':
+            return str(args[0]) if args else 'prim'
+        if kind == 'struct':
+            return str(args[0]) if args else 'struct'
+        if kind == 'generic':
+            name = t.generic_name or 'G'
+            inner = "_".join(WasmCompiler._mangle_type(a) for a in args)
+            return f"{name}_{inner}" if inner else name
+        if kind == 'array':
+            return f"arr_{WasmCompiler._mangle_type(args[0])}" if args else 'arr'
+        if kind == 'tuple':
+            return "tup_" + "_".join(WasmCompiler._mangle_type(a) for a in args)
+        if kind == 'func':
+            ret = WasmCompiler._mangle_type(args[-1]) if args else 'void'
+            params = "_".join(WasmCompiler._mangle_type(a) for a in args[:-1])
+            return f"fn_{params}_{ret}"
+        return str(kind)
+
+    def _subst_type(self, t: Any) -> Any:
+        """Apply the active specialisation stack to a type.
+
+        Innermost bindings win; a binding whose value is itself a variable from an
+        enclosing generic is followed outwards, so `id<T>` inside `twice<int>`
+        resolves to `id<int>`.
+        """
+        if t is None or not self._subst_stack:
+            return t
+        for mapping in reversed(self._subst_stack):
+            if isinstance(t, TypeVar) and id(t) in mapping:
+                t = mapping[id(t)]
+        if not isinstance(t, Type):
+            return t
+        new_args = [self._subst_type(a) if isinstance(a, Type) else a
+                    for a in t.args]
+        t2 = Type(t.kind)
+        t2.args = new_args
+        if t.kind == 'generic':
+            t2.generic_name = t.generic_name
+        return t2
+
+    def _specialized_return_valtype(self, decl: FuncDecl) -> Optional[WasmValType]:
+        """The WASM result type of one instantiation, or None when it returns void."""
+        func_type = ((self.inferred.func_types if self.inferred else None) or {}).get(decl.name)
+        ret = func_type.args[-1] if func_type is not None and func_type.args else None
+        ret = self._subst_type(ret)
+        if ret is None:
+            return None
+        if getattr(ret, 'kind', None) == 'prim' and ret.args and ret.args[0] in ('void', 'never'):
+            return None
+        return self._valtype_for_inferred(ret, WasmValType.I32)
+
+    def _compile_specialization(self, qualified: str, name: str,
+                                mapping: Dict[int, Any]) -> None:
+        """Compile one concrete instance of a generic function."""
+        module, decl = self._generic_decls[qualified]
+        self._subst_stack.append(dict(mapping))
+        try:
+            params = [(p.name, self._param_valtype(decl.name, p)) for p in decl.params]
+            ret = self._specialized_return_valtype(decl)
+            func = WasmFunction(
+                name=name,
+                func_type=WasmFuncType(params=[vt for _n, vt in params],
+                                       results=[ret] if ret is not None else []),
+                params=params,
+                locals=[],
+                body=[],
+                is_export=False,
+            )
+            self.state.functions[name] = func
+            self.state.current_function = func
+            self.state.local_counter = len(func.params)
+            self.state.label_counter = 0
+            self._known_locals = self._collect_local_names(decl.body) | {
+                n for n, _t in func.params}
+            for p in decl.params:
+                if (p.type_ann is not None
+                        and getattr(p.type_ann, 'kind', None) == 'struct'
+                        and p.type_ann.value in self.state.struct_layouts):
+                    self._local_struct_types[(name, p.name)] = p.type_ann.value
+            self._compile_block(decl.body, is_function_body=True)
+            self.state.current_function = None
+        finally:
+            self._subst_stack.pop()
+
     def _compile_functions(self, program: Program):
         """Compile all function bodies."""
         for module in program.modules:
             for item in module.body.statements:
                 if isinstance(item, FuncDecl):
                     func_name = f"{module.name}${item.name}"
+                    if getattr(item, 'type_params', None):
+                        # Generic: compiled per instantiation in Phase 3a instead.
+                        continue
                     func = self.state.functions[func_name]
                     # Record struct-typed params (layouts exist by now) so `p.field`
                     # resolves inside the body.
@@ -1368,7 +1609,9 @@ class WasmCompiler:
             self._compile_closure_call(expr, callee_type)
             return
 
-        callee = self._resolve_callee(expr.callee, getattr(expr, 'line', '?'))
+        callee = self._specialized_callee(expr)
+        if callee is None:
+            callee = self._resolve_callee(expr.callee, getattr(expr, 'line', '?'))
         # `print` is a host import taking (ptr: i32, len: i32). A lone string-literal
         # argument is therefore expanded into its (ptr, len) pair — pushing only the
         # pointer left the call one operand short and the module failed to validate.
@@ -1429,6 +1672,46 @@ class WasmCompiler:
         if getattr(t, 'kind', None) == 'prim':
             return str(t)
         return getattr(t, 'kind', None)
+
+    def _qualified_generic(self, callee_name: str) -> Optional[str]:
+        """The module-qualified name of a generic function called as `callee_name`.
+
+        Generic templates are not in `state.functions` (they have no single WASM
+        signature), so `_resolve_callee` cannot find them; the monomorphisation plan
+        resolves against `_generic_decls` instead.
+        """
+        for name in sorted(self._generic_decls):
+            if name == callee_name or name.endswith(f'${callee_name}'):
+                return name
+        return None
+
+    def _specialized_callee(self, expr) -> Optional[str]:
+        """The monomorphised function a generic call site targets, or None.
+
+        Returns a `$`-prefixed WAT name exactly like `_resolve_callee`, so the call
+        emission path is unchanged.
+        """
+        if self.inferred is None:
+            return None
+        spec = self.inferred.call_specializations.get(id(expr))
+        if spec is None:
+            return None
+        callee_name, pairs = spec
+        qualified = self._qualified_generic(callee_name)
+        if qualified is None:
+            return None
+        decl = self._generic_decls[qualified][1]
+        # Resolve any symbolic arguments through the enclosing specialisations before
+        # naming the function; this is where `id<T>` inside `twice<int>` becomes
+        # `id<int>`.
+        resolved_pairs = [(name, self._subst_type(value)) for name, value in pairs]
+        key = self._specialization_key(decl, resolved_pairs)
+        name = f"{qualified}${key}"
+        if name not in self._spec_names:
+            self._spec_names.add(name)
+            self._pending_specializations.append(
+                (qualified, name, self._mapping_from_pairs(decl, resolved_pairs)))
+        return f"${name}"
 
     def _resolve_callee(self, callee: str, line: Any = '?') -> str:
         """
