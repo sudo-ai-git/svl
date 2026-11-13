@@ -292,6 +292,23 @@ def cmd_lsp(args) -> int:
     return 0
 
 
+def cmd_explore(args) -> int:
+    """Write a self-contained HTML page showing the AST and inferred types."""
+    from svl.ast_explorer import build_explorer_html
+    path = _resolve_source(args.file)
+    src = open(path, encoding="utf-8").read()
+    try:
+        page = build_explorer_html(src, title=os.path.basename(path))
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    out = args.out or (os.path.splitext(path)[0] + ".html")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    print(f"explorer written: {out}")
+    return 0
+
+
 def cmd_new(args) -> int:
     """Scaffold a project and prove the starter program compiles and runs."""
     from svl.project import create_project, ManifestError, SOURCE_NAME
@@ -473,6 +490,11 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--dir", default=None,
                    help="parent directory (default: create ./<name>)")
     n.set_defaults(func=cmd_new)
+
+    ex = sub.add_parser("explore", help="write an HTML AST/type explorer page")
+    ex.add_argument("file", help="source file, or a project directory")
+    ex.add_argument("--out", default=None, help="output path (default: <file>.html)")
+    ex.set_defaults(func=cmd_explore)
 
     ag = sub.add_parser("agent", help="JSON compile/run/verify report for an agent")
     ag.add_argument("file", help="source file, or a project directory")

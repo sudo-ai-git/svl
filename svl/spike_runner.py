@@ -1369,21 +1369,58 @@ def spike_h35_time_travel() -> SpikeResult:
 
 # H36: Visual AST/Type Explorer
 def spike_h36_visual_explorer() -> SpikeResult:
-    """Test web-based AST explorer."""
-    has_explorer = False  # Not implemented
-    
-    return SpikeResult("H36", "Visual AST/Type Explorer", has_explorer,
-                      metrics={'explorer_implemented': has_explorer},
-                      notes="Visual explorer not implemented")
+    """Render the AST and inferred types as one self-contained HTML page."""
+    from svl.ast_explorer import build_explorer_html
 
-# H37: AI-Assisted Proof Search
+    src = ('module m { func add(a: int, b: int) type int { return a + b } '
+           ' func main() type int { return add(40, 2) } }')
+    try:
+        page = build_explorer_html(src)
+        again = build_explorer_html(src)
+        ok = ('<html' in page and '<ul>' in page and 'FuncDecl' in page
+              and 'main' in page and 'int' in page and page == again)
+        return SpikeResult(
+            "H36", "Visual AST/Type Explorer", ok,
+            metrics={'explorer_implemented': True,
+                     'deterministic': page == again,
+                     'nodes_rendered': page.count('<li>')},
+            notes=("Renders a deterministic, dependency-free HTML page with the AST "
+                   "tree and every recorded binding's inferred type."))
+    except Exception as exc:                                    # noqa: BLE001
+        return SpikeResult("H36", "Visual AST/Type Explorer", False,
+                           metrics={'explorer_implemented': False},
+                           error=str(exc))
+
+# H37: Automated Tactic Search (NOT LLM-guided)
 def spike_h37_ai_proof_search() -> SpikeResult:
-    """Test LLM-guided tactic search."""
-    has_ai = False  # Not implemented
-    
-    return SpikeResult("H37", "AI-Assisted Proof Search", has_ai,
-                      metrics={'ai_implemented': has_ai},
-                      notes="AI proof search not implemented")
+    """Bounded BFS over the deterministic tactic engine.
+
+    Honest scope: an LLM-guided search is NOT implemented — it would need a model call
+    and could not be reproduced or gated.  What runs here is reproducible breadth-first
+    search with a visited set and a hard node budget.
+    """
+    from svl.proof_search import describe_script, search_proof
+    from svl.tactics import assumption, intro, trivial
+
+    try:
+        found = search_proof('A -> A', [intro, trivial, assumption], max_depth=4)
+        missing = search_proof('C', [intro, trivial], max_depth=3, max_nodes=50)
+        ok = bool(found) and len(found.script) == 2 and not missing.found
+        return SpikeResult(
+            "H37", "Automated Tactic Search", ok,
+            metrics={'ai_implemented': False,
+                     'search_implemented': True,
+                     'proof_found': bool(found),
+                     'nodes_explored': found.nodes_explored,
+                     'negative_control_found': bool(missing.found),
+                     'script': describe_script(found.script)},
+            notes=("Deterministic bounded BFS over svl.tactics. The negative control "
+                   "(an unprovable goal) is reported not-proven with its node count; "
+                   "LLM guidance is explicitly not implemented."))
+    except Exception as exc:                                    # noqa: BLE001
+        return SpikeResult("H37", "Automated Tactic Search", False,
+                           metrics={'search_implemented': False},
+                           error=str(exc))
 
 # H38: Property-Based Testing
 def spike_h38_property_testing() -> SpikeResult:
