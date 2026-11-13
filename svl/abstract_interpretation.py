@@ -824,6 +824,9 @@ class _Analyzer:
         self.findings: List[Finding] = []
         self.call_sites: Dict[str, List[Tuple[str, List[Interval]]]] = {}
         self.current_function = '<module>'
+        # Functions currently being summarised, so a (direct or indirect) recursion
+        # returns TOP instead of recursing forever.
+        self._summarizing: Set[str] = set()
 
     # -- driver ---------------------------------------------------------------
 
@@ -1172,9 +1175,48 @@ class _Analyzer:
         if callee in self.functions:
             arg_ivs = [self._eval(a, state) for a in args]
             self.call_sites.setdefault(callee, []).append((self.current_function, arg_ivs))
-            return _TOP_IV
+            # Call-site specialisation: re-summarise the callee under the ACTUAL
+            # argument intervals instead of returning TOP unconditionally.  This is an
+            # over-approximation (sound), and `_summarizing` guards recursion.
+            return self._return_summary(callee, arg_ivs)
         for a in args:
             self._eval(a, state)
+        return _TOP_IV
+
+    def _return_summary(self, callee: str, arg_ivs: List[Interval]) -> Interval:
+        """The callee's return interval under the given argument intervals.
+
+        Returns TOP when the body is not straight-line enough to summarise, or when the
+        callee is already being summarised (recursion).
+        """
+        if callee in self._summarizing:
+            return _TOP_IV
+        fn = self.functions.get(callee)
+        if fn is None:
+            return _TOP_IV
+        env = {p.name: iv for p, iv in zip(fn.params, arg_ivs)}
+        self._summarizing.add(callee)
+        try:
+            return self._branch_return(fn.body, _State(env=dict(env)))
+        finally:
+            self._summarizing.discard(callee)
+
+    def _branch_return(self, block: Block, state: _State) -> Interval:
+        """The interval of the value a block returns (TOP if it does not return)."""
+        for stmt in getattr(block, 'statements', []) or []:
+            if isinstance(stmt, ReturnStmt):
+                return self._eval(stmt.value, state) if stmt.value is not None else _TOP_IV
+            if isinstance(stmt, LetStmt):
+                state = self._exec_let(stmt, state)
+            elif isinstance(stmt, IfStmt):
+                then_iv = self._branch_return(stmt.then_branch, state)
+                else_iv = (self._branch_return(stmt.else_branch, state)
+                           if stmt.else_branch is not None else _TOP_IV)
+                return _iv_join(then_iv, else_iv)
+            elif isinstance(stmt, ExprStmt) and isinstance(stmt.expression, AssignExpr):
+                state = self._exec_assign(stmt.expression, state)
+            else:
+                return _TOP_IV
         return _TOP_IV
 
     def _eval_match(self, expr: MatchExpr, state: _State) -> Interval:

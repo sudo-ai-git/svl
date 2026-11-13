@@ -6,6 +6,7 @@ Subcommands:
                          --interface to write the .svli contract)
   svlc run   <file.svl>   compile and execute, printing the result
   svlc check <file.svl>   run the verification gate and report
+  svlc diff <a> <b>      prove or refute that two functions are equivalent
   svlc corpus             run the corpus regression check
   svlc repl               interactive shell (evaluates a block, remembers definitions)
   svlc lsp                language server over stdio
@@ -83,6 +84,15 @@ def cmd_check(args) -> int:
     return 0 if not problems else 1
 
 
+def cmd_diff(args) -> int:
+    """Prove (or refute) that two function files are equivalent."""
+    from svl.equivalence import svlc_diff
+    f_src = open(args.file_a, encoding="utf-8").read()
+    g_src = open(args.file_b, encoding="utf-8").read()
+    print(svlc_diff(f_src, g_src))
+    return 0
+
+
 def cmd_corpus(args) -> int:
     from svl.corpus_check import main as corpus_main
     return corpus_main()
@@ -130,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("file")
     c.add_argument("--json", action="store_true", help="emit the problems as JSON")
     c.set_defaults(func=cmd_check)
+
+    d = sub.add_parser("diff", help="prove or refute that two functions are equivalent")
+    d.add_argument("file_a", help="file containing the first function")
+    d.add_argument("file_b", help="file containing the second function")
+    d.set_defaults(func=cmd_diff)
 
     sub.add_parser("corpus", help="run the corpus regression check").set_defaults(func=cmd_corpus)
     sub.add_parser("repl", help="interactive shell").set_defaults(func=cmd_repl)
