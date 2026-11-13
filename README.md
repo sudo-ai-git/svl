@@ -163,20 +163,24 @@ module prog {
   variable usage rather than memory, since SVL has value semantics) — a bare variable in a
   move position (a `let` RHS, an argument, a `return`) consumes it, and a moved value may
   not be used or moved again. An unconsumed `linear` warns; `unique` is affine.
+  **`vec<T, n>` is enforced**: the declared length must match an array literal or `zeros(k)`
+  initializer, and nested bounds recurse. Type constructors are **kind-checked** — `type
+  Box<a> = ...` gives Box kind `* -> *`, so `Box<int, int>` and a bare `Box` are refused.
   Support matrix (2026-11-12):
 
   | enforced (checked) | engine-only (not on the compile path) | parse-only |
   |---|---|---|
-  | `int`/`float`/`bool`/`string`, struct, named, `fn(...) -> ...`, generic, tuple, array, **refinement**, **linear**, **unique** | `*`, `* -> *` | `vec<T,n>`, `?`, `forall`, intersection, union |
+  | `int`/`float`/`bool`/`string`, struct, named, `fn(...) -> ...`, generic, tuple, array, **refinement**, **linear**, **unique**, **vec** | `*`, `* -> *` | `?`, `forall`, intersection, union |
 
   Declaration-level features (macros, module types/functors, algebraic effects, type
   classes/instances) parse and are refused by the structural checksum. See KB §11.
 - **Formal rating** — `SVL_FORMAL_RATING.md` scores SVL against Rust, Lean, Haskell, OCaml,
   Dafny, Python, C and AssemblyScript on a 7-dimension rubric, execution-measured against the
-  gates in `svl-rating/`. Current score: **6.40/10**, **5th of 9** (§17; past Dafny at
-  6.30, above Python 3 at 5.85, C and AssemblyScript; Rust leads at 8.20). The
-  comparison-language scores are structured assessment from published specifications, not
-  measurements.
+  gates in `svl-rating/`. Current score: **6.40/10**, **5th of 9** (§18; unchanged from
+  §17 — the kind-correctness and `vec<T,n>` work closed silent gaps without crossing a
+  band boundary; past Dafny at 6.30, above Python 3 at 5.85, C and AssemblyScript; Rust
+  leads at 8.20). The comparison-language scores are structured assessment from published
+  specifications, not measurements.
 - **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing. **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract. **PCC is real as of 2026-11-12**: `PCCWasmModule.to_wasm_bytes_with_proofs()` emits a binary module with a standard `svl-proofs` custom section that `wasmtime.Module` validates, and `extract_proofs_from_wasm_bytes()` recovers the payload (the old WAT-text form is deprecated — wat2wasm has no custom-section syntax).
 - **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model
   of a program's arithmetic and discharges every `assert` by refuting its negation: `unsat` →

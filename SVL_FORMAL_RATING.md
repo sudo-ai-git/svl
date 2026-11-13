@@ -4,10 +4,11 @@
 **Workspace HEAD:** `8e3d18f` · **Public mirror (`~/svl-release`) HEAD:** `9e6e3b8`
 **Evidence:** `svl-rating/` (executable probes + benchmarks + raw output)
 
-> **CURRENT SCORE: 6.40 / 10, 5th of 9 — see §17.** §1–§16 are retained as dated
-> snapshots (3.20 → 5.80 → 6.00 → 6.10 → 6.25) so the movement is auditable; each
-> section names the gates it was derived from. Do not quote a number from §1–§16
-> without its section number.
+> **CURRENT SCORE: 6.40 / 10, 5th of 9 — see §18** (unchanged from §17: the kind and
+> vec work closed silent gaps without crossing a band boundary). §1–§17 are retained as
+> dated snapshots (3.20 → 5.80 → 6.00 → 6.10 → 6.25) so the movement is auditable; each
+> section names the gates it was derived from. Do not quote a number from §1–§17 without
+> its section number.
 >
 > **Method.** Every SVL score below is backed by an execution gate run **this session**,
 > not by a document. Each probe is built to be able to fail; a probe that cannot fail is
@@ -919,4 +920,105 @@ is not wired. Note that D2 8 → 9 is *not* automatic from wiring it — band 9 
    violations (second move, use after move). A `linear` value that is never consumed
    passes — deliberately, because a false positive would reject a correct program.
 4. The refinement checker models QF_LIA over int/bool only (§16.6).
+
+---
+
+## 18. Re-score after kind correctness + `vec<T, n>` — **6.40 / 10, unchanged**
+
+Same seven dimensions, same weights, same anchors as §2. Every gate below was run
+**this session on this tree**; nothing is carried over from §12–§17.
+
+### 18.1 Gates run this session
+
+| Gate | Command | Result |
+|---|---|---|
+| pytest | `python -m pytest tests -q` | **287 passed** (158 §1 · 166 §14 · 176 §15 · 217 §16 · 240 after refinement · 264 after linear) |
+| Spike suite | `python -m svl.spike_runner` | **41/43** (the 2 are the declared stubs H36/H37) |
+| Golden references | `verify_all_golden_refs()` | **2/2 True** |
+| Corpus | `python -m svl.corpus_check --json` | 25 files, **22 compiled, 0 refused**, 0 AI findings |
+| Verifier corpus | `run_suite()` | **0 disagreements** |
+| Differential execution | `tests/test_svl_differential.py` | **22/22 agree** |
+| Probe suite | `python svl-rating/probes.py` | **30 PASS / 0 FAIL / 3 INFO** |
+| Feature registry | `verify_registry()` | `(True, [], [])` — **11 enforced, 6 non-enforced** |
+| s17 wasm determinism | assemble + validate | **Passed: True** |
+| **Kind gate** | `check_kind_correctness(...)` | `Box<int>` → `[]`; `Box<int,int>` → **refused** |
+| **vec gate** | `check_vec_bounds(...)` | `vec<int,3> = [1,2,3]` → `[]`; `= [1,2]` → **refused** |
+
+### 18.2 Dimension scores — re-derived, not carried over
+
+| Dim | Weight | §17 | **§18** | Evidence |
+|---|---|---|---|---|
+| D1 | 20% | 6 | **6** | Unchanged. No GC, closures still a placeholder, generics are nominal. |
+| D2 | 15% | 8 | **8** | **Stronger within the band, not across it.** Two more silent gaps closed: constructor arity is now kind-checked and `vec<T,n>` bounds are enforced. 11 of 17 kinds enforced. Band 9 is not reached — see §18.3. |
+| D3 | 15% | 6 | **6** | Unchanged. |
+| D4 | 20% | 8 | **8** | Unchanged. The kind and vec checks are syntactic/type-layer checks, not new Z3 proof obligations. |
+| D5 | 10% | 6 | **6** | Unchanged. |
+| D6 | 10% | 4 | **4** | Unchanged this pass. |
+| D7 | 10% | 5 | **5** | Unchanged. |
+
+**Weighted: `0.20×6 + 0.15×8 + 0.15×6 + 0.20×8 + 0.10×6 + 0.10×4 + 0.10×5 = 6.40 / 10`**
+
+### 18.3 Why the number did NOT move — stated plainly
+
+This pass closed two **silent** gaps rather than adding band-9 capability:
+
+- **Kind correctness**: `type Box<a> = ...` gives Box kind `* -> *`, so `Box<int, int>` and a
+  bare `Box` are now refused. Undeclared constructors are silence, not a guess.
+- **`vec<T, n>`**: a dependent bound over literals, including nested
+  (`vec<vec<int,3>, 2>`), checked against array literals and `zeros(k)`.
+
+Both are real soundness fixes, and both are the kind of thing that makes D2 = 8
+*defensible* rather than arguable. But **band 9 is "best-in-class"**, and 6 of 17 kinds
+remain unenforced:
+
+| Kind | Status | What is missing |
+|---|---|---|
+| `kind_star`, `kind_arrow` | engine-only | `svl/kind_inference.py` exists, but `*` has no type-level meaning in SVL — no HKT syntax, no parameterized type declarations |
+| `dynamic` | parse-only | gradual typing needs cast checking and blame |
+| `forall` | parse-only | quantified constraints need a solver |
+| `intersection`, `union` | parse-only | need subtyping / case reasoning |
+
+There is also no parametric polymorphism: `struct` has no type parameters and `List<T>`
+is a nominal handle, not a generic. **A sound, well-checked type system with 6 of 17
+advertised kinds unenforced is not best-in-class, so the band stays at 8.**
+
+### 18.4 Rank — unchanged at 5th of 9
+
+| Language | Weighted |
+|---|---|
+| Rust 1.99 | 8.20 |
+| Lean 4 | 7.50 |
+| Haskell (GHC) | 7.00 |
+| OCaml 5 | 6.50 |
+| **SVL** | **6.40** |
+| Dafny | 6.30 |
+| Python 3 | 5.85 |
+| C (gcc 13) | 5.65 |
+| AssemblyScript | 5.05 |
+
+### 18.5 What would actually move it
+
+| Change | Effect | Cost | Honest obstacle |
+|---|---|---|---|
+| Wire `kind_star`/`kind_arrow` **and** give `*` a type-level meaning (parameterized type declarations, HKT application) | D2 8 → 9 ⇒ **+0.15 ⇒ 6.55** | L | The engine exists; the *syntax and semantics* do not. Arity checking is not HKT support. |
+| GC + closures + generics (real parametric polymorphism) | D1 6 → 7 ⇒ **+0.20 ⇒ 6.60** | L | Three features; closures need a `funcref` table the backend does not emit; a tracing GC cannot see WASM locals. |
+| Proofs bound to the emitted code + whole-program spec | D4 8 → 9 ⇒ **+0.20 ⇒ 6.60** | L | Research-grade. |
+| Component runtime | D6 4 → 5 ⇒ **+0.10 ⇒ 6.50** | L | Needs the WASM component proposal; `wasm-ld` is absent. |
+
+**No remaining move is cheap.** The D2 engine work is exhausted — the next D2 step needs
+new language syntax, not just wiring. The two +0.20 items (D1 and D4→9) are the real
+remaining gains and both are architecture-scale.
+
+### 18.6 Caveats
+
+1. Dimension scores are **expert assessment** backed by the gates above; only the SVL row
+   is execution-measured.
+2. **D2 = 8 is now well-supported rather than borderline** (§16.3 called the move to 7
+   borderline; two more enforced features and four fixed engines have settled it).
+3. The kind checker covers **declared constructors only** — an undeclared `Option<int>` is
+   not checked, deliberately, because unknown-identifier policy is a separate question.
+4. `vec<T, n>` bounds are checked over **literals only**; a symbolic size or an
+   undeterminable initializer is silence.
+5. The linear discipline remains static (§17.6), and refinement remains QF_LIA over
+   int/bool (§16.6).
 
