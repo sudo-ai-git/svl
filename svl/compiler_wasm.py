@@ -1816,7 +1816,8 @@ def compile_to_wasm(ast: Program, deterministic: bool = True) -> str:
 
 def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool = True,
                          attest: bool = False, base_dir: Optional[str] = None,
-                         prove: bool = False) -> str:
+                         prove: bool = False,
+                         extra_dirs: Optional[List[str]] = None) -> str:
     """Compile SVL source file to WASM.
 
     With ``strict=True`` (the default) the verification gate runs FIRST and the compile is
@@ -1827,6 +1828,10 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     ``base_dir`` enables ``import``: each top-level import path is resolved relative to it,
     the file is parsed, and its modules/items are linked in.  Without ``base_dir`` an
     unresolved import is a compile error rather than a silently dropped line.
+
+    ``extra_dirs`` are searched after ``base_dir`` for each import path.  This is how a
+    project's installed ``svl_modules/`` tree is reachable, so a dependency installed by
+    `svlc install` resolves exactly like a local file.
 
     ``prove=True`` additionally discharges every ``assert`` with the Z3 SMT prover and
     raises ``SVLVerificationError`` naming a counterexample when one is found.  It is
@@ -1843,7 +1848,7 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     ast = parse(tokens)
     linked_sources: List[Tuple[str, str]] = []
     if base_dir:
-        linked_sources = _link_imports(ast, base_dir)
+        linked_sources = _link_imports(ast, base_dir, extra_dirs=extra_dirs)
     elif ast.imports:
         raise SyntaxError(
             f"cannot resolve import '{ast.imports[0].path}': no base_dir given "
@@ -1881,12 +1886,17 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     return wat
 
 
-def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) -> List[Tuple[str, str]]:
+def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None,
+                  extra_dirs: Optional[List[str]] = None) -> List[Tuple[str, str]]:
     """Resolve top-level imports relative to ``base_dir`` and link their modules/items.
 
     The imported file is parsed and its declarations appended; cross-module calls resolve
     through the existing ``module$func`` namespacing.  Cycles are detected via the real
     path of each file.
+
+    ``extra_dirs`` are searched AFTER ``base_dir`` and are how a project's installed
+    ``svl_modules/`` tree is reachable: ``import "mathx/1.0.0/source.svl"`` resolves
+    against the project root, then against each module directory.
 
     Returns the ``(import_path, source_text)`` of every file linked, so the caller can
     run the verification gate on the imported modules too (otherwise they bypass it).
@@ -1901,16 +1911,24 @@ def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) 
     from svl.lexer import tokenize
     from svl.parser_rd import parse
 
+    search_dirs = [base_dir] + [d for d in (extra_dirs or []) if d and d != base_dir]
+
     added_modules, added_items, linked = [], [], []
     for imp in program.imports:
-        path = os.path.join(base_dir, imp.path)
+        path = None
+        for d in search_dirs:
+            cand = os.path.join(d, imp.path)
+            if os.path.exists(cand):
+                path = cand
+                break
+        if path is None:
+            raise SyntaxError(
+                f"cannot resolve import '{imp.path}' "
+                f"(looked in: {', '.join(search_dirs)})"
+            )
         real = os.path.realpath(path)
         if real in _seen:
             raise SyntaxError(f"circular import: {imp.path}")
-        if not os.path.exists(path):
-            raise SyntaxError(
-                f"cannot resolve import '{imp.path}' (looked in {base_dir})"
-            )
         _seen.add(real)
         with open(path, encoding='utf-8') as fh:
             text = fh.read()
@@ -1926,7 +1944,7 @@ def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) 
                     f"{os.path.basename(svli)}: " + '; '.join(problems))
         linked.append((imp.path, text))
         sub = parse(tokenize(text))
-        linked.extend(_link_imports(sub, os.path.dirname(path), _seen))
+        linked.extend(_link_imports(sub, os.path.dirname(path), _seen, extra_dirs))
         added_modules.extend(sub.modules)
         added_items.extend(sub.items)
 

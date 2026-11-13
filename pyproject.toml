@@ -18,6 +18,8 @@ dependencies = [
     "cryptography>=41.0",
     "z3-solver>=4.8",
     "wasmtime>=20.0",
+    # svl/project.py reads svl.toml; tomllib is stdlib from 3.11.
+    "tomli>=2.0; python_version < '3.11'",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

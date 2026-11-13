@@ -94,9 +94,29 @@ def load_interface(path: str) -> Dict[str, Any]:
 
 
 def verify_against_interface(source: str, interface: Dict[str, Any]) -> List[str]:
-    """Return the ways the source's surface differs from the interface (empty = match)."""
+    """Return the ways the source differs from the interface (empty = match).
+
+    Two kinds of check, and both matter:
+
+    * the **surface** (functions / structs / consts) — a signature change breaks every
+      caller, and this is what an interface artifact is for;
+    * the **exact source bytes** (`source_hash`) — the artifact records the hash, so a
+      body-only change (`a + b` -> `a - b`, same signature) is caught too.
+
+    The hash check is skipped only when the interface carries no `source_hash`, i.e.
+    it was produced by a tool that never recorded one.  A hash that IS present and
+    does not match is always a problem.
+    """
     current = generate_interface(source)
     problems: List[str] = []
+
+    expected_hash = interface.get('source_hash')
+    if isinstance(expected_hash, str):
+        if current['source_hash'] != expected_hash:
+            problems.append(
+                f"source changed since the interface was recorded "
+                f"(hash {expected_hash[:16]}... -> {current['source_hash'][:16]}...); "
+                f"the surface below may not reflect the change")
 
     for name, expected in interface.get('functions', {}).items():
         actual = current['functions'].get(name)

@@ -20,6 +20,17 @@ from svl.syntax_layer import verify_syntax, SyntaxVerificationConfig
 from svl.type_layer import verify_type, TypeVerificationConfig
 
 
+def _version_sort_key(version: str):
+    """Order dotted numeric versions; non-numeric pieces sort as 0."""
+    parts = []
+    for piece in version.split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
 @dataclass
 class PackageMetadata:
     """Package metadata for verified SVL packages."""
@@ -43,10 +54,23 @@ class PackageIndex:
 
 
 class PackageManager:
-    """SVL Package Manager with verification."""
+    """SVL Package Manager with verification.
 
-    def __init__(self, registry_url: str = "https://svl-registry.example.com"):
-        self.registry_url = registry_url
+    Three storage locations, kept separate on purpose:
+
+    * ``packages_dir`` — the global store this machine has created or fetched into
+      (``~/.svl/packages/<name>/<version>/``).
+    * ``registry_dir`` — a publishable registry tree (``~/.svl/registry/``).  A
+      registry is a directory laid out as ``<name>/<version>/`` plus an
+      ``index.json``; publishing COPIES into it and reading it back is what makes
+      publish a real operation instead of a printed success message.
+    * a project's ``svl_modules/`` — the dependency tree of one project, recorded in
+      its ``svl.toml``.
+    """
+
+    def __init__(self, registry_dir: Optional[str] = None):
+        self.registry_dir = (Path(registry_dir) if registry_dir
+                             else Path.home() / ".svl" / "registry")
         self.cache_dir = Path.home() / ".svl" / "cache"
         self.packages_dir = Path.home() / ".svl" / "packages"
         self.index_file = Path.home() / ".svl" / "index.json"
@@ -143,6 +167,11 @@ class PackageManager:
         
         # Save package files
         pkg_dir = self.packages_dir / name / version
+        # The artifact is the directory, not the index entry: an index entry whose files
+        # were deleted must not block recreating the package (and `uninstall` is the
+        # supported way to remove one deliberately).
+        if pkg_dir.exists():
+            raise ValueError(f"Package {name}@{version} already exists at {pkg_dir}")
         pkg_dir.mkdir(parents=True, exist_ok=True)
         
         # Save source
@@ -154,13 +183,18 @@ class PackageManager:
         # Save metadata
         with open(pkg_dir / "metadata.json", 'w') as f:
             json.dump(asdict(metadata), f, indent=2)
+
+        # The interface artifact travels WITH the package so a consumer's import is
+        # checked against it at link time.  Without it `_link_imports` has nothing to
+        # compare and a silently-changed library is a recompile surprise.
+        from svl.interface import generate_interface, interface_path_for, write_interface
+        svli_path = interface_path_for(str(pkg_dir / "source.svl"))
+        write_interface(svli_path, generate_interface(source))
         
-        # Update index
-        if name not in self.index.packages:
-            self.index.packages[name] = {}
-        if version in self.index.packages[name]:
-            raise ValueError(f"Package {name}@{version} already exists")
-        self.index.packages[name][version] = metadata
+        # Update index.  The existence check is on the package DIRECTORY (above), not
+        # here: an index entry left behind by a deleted package must not block recreating
+        # it, and overwriting a stale entry is the correct recovery.
+        self.index.packages.setdefault(name, {})[version] = metadata
         self._save_index()
         
         print(f"  Package created at {pkg_dir}")
@@ -168,53 +202,128 @@ class PackageManager:
         
         return metadata
 
-    def install(self, name: str, version: str = "latest") -> PackageMetadata:
-        """Install a package from registry."""
-        print(f"Installing {name}@{version}...")
-        
-        # Check local first
-        if name in self.index.packages:
-            if version == "latest":
-                versions = sorted(self.index.packages[name].keys(), 
-                                key=lambda v: tuple(map(int, v.split('.'))))
-                version = versions[-1]
-            if version in self.index.packages[name]:
-                metadata = self.index.packages[name][version]
-                print(f"  Already installed locally")
-                return metadata
-        
-        # Download from registry (simulated)
-        print(f"  Downloading from {self.registry_url}...")
-        # In real implementation: download from registry
-        # For now, raise error
-        raise NotImplementedError("Registry download not implemented - use local packages")
+    def publish(self, name: str, version: str,
+                registry_dir: Optional[str] = None) -> PackageMetadata:
+        """Publish a locally-created package into a registry directory.
 
-    def publish(self, name: str, version: str) -> bool:
-        """Publish package to registry."""
-        print(f"Publishing {name}@{version}...")
-        
+        A publish used to print "Uploading to <url>..." and then "Published
+        successfully" without transferring anything.  It now COPIES the package into
+        the registry, rewrites the registry index, and READS IT BACK: the copied bytes
+        must hash to the same values the package was created with, or the publish
+        raises.  A publish that cannot be read back is a failure, not a success.
+        """
         if name not in self.index.packages or version not in self.index.packages[name]:
             raise ValueError(f"Package {name}@{version} not found locally")
-        
+
         metadata = self.index.packages[name][version]
-        
-        # Verify package integrity
-        pkg_dir = self.packages_dir / name / version
-        source = (pkg_dir / "source.svl").read_text()
-        wasm = (pkg_dir / "module.wasm").read_text()
-        
+        src_dir = self.packages_dir / name / version
+        source = (src_dir / "source.svl").read_text(encoding="utf-8")
+        wasm = (src_dir / "module.wasm").read_text(encoding="utf-8")
+
         if wasm_sha256(wasm) != metadata.wasm_sha256:
             raise ValueError("WASM hash mismatch - package corrupted")
-        
         if self._compute_source_hash(source) != metadata.source_sha256:
             raise ValueError("Source hash mismatch - package corrupted")
-        
-        # Upload to registry (simulated)
-        print(f"  Uploading to {self.registry_url}...")
-        # In real implementation: upload to registry
-        
-        print(f"  Published successfully")
-        return True
+
+        registry = Path(registry_dir) if registry_dir else self.registry_dir
+        dest = registry / name / version
+        if dest.exists():
+            raise ValueError(
+                f"{name}@{version} is already published to {registry} "
+                f"(uninstall it from the registry first)")
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_dir / "source.svl", dest / "source.svl")
+        shutil.copy2(src_dir / "module.wasm", dest / "module.wasm")
+        shutil.copy2(src_dir / "metadata.json", dest / "metadata.json")
+        svli = src_dir / "source.svli"
+        if svli.exists():
+            shutil.copy2(svli, dest / "source.svli")
+
+        self._save_registry_index(registry)
+
+        # Round-trip: the bytes actually written must match what we claimed.
+        got_source = self._compute_source_hash(
+            (dest / "source.svl").read_text(encoding="utf-8"))
+        got_wasm = wasm_sha256((dest / "module.wasm").read_text(encoding="utf-8"))
+        if got_source != metadata.source_sha256 or got_wasm != metadata.wasm_sha256:
+            raise ValueError(
+                "publish round-trip failed: the registry bytes do not match the package")
+        return metadata
+
+    def _save_registry_index(self, registry: Path) -> None:
+        """Write `<registry>/index.json` from the packages present on disk."""
+        entries: Dict[str, Dict[str, Any]] = {}
+        if registry.is_dir():
+            for name_dir in sorted(p for p in registry.iterdir() if p.is_dir()):
+                for ver_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
+                    meta_file = ver_dir / "metadata.json"
+                    if not meta_file.is_file():
+                        continue
+                    with open(meta_file) as fh:
+                        entries.setdefault(name_dir.name, {})[ver_dir.name] = json.load(fh)
+        registry.mkdir(parents=True, exist_ok=True)
+        with open(registry / "index.json", "w") as fh:
+            json.dump({"packages": entries}, fh, indent=2)
+
+    def install(self, name: str, version: str = "latest",
+                registry_dir: Optional[str] = None,
+                into_dir: Optional[str] = None) -> Path:
+        """Install `name@version` from a registry into a project's module tree.
+
+        The registry's recorded hashes are checked against the bytes on disk BEFORE
+        anything is written, and again after the copy.  On success the dependency is
+        recorded in the project's `svl.toml`; the package source and its `.svli`
+        artifact land in `<into>/svl_modules/<name>/<version>/`.
+        """
+        registry = Path(registry_dir) if registry_dir else self.registry_dir
+        index_file = registry / "index.json"
+        if not index_file.is_file():
+            raise ValueError(f"no registry index at {index_file}")
+        with open(index_file) as fh:
+            entries = json.load(fh).get("packages", {})
+        if name not in entries:
+            raise ValueError(f"{name} is not in the registry")
+        versions = entries[name]
+        if version == "latest":
+            if not versions:
+                raise ValueError(f"{name} has no published versions")
+            version = max(versions, key=_version_sort_key)
+        if version not in versions:
+            raise ValueError(
+                f"{name}@{version} is not in the registry (have: {sorted(versions)})")
+        meta = versions[version]
+
+        src_dir = registry / name / version
+        source_bytes = (src_dir / "source.svl").read_bytes()
+        wasm_text = (src_dir / "module.wasm").read_text(encoding="utf-8")
+
+        # Verify BEFORE writing anything.
+        if hashlib.sha256(source_bytes).hexdigest() != meta.get("source_sha256", ""):
+            raise ValueError(
+                f"{name}@{version}: source hash mismatch - the registry package is corrupt")
+        if wasm_sha256(wasm_text) != meta.get("wasm_sha256", ""):
+            raise ValueError(
+                f"{name}@{version}: wasm hash mismatch - the registry package is corrupt")
+
+        into = Path(into_dir) if into_dir else Path.cwd()
+        dest = into / "svl_modules" / name / version
+        if dest.exists():
+            raise ValueError(f"{name}@{version} is already installed in {into}")
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "source.svl").write_bytes(source_bytes)
+        (dest / "module.wasm").write_text(wasm_text, encoding="utf-8")
+        svli_src = src_dir / "source.svli"
+        if svli_src.exists():
+            shutil.copy2(svli_src, dest / "source.svli")
+
+        # Verify AFTER writing: the bytes on disk must match the registry's claim.
+        if hashlib.sha256((dest / "source.svl").read_bytes()).hexdigest() != meta.get("source_sha256", ""):
+            raise ValueError("install failed: written source does not match the registry hash")
+
+        from svl.project import load_project, record_dependency
+        project = load_project(into)
+        record_dependency(project, name, version)
+        return dest / "source.svl"
 
     def list_installed(self) -> List[PackageMetadata]:
         """List all installed packages."""
