@@ -4,6 +4,10 @@
 **Workspace HEAD:** `8e3d18f` · **Public mirror (`~/svl-release`) HEAD:** `9e6e3b8`
 **Evidence:** `svl-rating/` (executable probes + benchmarks + raw output)
 
+> **CURRENT SCORE: 6.10 / 10 — see §15.** §1–§14 are retained as dated snapshots
+> (3.20 → 5.80 → 6.00) so the movement is auditable; each section names the gates it
+> was derived from. Do not quote a number from §1–§14 without its section number.
+>
 > **Method.** Every SVL score below is backed by an execution gate run **this session**,
 > not by a document. Each probe is built to be able to fail; a probe that cannot fail is
 > not counted as evidence. Comparison-language scores are **not** execution-measured here —
@@ -609,4 +613,105 @@ against raw AST binding nodes, which z3 cannot coerce.
 **The re-score is unchanged at 6.00.** The fixes make the existing claims true rather
 than adding a capability. What changed is that D4 = 8 is now defensible — before this
 pass, the prover's `proven` verdicts were not trustworthy.
+
+---
+
+## 15. Re-score after the D6 work (W1 + W2 + W3) — **6.10 / 10**
+
+Same seven dimensions, same weights, same anchors as §2. Every gate below was run
+**this session on this tree**; none of the numbers are carried over from §12–§14.
+
+### 15.1 Gates run this session
+
+| Gate | Command | Result |
+|---|---|---|
+| pytest | `python -m pytest tests -q` | **217 passed** (was 158 at §1; 166 at §14) |
+| Spike suite | `python -m svl.spike_runner` | **41/43** (exit 2 = the two declared stubs H36/H37) |
+| Golden references | `verify_all_golden_refs()` | **2/2 True** |
+| Hebrew alias contract | `verify_mapping()` / `verify_sofit_excluded()` | **22/22** / **5/5** |
+| Corpus | `python -m svl.corpus_check --json` | 25 files, **22 compiled, 0 refused**, 0 AI findings |
+| Verifier corpus | `run_suite()` | **0 disagreements** |
+| Differential execution | `tests/test_svl_differential.py` | **22/22 agree** (return value + printed bytes) |
+| SMT tri-state | `verify_with_smt` | false → `counterexample`; true → `proven` |
+| Equivalence | `svlc diff a b` / `a c` | `proven equivalent` / `NOT equivalent: counterexample` |
+| Probe suite | `python svl-rating/probes.py` | **30 PASS / 0 FAIL / 3 INFO** |
+| Self-attestation | `compile_attested` + `verify_attestation` | **VALID** |
+| Determinism | byte-identical rebuild of an import-linked program | **identical** (sha256 `52d2cdb3…`) |
+| Foreign linking | SVL `extern "c"` ← compiled module | **returns 42**; missing/mismatched export refused by name |
+| Package workflow | publish → add → run | **42**; tampered dependency **refused** naming both hashes |
+| Clean-venv install | `pip install .` → `svlc version` | **0.2.0**; `svlc run examples/sieve.svl` correct |
+
+### 15.2 Dimension scores — re-derived, not carried over
+
+| Dim | Weight | §14 | **§15** | Evidence for the change |
+|---|---|---|---|---|
+| D1 | 20% | 6 | **6** | Unchanged. Differential 22/22 and probes 30/0 still stand; no GC, no closures (lambda still emits `i32.const 0`), generics still parse-only. §13.3's D1→7 needed all three. |
+| D2 | 15% | 6 | **6** | Unchanged. Strict mode refuses unsupported kinds and unknown idents/calls; H2–H16 remain parse-only, so no new engine is enforced. |
+| D3 | 15% | 6 | **6** | Unchanged. Codegen is assemble+run verified; TCO, bounds checks, `memory.grow`, free list. No GC, no native/AOT. The foreign-link work is interop (D6), not runtime. |
+| D4 | 20% | 8 | **8** | **Stronger within the same band.** The contract prover no longer proves false theorems (§14.5); `PackageRegistry.add_verification` now checks the signature instead of comparing a caller-supplied key; the `.svli` source hash is finally compared. Band 9 still needs proofs bound to the **emitted code** and a whole-program specification — neither exists. |
+| D5 | 10% | 6 | **6** | Unchanged. The CLI grew (`publish`/`install`/`add`/`list-packages`, `--base-dir` defaulted to the source directory so sibling imports work), but LSP diagnostics are still reported at line 0 and there is no `svlc new` or lockfile. |
+| **D6** | **10%** | **3** | **4** | **The one dimension that moved.** Two of §3's four cited gaps are closed — `import` linking (P27) and published releases — and this pass closed a third: there is now a **real FFI path** (`extern "c"` ← a compiled foreign module, with a link-time signature gate) and a **real package workflow** (publish → install → import, hashes verified before and after writing, `.svli` contract enforced, byte-identical rebuilds). |
+| D7 | 10% | 5 | **5** | Unchanged. Versioned releases and CI that runs; the release process is still manual and there is no semver enforcement. |
+
+**Weighted: `0.20×6 + 0.15×6 + 0.15×6 + 0.20×8 + 0.10×6 + 0.10×4 + 0.10×5 = 6.10 / 10`**
+
+### 15.3 Rank
+
+On the §12.3 comparison table:
+
+| Language | Weighted |
+|---|---|
+| Rust 1.99 | 8.20 |
+| Lean 4 | 7.50 |
+| Haskell (GHC) | 7.00 |
+| OCaml 5 | 6.50 |
+| Dafny | 6.30 |
+| **SVL** | **6.10** |
+| Python 3 | 5.85 |
+| C (gcc 13) | 5.65 |
+| AssemblyScript | 5.05 |
+
+**6th of 9.** The rank is unchanged from §14; the score rose 6.00 → 6.10 because D6
+moved 3 → 4.
+
+### 15.4 Why D6 moved one step and not two
+
+§13.3 said D6 3 → 5 needs **packages + a component runtime**. Only packages landed.
+
+- **Delivered:** foreign-module linking (core WASM modules, gated), a local-directory
+  package registry with hash verification, `.svli` contract enforcement, `svl.toml`.
+- **Not delivered:** the WASM **component model** — no loading a C/Rust `.so` and
+  marshalling through WIT. `clang --target=wasm32` is present but **`wasm-ld` is not**,
+  so compiling C from source fails at link time; the foreign module is supplied prebuilt.
+- **Not gateable:** community and adoption. Three of D6's four components are
+  ecosystem/adoption; there is no network registry, no seed packages, and no users.
+  A local-directory registry is real and verifiable, but it is not an ecosystem.
+
+**So the honest increment is +0.10 (D6 3 → 4), not +0.20.** Claiming 5 would require
+the component work *and* a working registry someone else can publish to.
+
+### 15.5 What would move it next
+
+| Change | Effect | Cost |
+|---|---|---|
+| Wire `lld` (or accept prebuilt foreign modules as the documented path) + component-model marshalling | D6 4 → 5 ⇒ **+0.10 ⇒ 6.20** | L (the proposal, not the linker) |
+| GC + closures + generics | D1 6 → 7 ⇒ **+0.20 ⇒ 6.30** | L (three hard features) |
+| Proofs bound to the emitted code + a whole-program specification | D4 8 → 9 ⇒ **+0.20 ⇒ 6.30** | L (research-grade) |
+| One H2–H16 engine wired and enforced | D2 6 → 7 ⇒ **+0.15 ⇒ 6.25** | M (best ratio left) |
+
+The highest ratio remaining is **D2 — wire one H2–H16 engine** (~+0.15 for one engine).
+D6's next step is the largest single remaining *ecosystem* gain but needs the component
+proposal.
+
+### 15.6 Caveats
+
+1. Dimension scores are **expert assessment** backed by the gates above; only the SVL
+   row is execution-measured. The comparison-language scores are structured assessment
+   against published specifications and are **not** measurements.
+2. **D6 = 4 includes ungateable components** (community, adoption). The gates prove
+   *capability*; the score is a judgement that capability without a community is "partial
+   with major defects".
+3. The 6.10 is not a proxy for effort: D4 (20%) is at 8 and D6 (10%) is at 4, and the
+   remaining gap is concentrated in dimensions that need either a component-model runtime
+   or three language features.
 
