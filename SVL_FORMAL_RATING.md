@@ -533,7 +533,7 @@ Gates re-run after landing the Z3-lowered contract prover:
 
 | Gate | Result |
 |---|---|
-| pytest | **166/158** (8 new contract-prover tests; suite remains green) |
+| pytest | **176 passed** (was 166; +10 soundness regression tests) |
 | Probe suite | **30 PASS / 0 FAIL / 3 INFO** |
 | Spike suite | **41/43** (the two self-declared stubs H36/H37 remain unimplemented) |
 | Golden references | **2/2 True** |
@@ -544,11 +544,16 @@ Gates re-run after landing the Z3-lowered contract prover:
 
 * **A specification language.** `requires`, `ensures` and loop-`invariant` are now
   real SVL syntax, parsed and typed on the demand path.
-* **Z3-backed obligations.** `requires` is proven satisfiable (else the gate refuses);
-  `ensures` is discharged per return path with the body's assignments as hypotheses
-  (unsat of `pre && !post`); loop `invariant` is checked for preservation across
-  the body's assignments. All three return the honest tri-state — `proven`,
-  `counterexample`, or `unverified` — never a silent pass.
+* **Z3-backed obligations.** `requires` must be satisfiable — an empty domain is a
+  defect, so an unsatisfiable clause is refused. `ensures` is discharged at **every**
+  return on **every** path that reaches it by **substituting** the path's bindings into
+  the clause and refuting `requires && !post`. The body's state is substituted, never
+  asserted into the antecedent: asserting it makes the antecedent unsatisfiable and
+  discharges every obligation vacuously. A loop `invariant` must be **established on
+  entry** from `requires` and the preceding bindings, and **preserved** by one body
+  iteration under the loop condition (`I && cond ==> I[body]` — the body runs only while
+  `cond` holds). All three return the honest tri-state — `proven`, `counterexample`, or
+  `unverified` — never a silent pass.
 * **On the compile path.** The contract prover runs inside `verify_gate.verify_program`,
   after type checking and abstract interpretation, so a broken contract refuses to
   compile exactly like an OOB index.
@@ -580,4 +585,26 @@ here — so 8 is the honest ceiling for this phase, not a soft pass.
 `6.00` ties SVL with Python 3 (5.85) in this rubric and remains below Dafny (6.30) and
 OCaml (6.50). Rust remains 8.20. The ecosystem moat (D6/D7) is untouched; this increment
 raises only the verification axis.
+
+### 14.5 Soundness pass — the first version proved false theorems
+
+The first cut of the prover reported `proven` for programs whose contracts were false.
+Six defects, each reproduced before the fix and each pinned by a test that fails when
+the defect is reintroduced (6/6 mutations falsified):
+
+| # | Defect | Effect |
+|---|---|---|
+| 1 | Driver `break`ed after the first function with a contract | a broken contract in function two was invisible |
+| 2 | Post-state bindings asserted into the antecedent instead of substituted into the clause | unsatisfiable antecedent ⇒ every obligation discharged vacuously |
+| 3 | Sequencing modelled as a flat "last RHS wins" map of evaluated terms | `x = x + 1` lost its dependency on the previous value |
+| 4 | Compound assignment on a name with no prior binding marked tainted | loop invariants silently declined instead of checked |
+| 5 | Invariant preservation guarded by `!cond` instead of `cond` | sound invariants refuted at states the body never executes |
+| 6 | Returns paired with the joined branch states | false counterexample on a correct program — the gate refused it |
+
+Plus a latent crash the new path pairing exposed: `_model_block` evaluated expressions
+against raw AST binding nodes, which z3 cannot coerce.
+
+**The re-score is unchanged at 6.00.** The fixes make the existing claims true rather
+than adding a capability. What changed is that D4 = 8 is now defensible — before this
+pass, the prover's `proven` verdicts were not trustworthy.
 
