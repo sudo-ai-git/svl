@@ -17,7 +17,7 @@
 
 | Gate | Command | Result |
 |---|---|---|
-| pytest suite | `python -m pytest tests -q` | **145/145 pass**, exit 0 |
+| pytest suite | `python -m pytest tests -q` | **158/158 pass**, exit 0 |
 | Spike suite | `python -m svl.spike_runner` | **41/43** (exit 2 = the two self-declared stubs H36/H37) |
 | Golden references | `verify_all_golden_refs()` | **2/2 True** (Psalm 119 Aleph, Gen 1:1) |
 | Hebrew alias contract | `verify_mapping()` / `verify_alias()` | **22/22** mappings, byte-identical WAT |
@@ -58,11 +58,11 @@ Seven dimensions, weights summing to 1. Anchors are the same for every language.
 |---|---|---|
 | **D1** | **3/10** | Core works: arithmetic, `while`, `for i in a..b`, `if/else`, `if…then…else` exprs, arrays, structs, `match`, recursion, floats, bitwise — **PASS** (pytest, probes P24/P25). But: **no lexical scoping** (P01: inner `let` clobbers outer → `99`), **`for x in <iterable>` is a silent no-op** (P02 → `0`), **`&&`/`\|\|` are eager** (P03: `f(0)` traps on `10/0`), **`try`/`catch` unsupported** (P26), **`import` is inert** (P27). Two of these produce *silently wrong answers*, the worst defect class. |
 | **D2** | **3/10** | `let` type mismatch is refused (P07 **PASS**); type-directed lowering is real (float/int valtypes, ops). But the checker is **unsound at the boundaries**: `return "hi"` in a `type int` fn is accepted (P05), `f("hi")` against `f(x: int)` is accepted (P06), and `strict=True` does not refuse either (P15). The Mod-5/Z-2 layer is decorative; H2–H16 type features are **parse-only** (README says so). |
-| **D3** | **5/10** | Emitted code is correct on every construct the 145-test suite executes end-to-end (assemble **and** run), 0 wrong answers; bounds checks trap; TCO works (P17: 20 000-deep tail call in 0.02 s); output is deterministic. **Benchmark: parity with Rust-to-wasm at ~6× faster compilation** (§5). Against: 1 MiB memory ceiling with **no `memory.grow`** (P16) and **no free**, so an allocating program **cannot be run twice in one instance** (second call leaks past the ceiling and traps); `print(<int variable>)` and reassigning a `const` emit WAT that `wasmtime.Module` **rejects** (P08/P09). |
+| **D3** | **5/10** | Emitted code is correct on every construct the 158-test suite executes end-to-end (assemble **and** run), 0 wrong answers; bounds checks trap; TCO works (P17: 20 000-deep tail call in 0.02 s); output is deterministic. **Benchmark: parity with Rust-to-wasm at ~6× faster compilation** (§5). Against: 1 MiB memory ceiling with **no `memory.grow`** (P16) and **no free**, so an allocating program **cannot be run twice in one instance** (second call leaks past the ceiling and traps); `print(<int variable>)` and reassigning a `const` emit WAT that `wasmtime.Module` **rejects** (P08/P09). |
 | **D4** | **3/10** | Real: the interval abstract interpreter **proves** out-of-bounds indices and division-by-zero and refuses them, and stays silent on correct code (P12 **PASS**, both directions); the SMT layer is a genuine tri-state and discharges real `assert`s (P11 **PASS**). Decorative: the **BPSW "theorem" layer is constant-true** (P13: 0/60 programs fail) and the **231-gate PRODUCT channel is degenerate** (P14: 0 for 2000/2000 windows). The PCC artifact **does not assemble** (P10). The layers verify internal consistency, not program correctness. |
-| **D5** | **3/10** | Extensive KB and README; deterministic builds; corpus/golden-ref gates; 145-test suite. But the advertised editor story is dead: **LSP crashes on boot** (P19: `AttributeError: 'method' object has no attribute 'reg_name'`), the **REPL cannot evaluate anything** (P20: `Unexpected token at top level`), there is **no `pyproject.toml`/`setup.py` and no `svlc` CLI** (P22), and the package registry is a Python library, not a tool. |
+| **D5** | **3/10** | Extensive KB and README; deterministic builds; corpus/golden-ref gates; 158-test suite. But the advertised editor story is dead: **LSP crashes on boot** (P19: `AttributeError: 'method' object has no attribute 'reg_name'`), the **REPL cannot evaluate anything** (P20: `Unexpected token at top level`), there is **no `pyproject.toml`/`setup.py` and no `svlc` CLI** (P22), and the package registry is a Python library, not a tool. |
 | **D6** | **3/10** | WIT generation, component-model types, a defined host ABI, and a working self-attestation pipeline. But there is **no actual C/Rust FFI linkage**, no package ecosystem, no `import` linking (P27), and no published releases. |
-| **D7** | **2/10** | 145 tests, 41/43 spikes, determinism, a CI definition. But: no versioning or release process; the **public mirror's CI triggers on `master` while its branch is `main`** (so it never runs); the README corpus expectation is stale (§1); the semantics are knowingly unsound in places; single developer. |
+| **D7** | **2/10** | 158 tests, 41/43 spikes, determinism, a CI definition. But: no versioning or release process; the **public mirror's CI triggers on `master` while its branch is `main`** (so it never runs); the README corpus expectation is stale (§1); the semantics are knowingly unsound in places; single developer. |
 
 **Weighted total: 3.20 / 10**
 
@@ -207,7 +207,7 @@ Ranked by impact. Each row is a probe that **fails**.
 5. **This is not a comparison to an older SVL.** It is the current artifact against the external
    landscape, per the standing instruction.
 6. **The README's "35/38 construct matrix" claim was not re-measured here.** The execution
-   evidence for backend correctness in this report is the 145-test suite (assemble + run) and the
+   evidence for backend correctness in this report is the 158-test suite (assemble + run) and the
    31-row probe suite. The 35/38 figure is a README assertion, labelled as such.
 7. **Panel convergence is supporting, not independent proof.** The 6-expert panel and this
    execution-based rating used the same underlying model family and the same tree; their
@@ -347,7 +347,7 @@ compile-latency measurement), not failures.
 
 | Gate | Result |
 |---|---|
-| pytest | **145/145 pass** (workspace and mirror) |
+| pytest | **158/158 pass** (workspace and mirror) |
 | Probe suite | **26 PASS / 0 FAIL / 4 INFO** |
 | Spike suite | **20/20 VALIDATED** (against the real implementation) |
 | Corpus | workspace 25 files / 22 compiled / 0 refused; mirror 28 / 25 / 0 |
@@ -367,7 +367,7 @@ compile-latency measurement), not failures.
 - **Corpus baseline** (L4): `corpus_check.py --json` / `--write-baseline`; the README's
   stale "52 files / 42 compilable" replaced with the generated 28 / 23.
 - **Mirror synced**: all changed `svl/` modules, the fixed test, `pyproject.toml`, and the
-  README; the mirror re-runs 145/145 and 28/23.
+  README; the mirror re-runs 158/158 and 28/23.
 
 ### 11.4 Closed later the same day (second pass)
 
@@ -409,7 +409,7 @@ older SVL — the movement is the fixes.
 
 | Gate | Result |
 |---|---|
-| pytest | **145/145** (61 → 145; 84 regression tests added) |
+| pytest | **158/158** (61 → 145; 84 regression tests added) |
 | Probe suite | **30 PASS / 0 FAIL / 3 INFO** |
 | Spike suite | **41/43** (H36/H37 self-declared stubs) |
 | Golden references | **2/2 True** |
@@ -428,7 +428,7 @@ older SVL — the movement is the fixes.
 | D4 verification & assurance | 20% | 3 | **7** | PCC is **re-derivable** (was self-attested); the constant-true BPSW layer is demoted; `unverified` is no longer `passed`; a **reference interpreter** and a **labelled corpus with kill-switches** make the verdict falsifiable; `.svli` interface contracts. Still: no functional-correctness prover beyond `assert`s; layers verify the AST, not the emitted code. |
 | D5 tooling & DX | 10% | 3 | **6** | `svlc` CLI (+`--interface`), installs from a clean venv, CI gates on `pip install .`, REPL evaluates, LSP boots. Still: LSP diagnostics at line 0, no package manager, minimal stdlib. |
 | D6 ecosystem & interop | 10% | 3 | **3** | Unchanged: `extern` FFI surface, WIT generation, registry library, interface artifacts. Still: no component runtime, no C/Rust library calls, no packages. |
-| D7 maturity & production readiness | 10% | 2 | **5** | v0.1.0 release + GitHub Release; CI runs on push; 145 tests; deterministic; corpus + golden-ref gates. Still: single developer, no community, no release automation. |
+| D7 maturity & production readiness | 10% | 2 | **5** | v0.1.0 release + GitHub Release; CI runs on push; 158 tests; deterministic; corpus + golden-ref gates. Still: single developer, no community, no release automation. |
 
 **Weighted: `0.20×6 + 0.15×6 + 0.15×6 + 0.20×7 + 0.10×6 + 0.10×3 + 0.10×5 = 5.80 / 10`**
 
@@ -470,3 +470,57 @@ measurements** — treat the rank as lower precision than the SVL score itself.
    not by a functional-correctness prover: SVL still proves only what the programmer
    writes in `assert`s and what the interval analyser can bound.
 4. The rubric weights are a choice; §4 of the pre-fix report gives the sensitivity bound.
+
+---
+
+## 13. Re-score after Phase 2 (P2.2 + P2.3) — **unchanged at 5.80**
+
+Gates re-run after landing the SMT equivalence checker and the interprocedural return
+summaries:
+
+| Gate | Result |
+|---|---|
+| pytest | **158/158** (145 → 158; 8 equivalence + 5 interprocedural tests) |
+| Probe suite | **30 PASS / 0 FAIL / 3 INFO** |
+| Spike suite | **41/43** |
+| Golden references | **2/2 True** |
+| Corpus | workspace 22/0/0; mirror 25/0/0 |
+| Verifier corpus | 0 disagreements; both kill-switches noticed |
+| Differential conformance | **21/21 agree** |
+| SMT equivalence | `a+b` vs `b+a` → **proven**; `a+b` vs `a-b` → **counterexample** |
+| Interprocedural AI | `f(4)` → **refused OOB**; `f(3)` → **silent** |
+
+### 13.1 Dimension scores — re-derived, not carried over
+
+| Dim | Weight | §12 | **Now** | New evidence since §12 |
+|---|---|---|---|---|
+| D1 | 20% | 6 | **6** | Unchanged: P2.2/P2.3 are verification, not language semantics. The differential oracle (21/21) still stands. No GC, closures or generics. |
+| D2 | 15% | 6 | **6** | Unchanged. |
+| D3 | 15% | 6 | **6** | Unchanged. |
+| D4 | 20% | 7 | **7** | **Stronger, same band.** Two new proved properties: function equivalence (`f ≡ g`) and interprocedural range facts. The stack now proves OOB/div-zero, asserts, equivalence, artifact-to-source binding, and WASM-to-semantics agreement — every one falsifiable. The gaps that keep it out of band 8 are unchanged: no specification language (`requires`/`ensures` is still P2.1), and the layers verify the AST, not the emitted code. |
+| D5 | 10% | 6 | **6** | Unchanged (`svlc diff` is a verification tool, not DX). |
+| D6 | 10% | 3 | **3** | Unchanged — no packages, no component runtime, no community. |
+| D7 | 10% | 5 | **5** | Unchanged — CI and releases run, still a single developer. |
+
+**Weighted: `0.20×6 + 0.15×6 + 0.15×6 + 0.20×7 + 0.10×6 + 0.10×3 + 0.10×5 = 5.80 / 10`**
+
+### 13.2 Why the number did not move
+
+The score is **not** a proxy for effort — it is a weighted sum in which D6 (ecosystem, 10%)
+and the missing D5/D7 depth (20%) dominate the remaining gap, and D4 is already at 7 of a
+20% weight. P2.2 and P2.3 add real proved properties, but they add them *inside* band 7.
+Moving D4 to 8 requires a **specification language** (write `ensures result == a + b`, not
+just `assert`) and verification of the **emitted code**, not the AST — that is P2.1 plus a
+backend-facing proof, and it is the honest next increment.
+
+### 13.3 What would actually move the number
+
+| Change | Effect |
+|---|---|
+| P2.1 contract prover (`requires`/`ensures`/`invariant`) + codegen-level verification | D4 7 → 8 ⇒ **+0.20 ⇒ 6.00** |
+| Packages + component runtime (P4.x) | D6 3 → 5 ⇒ **+0.20 ⇒ 6.00** (needs both) |
+| GC + closures + generics (P1.6 visibility, P3.x) | D1 6 → 7 ⇒ **+0.20 ⇒ 6.00** |
+| Native/AOT backend (P3.7) | D3 6 → 7 ⇒ **+0.15 ⇒ 5.95** |
+
+No single remaining item moves SVL past Python (5.85) except the contract prover plus
+ecosystem work; Rust's 8.20 still requires D6/D7 parity, which is a multi-year moat.
