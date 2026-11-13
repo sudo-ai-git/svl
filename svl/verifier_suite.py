@@ -33,10 +33,9 @@ MUST_REFUSE: Dict[str, str] = {
                            "return c } }"),
     "const_compound_assignment": ("module m { const c: int = 5 func main() type int "
                                   "{ c += 1 return c } }"),
-    "unsupported_linear": ("module m { func main() type int { let x: linear int = 5 "
-                           "return x } }"),
-    "unsupported_unique": ("module m { func main() type int { let x: unique int = 5 "
-                           "return x } }"),
+    # `linear` / `unique` used to be here, labelled "unsupported_*" — they are
+    # ENFORCED now, and those two programs were well-formed (a single move), so the
+    # verifier correctly accepts them.  The violations are labelled below instead.
     "unsupported_refinement": ("module m { func main() type int { let x: {v: int | v > 0} "
                                "= -5 return x } }"),
     "unsupported_intersection": ("module m { func main() type int { let x: int & string = 5 "
@@ -47,6 +46,14 @@ MUST_REFUSE: Dict[str, str] = {
                         "return v[0] } }"),
     "unsupported_dynamic": ("module m { func main() type int { let x: ? = 42 "
                             "return x } }"),
+    # -- linear / unique violations (the kinds are enforced, so these are the
+    #    cases the discipline actually rejects) --------------------------------
+    "linear_double_move": ("module m { func main() type int { let x: linear int = 5 "
+                           "let y = x let z = x return z } }"),
+    "linear_use_after_move": ("module m { func main() type int { let x: linear int = 5 "
+                              "let y = x let z = x + 1 return z } }"),
+    "unique_double_move": ("module m { func main() type int { let x: unique int = 5 "
+                           "let y = x let z = x return z } }"),
     "unsupported_modal": ("module m { func main() type int { let x: box int = 5 "
                           "return x } }"),
     "try_around_provable_trap": ("module m { func main() type int { try { let a = [1,2,3] "
@@ -93,6 +100,18 @@ MUST_PASS: Dict[str, str] = {
     "nested_loops": ("module m { func main() type int { let s = 0 "
                      "for i in 0..3 { for j in 0..3 { s += i * j } } return s } }"),
     "print_and_int": ('module m { func main() type void { print_int(42) print("\\n") } }'),
+    # -- well-formed linear / unique uses: the discipline must ACCEPT these -----
+    "linear_single_move": ("module m { func main() type int { let x: linear int = 5 "
+                           "let y = x return y } }"),
+    "linear_return": ("module m { func main() type int { let x: linear int = 5 "
+                      "return x } }"),
+    "unique_single_move": ("module m { func main() type int { let x: unique int = 5 "
+                           "let y = x return y } }"),
+    "linear_arg_move": ("module m { func g(a: int) type int { return a } "
+                        "func main() type int { let x: linear int = 5 return g(x) } }"),
+    "linear_borrow_then_move": ("module m { func main() type int { let x: linear int = 5 "
+                                "let y = x + 1 let z = x return z } }"),
+    "unique_unused_is_affine": ("module m { func g(x: unique int) type int { return 1 } }"),
 }
 
 

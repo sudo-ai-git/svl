@@ -218,17 +218,24 @@ def spike_h2_effect_system() -> SpikeResult:
 
 # H3: Linear/Uniqueness Types for Resource Safety
 def spike_h3_linear_types() -> SpikeResult:
-    """Test linear type syntax parsing."""
+    """Test linear/unique type syntax parsing and enforcement.
+
+    Both kinds became ENFORCED (svl/linear_regions.py discharges the move
+    discipline on the compile path), so the honest contract is no longer "strict
+    refuses": a well-formed use is ACCEPTED and a VIOLATED discipline is REFUSED.
+    """
     from svl.parser_rd import parse
     from svl.lexer import tokenize
-    
+    from svl.compiler_wasm import compile_file_to_wasm
+    from svl.verify_gate import SVLVerificationError
+
     test_cases = [
         'func f(x: linear int) type int { return x }',
         'func g(x: unique int) type int { return x }',
         'func h(x: linear unique int) type int { return x }',
         # Note: let statements are not valid at top level in SVL
     ]
-    
+
     results = {}
     for tc in test_cases:
         try:
@@ -237,15 +244,29 @@ def spike_h3_linear_types() -> SpikeResult:
             results[tc] = True
         except Exception as e:
             results[tc] = False
-            
-    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
-    all_pass = (all(results.values()) and refused == len(test_cases)
-                and lenient_ok == len(test_cases))
+
+    well_formed_ok = True
+    for tc in test_cases:
+        try:
+            compile_file_to_wasm(tc)
+        except Exception:                                         # noqa: BLE001
+            well_formed_ok = False
+
+    violated = ('func f() type int { let x: linear int = 5 '
+                'let y = x let z = x return z }')
+    violated_refused = False
+    try:
+        compile_file_to_wasm(violated)
+    except (SVLVerificationError, SyntaxError):
+        violated_refused = True
+
+    all_pass = (all(results.values()) and well_formed_ok and violated_refused)
     return SpikeResult("H3", "Linear/Uniqueness Types", all_pass,
-                      metrics={'parse_tests': results, 'strict_refused': refused,
-                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
-                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
-                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
+                      metrics={'parse_tests': results,
+                               'well_formed_accepted': well_formed_ok,
+                               'violated_refused': violated_refused},
+                      notes=f"parse ok; well-formed accepted: {well_formed_ok}; "
+                            f"violated refused: {violated_refused}")
 
 # H4: Dependent Types for Array Bounds
 def spike_h4_dependent_types() -> SpikeResult:
@@ -602,32 +623,51 @@ def spike_h14_type_families() -> SpikeResult:
 # H15: Linear Type Inference with Regions
 # H15: Linear Type Inference with Regions
 def spike_h15_region_inference() -> SpikeResult:
-    """Test region annotation syntax."""
+    """Test the region engine and the enforced linear/unique discipline.
+
+    The engine is now wired into the compile path, so the honest contract is no
+    longer "strict refuses linear": a well-formed use is ACCEPTED and a VIOLATED
+    discipline is REFUSED.
+    """
     from svl.parser_rd import parse
     from svl.lexer import tokenize
+    from svl.compiler_wasm import compile_file_to_wasm
+    from svl.verify_gate import SVLVerificationError
     from svl.linear_regions import RegionInferenceEngine
-    
-    # Test region inference engine
+
+    # The engine's own primitives still work.
     engine = RegionInferenceEngine()
     old = engine.enter_function("test")
     engine.declare_variable("x", "int", is_linear=True)
     engine.move_variable("x")
     moved_ok = engine.variables["x"].is_moved
     engine.exit_function(old)
-    
-    # Test parsing (syntax not fully implemented yet, but engine works)
-    results = {'region_engine_works': moved_ok}
-    
-    # The region engine exists but is NOT wired into the compile path: strict mode
-    # must refuse `linear`/`unique` rather than silently accepting them.
-    refused, lenient_ok = _strict_refuses_lenient_accepts(
-        ['func f(x: linear int) type int { return x }'])
-    results['strict_refuses_linear'] = refused == 1
-    results['lenient_accepts_linear'] = lenient_ok == 1
+
+    # A well-formed linear use is accepted by the compile path.
+    well_formed_ok = True
+    try:
+        compile_file_to_wasm('func f(x: linear int) type int { return x }')
+    except Exception:                                         # noqa: BLE001
+        well_formed_ok = False
+
+    # A violated discipline is refused.
+    violated_refused = False
+    try:
+        compile_file_to_wasm('func f() type int { let x: linear int = 5 '
+                             'let y = x let z = x return z }')
+    except (SVLVerificationError, SyntaxError):
+        violated_refused = True
+
+    results = {
+        'region_engine_works': moved_ok,
+        'well_formed_accepted': well_formed_ok,
+        'violated_refused': violated_refused,
+    }
     all_pass = all(results.values())
     return SpikeResult("H15", "Linear Type Inference with Regions", all_pass,
                        metrics=results,
-                       notes=f"Region engine: {moved_ok}; strict refuses linear: {refused == 1}")
+                       notes=f"Region engine: {moved_ok}; well-formed accepted: "
+                             f"{well_formed_ok}; violated refused: {violated_refused}")
 
 # H16: Modal Types for Staging
 def spike_h16_modal_types() -> SpikeResult:

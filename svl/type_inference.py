@@ -406,6 +406,11 @@ class TypeInferencer:
             # `svl.refinement_types.check_refinements`, which is why this kind is
             # registered as `enforced` rather than refused.
             return self._type_ann_to_type(ann.value['base_type'], env)
+        elif ann.kind in ('linear', 'unique'):
+            # `linear T` / `unique T` is T plus a static ownership discipline.
+            # Returning T keeps unification working; `svl.linear_regions.
+            # check_linear_usage` enforces the discipline on the compile path.
+            return self._type_ann_to_type(ann.value, env)
         if self.strict:
             from svl.feature_registry import status_of
             feature = status_of(getattr(ann, 'kind', '?'))
@@ -1258,6 +1263,11 @@ class TypeChecker:
             # `svl.refinement_types.check_refinements`, which is why this kind is
             # registered as `enforced` rather than refused.
             return self._type_ann_to_type(ann.value['base_type'], env)
+        elif ann.kind in ('linear', 'unique'):
+            # `linear T` / `unique T` is T plus a static ownership discipline.
+            # Returning T keeps unification working; `svl.linear_regions.
+            # check_linear_usage` enforces the discipline on the compile path.
+            return self._type_ann_to_type(ann.value, env)
         if self.strict:
             from svl.feature_registry import status_of
             feature = status_of(getattr(ann, 'kind', '?'))
