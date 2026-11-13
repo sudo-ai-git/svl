@@ -125,7 +125,7 @@ module prog {
   free list), `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
   unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**, **top-level
   `import`** (resolved with `base_dir`), and **`extern "c" func name(...)`** — a host import
-  you can call like any function. Measured 2026-11-12: the 158-test pytest suite assembles
+  you can call like any function. Measured 2026-11-12: the 166-test pytest suite assembles
   **and runs** every construct; the 33-row probe suite is **30 PASS / 0 FAIL / 3 INFO**
   (`svl-rating/probes.py`).
 - **Command line** — `pip install -e .` then `svlc build|run|check|corpus|repl|lsp`
@@ -150,7 +150,8 @@ module prog {
   classes/instances) parse and are refused by the structural checksum. See KB §11.
 - **Formal rating** — `SVL_FORMAL_RATING.md` scores SVL against Rust, Lean, Haskell, OCaml,
   Dafny, Python, C and AssemblyScript on a 7-dimension rubric, execution-measured against the
-  gates in `svl-rating/`. Current score: **5.80/10**, **7th of 9** (above C and
+  gates in `svl-rating/`. Current score: **6.00/10**, **8th of 9** (above C and AssemblyScript; ties Python 3 at 5.85,
+Rust leads at 8.20). The comparison-language scores are structured assessment from published specifications, not measurements.
   AssemblyScript; Rust leads at 8.20). The comparison-language scores are structured
   assessment from published specifications, not measurements.
 - **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing. **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract. **PCC is real as of 2026-11-12**: `PCCWasmModule.to_wasm_bytes_with_proofs()` emits a binary module with a standard `svl-proofs` custom section that `wasmtime.Module` validates, and `extract_proofs_from_wasm_bytes()` recovers the payload (the old WAT-text form is deprecated — wat2wasm has no custom-section syntax).
@@ -224,7 +225,7 @@ requirements-dev.txt    # every dependency the suite and spikes import
    removals (see the Compiler optimizations bullet above).
 
 4. Golden refs: `python -c "from svl.golden_refs import verify_all_golden_refs; print(verify_all_golden_refs())"`
-5. `python -m pytest tests -q` — the CI suite: 158 tests covering type-directed lowering, backend
+5. `python -m pytest tests -q` — the CI suite: 166 tests covering type-directed lowering, backend
    execution (assemble **and run**), SMT loop invariants/arrays, TCO, the verification gates and the
    corpus. Every compiled module is validated with `wasmtime.Module`, not by inspecting text.
    `.github/workflows/ci.yml` runs it on Python 3.10/3.11/3.12 plus the corpus check, the golden

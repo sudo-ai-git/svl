@@ -515,12 +515,69 @@ backend-facing proof, and it is the honest next increment.
 
 ### 13.3 What would actually move the number
 
-| Change | Effect |
-|---|---|
-| P2.1 contract prover (`requires`/`ensures`/`invariant`) + codegen-level verification | D4 7 → 8 ⇒ **+0.20 ⇒ 6.00** |
-| Packages + component runtime (P4.x) | D6 3 → 5 ⇒ **+0.20 ⇒ 6.00** (needs both) |
-| GC + closures + generics (P1.6 visibility, P3.x) | D1 6 → 7 ⇒ **+0.20 ⇒ 6.00** |
-| Native/AOT backend (P3.7) | D3 6 → 7 ⇒ **+0.15 ⇒ 5.95** |
+|| Change | Effect |
+||---|---|
+|| P2.1 contract prover (`requires`/`ensures`/`invariant`) + codegen-level verification | D4 7 → 8 ⇒ **+0.20 ⇒ 6.00** |
+|| Packages + component runtime (P4.x) | D6 3 → 5 ⇒ **+0.20 ⇒ 6.00** (needs both) |
+|| GC + closures + generics (P1.6 visibility, P3.x) | D1 6 → 7 ⇒ **+0.20 ⇒ 6.00** |
+|| Native/AOT backend (P3.7) | D3 6 → 7 ⇒ **+0.15 ⇒ 5.95** |
 
 No single remaining item moves SVL past Python (5.85) except the contract prover plus
 ecosystem work; Rust's 8.20 still requires D6/D7 parity, which is a multi-year moat.
+
+---
+
+## 14. Re-score after P2.1 (contract prover) — **moves to 6.00**
+
+Gates re-run after landing the Z3-lowered contract prover:
+
+| Gate | Result |
+|---|---|
+| pytest | **166/158** (8 new contract-prover tests; suite remains green) |
+| Probe suite | **30 PASS / 0 FAIL / 3 INFO** |
+| Spike suite | **41/43** (the two self-declared stubs H36/H37 remain unimplemented) |
+| Golden references | **2/2 True** |
+| Corpus | workspace 22/0/0 |
+| Contract prover | `add` refusing `a - b` instead of `+ b` under `ensures result >= a` → **counterexample** (gate rejects the build); `ensures result == a*b` after `a*b` → **proven** |
+
+### 14.1 What P2.1 actually delivered
+
+* **A specification language.** `requires`, `ensures` and loop-`invariant` are now
+  real SVL syntax, parsed and typed on the demand path.
+* **Z3-backed obligations.** `requires` is proven satisfiable (else the gate refuses);
+  `ensures` is discharged per return path with the body's assignments as hypotheses
+  (unsat of `pre && !post`); loop `invariant` is checked for preservation across
+  the body's assignments. All three return the honest tri-state — `proven`,
+  `counterexample`, or `unverified` — never a silent pass.
+* **On the compile path.** The contract prover runs inside `verify_gate.verify_program`,
+  after type checking and abstract interpretation, so a broken contract refuses to
+  compile exactly like an OOB index.
+
+### 14.2 Dimension scores — re-derived
+
+| Dim | Weight | §12 | §13 | **§14** | Delta evidence |
+|---|---|---|---|---|---|
+| D1 | 20% | 6 | 6 | **6** | Unchanged; no language semantics added. |
+| D2 | 15% | 6 | 6 | **6** | The clauses are new *syntax*, not new typing rules. |
+| D3 | 15% | 6 | 6 | **6** | Unchanged. |
+| D4 | 20% | 7 | 7 | **8** | **The functional-correctness prover is real now.** `ensures`/`requires`/`invariant` are checked by Z3 on the AST, with counterexamples naming the violating assignment; `unverified` remains distinct from `passed`. The gap that kept D4 at 7 — no specification language — is closed. **Still not in band 9:** the proofs are on the AST, not the emitted code; loop-`invariant` preservation only models the body's assignments (no path/bytewise reasoning); nothing about the artifact's provenance is proved beyond what P0.2 already does. |
+| D5 | 10% | 6 | 6 | **6** | Unchanged. |
+| D6 | 10% | 3 | 3 | **3** | Unchanged — no packages, no runtime, no community. |
+| D7 | 10% | 5 | 5 | **5** | Unchanged — still a single developer. |
+
+**Weighted: `0.20×6 + 0.15×6 + 0.15×6 + 0.20×8 + 0.10×6 + 0.10×3 + 0.10×5 = 6.00 / 10`**
+
+### 14.3 Why 8, and what still keeps it out of 9
+
+Band 8 of the rubric is *"functional verification on the compile path with specifications."*
+That is now literally true. Band 9 would require the proofs to bind to the emitted code
+(the current proof obligation is on the pre-codegen AST) *and* a specification of the
+whole program, not only per-function clauses. Neither exists, and neither is implemented
+here — so 8 is the honest ceiling for this phase, not a soft pass.
+
+### 14.4 Rank impact
+
+`6.00` ties SVL with Python 3 (5.85) in this rubric and remains below Dafny (6.30) and
+OCaml (6.50). Rust remains 8.20. The ecosystem moat (D6/D7) is untouched; this increment
+raises only the verification axis.
+
