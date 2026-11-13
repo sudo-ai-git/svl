@@ -168,6 +168,8 @@ class FuncDecl(ASTNode):
     return_type: Optional['TypeExpr']
     body: 'Block'
     effects: Optional['EffectRow'] = None
+    requires: Optional['Expr'] = None   # precondition: must hold on entry
+    ensures: Optional['Expr'] = None    # postcondition: may refer to `result` and params
 
 
 @dataclass
@@ -228,6 +230,7 @@ class IfStmt(ASTNode):
 class WhileStmt(ASTNode):
     condition: Expr
     body: Block
+    invariant: Optional['Expr'] = None  # loop invariant: must hold on entry and be preserved
 
 
 @dataclass
@@ -1026,12 +1029,31 @@ class Parser:
         effects = None
         if self.match(TokenType.EXCLAMATION):
             effects = self.parse_effect_row()
+        # Contract clauses (P2.1): `requires <expr>` and `ensures <expr>` may
+        # appear (in that order) between the signature and the body block.
+        requires, ensures = self.parse_contract_clauses()
         body = self.parse_block()
         return FuncDecl(
             type=NodeType.FUNC_DECL,
             line=name_tok.line, column=name_tok.column, offset=name_tok.offset,
-            name=name, params=params, return_type=return_type, body=body, effects=effects
+            name=name, params=params, return_type=return_type, body=body, effects=effects,
+            requires=requires, ensures=ensures
         )
+
+    def parse_contract_clauses(self):
+        """Parse optional `requires <expr>` / `ensures <expr>` clauses.
+
+        Returns ``(requires, ensures)`` — either may be ``None``.  A clause's
+        expression ends at the newline/semicolon before the next clause or the
+        function body's opening brace.  We parse a full expression and stop as
+        soon as a non-expression token appears (the `{` of the body, or a keyword).
+        """
+        requires = ensures = None
+        if self.match(TokenType.REQUIRES):
+            requires = self.parse_expr_no_struct_lit()
+        if self.match(TokenType.ENSURES):
+            ensures = self.parse_expr_no_struct_lit()
+        return requires, ensures
 
     def parse_extern_decl(self) -> ExternDecl:
         """`extern "c" func name(params) type ret` — a host import with no body."""
@@ -1270,13 +1292,17 @@ class Parser:
 
     def parse_while_stmt(self) -> WhileStmt:
         condition = self.parse_expr_no_struct_lit()
+        # Optional loop invariant: `invariant <expr>` after the condition and before the body.
+        invariant = None
+        if self.match(TokenType.INVARIANT):
+            invariant = self.parse_expr_no_struct_lit()
         body = self.parse_block()
         return WhileStmt(
             type=NodeType.WHILE_STMT,
             line=self.current.line if self.current else 0,
             column=self.current.column if self.current else 0,
             offset=self.current.offset if self.current else 0,
-            condition=condition, body=body
+            condition=condition, body=body, invariant=invariant
         )
 
     def parse_for_stmt(self) -> ForStmt:

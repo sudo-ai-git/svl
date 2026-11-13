@@ -41,6 +41,11 @@ class TokenType(Enum):
     BOOL = auto()
     NULL = auto()
 
+    # Contract prover tokens (P2.1: contract prover)
+    REQUIRES = auto()    # requires
+    ENSURES = auto()    # ensures  
+    INVARIANT = auto()    # invariant
+
     # Effect tokens (H2: Effect System)
     EXCLAMATION = auto()     # !
     EFFECT = auto()          # effect keyword
@@ -370,6 +375,8 @@ class Lexer:
             'var': TokenType.VAR, 'assert': TokenType.ASSERT, 'try': TokenType.TRY,
             'catch': TokenType.CATCH, 'throw': TokenType.THROW, 'async': TokenType.ASYNC,
             'await': TokenType.AWAIT,
+            'requires': TokenType.REQUIRES, 'ensures': TokenType.ENSURES,
+            'invariant': TokenType.INVARIANT,
             'in': TokenType.IN,
             'fn': TokenType.FN,
             'effect': TokenType.EFFECT, 'handle': TokenType.HANDLE,

@@ -78,11 +78,24 @@ def verify_program(source: str, ast: Any = None) -> List[str]:
             if f.severity == 'error':
                 problems.append(
                     f"abstract interpretation: {f.message} "
-                    f"[{f.function} line {f.line}]")
+                    f"  [{f.function} line {f.line}]")
         for err in ai.internal_errors:
             problems.append(f"abstract interpretation error: {err}")
     except Exception as exc:                                          # noqa: BLE001
         problems.append(f"abstract interpretation error: {exc}")
+
+    # 4. Contract prover (P2.1): proves requires/ensures/invariant over the AST using
+    #    Z3.  Outside the decidable class the prover reports `unverified`, which is
+    #    harmless — it never rejects a program it cannot decide.
+    try:
+        from svl.contract_prover import verify_contracts
+        ok, contract_problems = verify_contracts(source=source, ast=ast)
+        if not ok and contract_problems:
+            problems.extend(contract_problems)
+    except ImportError:
+        pass  # z3 unavailable: contract proving is optional
+    except Exception as exc:                                          # noqa: BLE001
+        problems.append(f"contract prover error: {exc}")
 
     return problems
 
