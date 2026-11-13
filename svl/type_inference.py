@@ -643,13 +643,23 @@ class TypeInferencer:
         return Type.prim('void')
     
     def _synth_lambda(self, expr: Any, env: TypeEnv) -> Type:
+        """A lambda's type is `fn(params) -> body`.
+
+        The parameters MUST be bound while checking the body — without this, every
+        reference to a parameter was an "unknown identifier" and no lambda could type
+        check.  The body still sees the enclosing scope, which is what makes captures
+        work.
+        """
+        inner = env
         param_types = []
         for param in expr.params:
             if param.type_ann:
-                param_types.append(self._type_ann_to_type(param.type_ann, env))
+                t = self._type_ann_to_type(param.type_ann, env)
             else:
-                param_types.append(Type.var())
-        body_type = self.synthesize(expr.body, env)
+                t = Type.var()
+            param_types.append(t)
+            inner = inner.extend(param.name, TypeScheme(vars=[], body=t))
+        body_type = self.synthesize(expr.body, inner)
         return Type.func(param_types, body_type)
     
     def _synth_let(self, expr: Any, env: TypeEnv) -> Type:

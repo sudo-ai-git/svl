@@ -29,7 +29,7 @@ from typing import List
 from svl.parser_rd import (
     ASTNode, Program, FuncDecl, Block, LetStmt, IfStmt, WhileStmt, ForStmt,
     ReturnStmt, AssertStmt, ExprStmt, TryStmt, ThrowStmt, ConstDecl, VarDecl,
-    Ident, FieldAccess,
+    Ident, FieldAccess, CallExpr, LambdaExpr,
 )
 
 
@@ -144,6 +144,23 @@ class ScopeRenamer:
         if isinstance(node, FieldAccess):
             # `node.right` is a field name, not a variable reference.
             self._expr(node.left)
+            return
+        if isinstance(node, CallExpr):
+            # A callee is normally a function NAME and must not be renamed.  When it is a
+            # LOCAL BINDING — a closure value — it must be, or the call site refers to a
+            # local that no longer exists after the binding was renamed.
+            node.callee = self._resolve(node.callee)
+            for arg in node.arguments:
+                self._expr(arg)
+            return
+        if isinstance(node, LambdaExpr):
+            # The lambda's own scope: its parameters are bindings, and its body may
+            # capture from the enclosing scope.
+            self._push()
+            for p in node.params:
+                p.name = self._bind(p.name)
+            self._expr(node.body)
+            self._pop()
             return
         for f in dataclasses.fields(node):
             value = getattr(node, f.name)

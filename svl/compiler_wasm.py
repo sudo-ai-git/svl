@@ -94,12 +94,27 @@ def lower_type_to_wasm(type_expr: TypeExpr) -> WasmValType:
     elif type_expr.kind in ('struct', 'generic'):
         return WasmValType.I32  # pointer to heap object
     elif type_expr.kind == 'func':
-        return WasmValType.FUNCREF
+        # A closure value is a HEAP POINTER to the `[table_index, env_ptr]` pair, not a
+        # WASM reference.  Emitting `funcref` for a func-typed parameter or return made
+        # the signature disagree with the i32 closure pointer every call site passes.
+        return WasmValType.I32
     elif type_expr.kind == 'tuple':
         return WasmValType.I32  # pointer to tuple struct
     elif type_expr.kind == 'array':
         return WasmValType.I32  # pointer to array
     return WasmValType.I32
+
+
+def _closure_valtype(t) -> str:
+    """The WASM valtype for a value passed to or from a closure.
+
+    A closure value is an i32 heap pointer, so a func-typed parameter or result is i32,
+    not `funcref`.  An unknown type falls back to i32 — the conservative direction.
+    """
+    name = type_to_valtype(t)
+    if name == 'funcref':
+        return 'i32'
+    return name or 'i32'
 
 
 def lower_func_type(params: List[Any], return_type: Any) -> WasmFuncType:
@@ -207,6 +222,14 @@ class WasmCompiler:
         # The type checker's inferred types for the program being compiled. Type-directed
         # lowering reads this; it is None until `compile` runs inference.
         self.inferred = None
+        # Closures: every lambda, its table index, its captured names; the capture map for
+        # the lambda currently being compiled; and the distinct closure signatures.
+        self._lambdas = []
+        self._lambda_by_id = {}
+        self._closure_env = {}
+        self._closure_sigs = {}
+        self._closure_types = []
+        self._closure_type_map = {}
     
     def compile(self, program: Program) -> str:
         """Compile full SVL program to WASM text format."""
@@ -223,6 +246,8 @@ class WasmCompiler:
         self.inferred = infer_types(program)
         # Phase 1: Collect all declarations
         self._collect_declarations(program)
+        # Phase 1b: Closure analysis — every lambda, its index and its captures.
+        self._collect_lambdas(program)
         
         # Phase 2: Compute struct layouts
         self._compute_struct_layouts(program)
@@ -230,8 +255,161 @@ class WasmCompiler:
         # Phase 3: Compile functions
         self._compile_functions(program)
         
+        # Phase 3b: Compile the generated closure functions.
+        self._compile_lambdas()
+
+        # Refresh the deterministic function order now that closures are registered.
+        self.state.sorted_functions = sorted(self.state.functions.keys())
+        
         # Phase 4: Generate WASM module
         return self._generate_wasm_module()
+
+    # -- closures ----------------------------------------------------------
+
+    def _collect_lambdas(self, program: Program) -> None:
+        """Index every lambda and compute its captures.
+
+        Globals, functions and struct names are excluded from capture: a closure body
+        resolves them as globals, and capturing one would freeze a live value.
+        """
+        from svl.closures import collect_lambdas, free_variables
+        exclude = (set(self.state.globals) | set(self.state.functions)
+                   | set(self.state.struct_layouts))
+        self._lambdas = []
+        self._lambda_by_id = {}
+        for index, lam in enumerate(collect_lambdas(program)):
+            self._lambda_by_id[id(lam)] = index
+            self._lambdas.append((lam, index, free_variables(lam, exclude)))
+
+    def _compile_lambdas(self) -> None:
+        """Emit one function per lambda, with the environment as its first parameter."""
+        from svl.closures import signature_string
+        saved_env, saved_known = self._closure_env, getattr(self, '_known_locals', None)
+        saved_func = self.state.current_function
+
+        for lam, index, free in self._lambdas:
+            name = f'lam_{index}'
+            param_types = ['i32']                      # the environment pointer
+            params = [('env', WasmValType('i32'))]
+            for p in lam.params:
+                vt = self._param_valtype('lam', p)
+                param_types.append(vt.value)
+                params.append((p.name, vt))
+            ret = self._valtype_for_inferred(
+                self._inferred_expr_type(lam.body), WasmValType('i32'))
+
+            func = WasmFunction(
+                name=name,
+                func_type=WasmFuncType(params=[WasmValType('i32')] + [
+                    WasmValType(t) for t in param_types[1:]],
+                    results=[ret]),
+                params=params, locals=[], body=[], is_export=False)
+            self.state.functions[name] = func
+            self._closure_sigs[index] = signature_string(
+                param_types, None if ret.value == 'void' else ret.value)
+
+            self.state.current_function = func
+            self.state.local_counter = len(params)
+            self.state.label_counter = 0
+            self._closure_env = {v: slot for slot, v in enumerate(free)}
+            self._known_locals = set(self._closure_env) | {p.name for p in lam.params}
+            self._compile_expr(lam.body)
+            self._closure_env = {}
+            self.state.current_function = None
+
+        self._closure_env = saved_env
+        self._known_locals = saved_known
+        self.state.current_function = saved_func
+
+    def _compile_lambda_expr(self, expr: LambdaExpr):
+        """Build the closure value: allocate the env, capture, allocate the pair."""
+        index = self._lambda_by_id.get(id(expr))
+        if index is None:
+            raise SyntaxError(
+                f"lambda at line {getattr(expr, 'line', '?')} was not analysed")
+        lam, _idx, free = self._lambdas[index]
+
+        func = self.state.current_function
+        self._uses_heap = True
+
+        # Environment block: [v0, v1, ...]
+        env = self._temp_local(func, 'env')
+        func.body.append(f'i32.const {len(free) * 4}')
+        func.body.append('call $alloc')
+        func.body.append(f'local.set ${env}')
+        for slot, name in enumerate(free):
+            func.body.append(f'local.get ${env}')
+            func.body.append(f'i32.const {slot * 4}')
+            func.body.append('i32.add')
+            self._compile_ident(Ident(NodeType.IDENT, getattr(expr, 'line', 0),
+                                      getattr(expr, 'column', 0),
+                                      getattr(expr, 'offset', 0), name))
+            func.body.append('i32.store')
+
+        # Closure block: [table_index, env_ptr]
+        cls = self._temp_local(func, 'cls')
+        func.body.append('i32.const 8')
+        func.body.append('call $alloc')
+        func.body.append(f'local.set ${cls}')
+        func.body.append(f'local.get ${cls}')
+        func.body.append(f'i32.const {index}')
+        func.body.append('i32.store')
+        func.body.append(f'local.get ${cls}')
+        func.body.append('i32.const 4')
+        func.body.append('i32.add')
+        func.body.append(f'local.get ${env}')
+        func.body.append('i32.store')
+        func.body.append(f'local.get ${cls}')
+
+    def _compile_closure_call(self, expr: CallExpr, callee_type) -> None:
+        """`g(args)` where `g` holds a closure: load the pair, `call_ref` the table entry."""
+        func = self.state.current_function
+        from svl.closures import signature_string
+
+        params = list(callee_type.args[:-1])
+        ret = callee_type.args[-1]
+        ret_name = None if ret.kind == 'void' else type_to_valtype(ret)
+        # The generated closure function takes the environment pointer FIRST, so the
+        # `call_ref` signature is `(i32 <param valtypes...>) -> ret`.
+        # A closure-valued parameter or result is an i32 heap pointer, not a funcref.
+        sig = signature_string(
+            ['i32'] + [_closure_valtype(t) for t in params],
+            None if ret.kind == 'void' else _closure_valtype(ret))
+
+        # Find the matching closure type (one per distinct signature).
+        type_index = self._closure_type_map.get(sig)
+        if type_index is None:
+            type_index = f'$cl{len(self._closure_type_map)}'
+            self._closure_type_map[sig] = type_index
+            self._closure_types.append((type_index, sig))
+
+        cptr = self._temp_local(func, 'cptr')
+        cidx = self._temp_local(func, 'cidx')
+        cenv = self._temp_local(func, 'cenv')
+        func.body.append(f'local.set ${cptr}') if False else None
+
+        # The callee expression has already been compiled onto the stack by the caller
+        # path — but this method is called before the arguments are pushed, so compile
+        # the callee here.
+        self._compile_ident(Ident(NodeType.IDENT, getattr(expr, 'line', 0),
+                                  getattr(expr, 'column', 0),
+                                  getattr(expr, 'offset', 0), expr.callee))
+        func.body.append(f'local.tee ${cptr}')
+        func.body.append('i32.load')
+        func.body.append(f'local.set ${cidx}')
+        func.body.append(f'local.get ${cptr}')
+        func.body.append('i32.const 4')
+        func.body.append('i32.add')
+        func.body.append('i32.load')
+        func.body.append(f'local.set ${cenv}')
+
+        func.body.append(f'local.get ${cenv}')
+        for arg in expr.arguments:
+            self._compile_expr(arg)
+        func.body.append(f'local.get ${cidx}')
+        func.body.append('table.get $closures')
+        func.body.append(f'ref.cast (ref {type_index})')
+        func.body.append(f'call_ref {type_index}')
     
     def _literal_init_expr(self, expr) -> Optional[str]:
         """Return a WASM constant expression for a literal initializer, else None."""
@@ -340,8 +518,14 @@ class WasmCompiler:
 
         The conservative direction matters: a type the checker cannot classify must not
         change codegen, or a program that used to compile would stop compiling.
+
+        A `func` type lowers to **i32**, not `funcref`: a closure value is a heap pointer
+        to the `[table_index, env_ptr]` pair, not a WASM reference.  Emitting a `funcref`
+        local made every closure binding invalid.
         """
         name = type_to_valtype(t)
+        if name == 'funcref':
+            name = 'i32'
         return WasmValType(name) if name else default
 
     def _param_valtype(self, func_name: str, p) -> WasmValType:
@@ -1176,6 +1360,14 @@ class WasmCompiler:
             self._compile_expr(expr.arguments[0])
             self.state.current_function.body.append('call $free')
             return
+        # A closure call: the callee is a local/parameter of function type holding a
+        # `[table_index, env_ptr]` pair.  Named functions resolve through `_resolve_callee`.
+        callee_type = self._inferred_local_type(
+            self.state.current_function.name, expr.callee)
+        if callee_type is not None and getattr(callee_type, 'kind', None) == 'func':
+            self._compile_closure_call(expr, callee_type)
+            return
+
         callee = self._resolve_callee(expr.callee, getattr(expr, 'line', '?'))
         # `print` is a host import taking (ptr: i32, len: i32). A lone string-literal
         # argument is therefore expanded into its (ptr, len) pair — pushing only the
@@ -1308,11 +1500,10 @@ class WasmCompiler:
         func = self.state.current_function
         func.body.append('call $await')
     
-    def _compile_lambda_expr(self, expr: LambdaExpr):
-        # Allocate closure struct: { func_ptr, env_ptr }
-        func = self.state.current_function
-        # This is a placeholder - full closure compilation is complex
-        func.body.append('i32.const 0')  # placeholder
+    # NOTE: the placeholder `_compile_lambda_expr` that used to sit here (emitting a
+    # bare `i32.const 0`) was the SECOND definition and therefore the one Python used.
+    # It is removed; the real implementation is the one beside the other closure
+    # codegen near the top of the class.
     
     def _compile_struct_lit(self, expr: StructLit):
         """Allocate the struct on the heap, store every field, leave the base pointer.
@@ -1375,6 +1566,14 @@ class WasmCompiler:
     
     def _compile_ident(self, expr: Ident):
         func = self.state.current_function
+        # A captured variable inside a lambda body: load it from the environment block.
+        if self._closure_env and expr.name in self._closure_env:
+            slot = self._closure_env[expr.name]
+            func.body.append('local.get $env')
+            func.body.append(f'i32.const {slot * 4}')
+            func.body.append('i32.add')
+            func.body.append('i32.load')
+            return
         # A top-level const/var is a WASM global.
         if expr.name in self.state.globals:
             func.body.append(f'global.get ${expr.name}')
@@ -1537,6 +1736,16 @@ class WasmCompiler:
                 continue
             type_map[type_sig] = len(type_map)
             lines.append(f'  (type $t{type_map[type_sig]} (func {type_sig}))')
+
+        # Closure signatures — one type per distinct `(env, params...) -> ret` shape.
+        for type_index, sig in self._closure_types:
+            body, _, ret = sig.partition(') -> ')
+            params = body.lstrip('(')
+            line = f'  (type {type_index} (func (param {params})'
+            if ret:
+                line += f' (result {ret})'
+            line += '))'
+            lines.append(line)
         
         # GC Struct types (H25) — `type` fields come before imports.
         # Field names need a `$` sigil: `(field x i32)` is invalid ("expected valtype").
@@ -1707,7 +1916,16 @@ class WasmCompiler:
         # Only programs that allocate get a larger memory, so non-allocating programs keep
         # byte-identical output.
         pages = max(self.state.memory_pages, 16) if self._uses_heap else self.state.memory_pages
+        # The funcref table comes BEFORE memory in the canonical field order.
+        if self._lambdas:
+            lines.append(f'  (table $closures {len(self._lambdas)} funcref)')
         lines.append(f'  (memory {pages})')
+
+        # The active element segment fills the table at instantiation.  `elem` belongs
+        # after memory/global/export in the canonical order.
+        if self._lambdas:
+            entries = ' '.join(f'$lam_{i}' for i in range(len(self._lambdas)))
+            lines.append(f'  (elem (i32.const 0) func {entries})')
         
         # Heap pointer, initialised past the static string data so allocations never
         # overlap the data segments.
