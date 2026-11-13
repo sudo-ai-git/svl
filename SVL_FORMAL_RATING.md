@@ -4,10 +4,10 @@
 **Workspace HEAD:** `8e3d18f` · **Public mirror (`~/svl-release`) HEAD:** `9e6e3b8`
 **Evidence:** `svl-rating/` (executable probes + benchmarks + raw output)
 
-> **CURRENT SCORE: 6.25 / 10 — see §16.** §1–§15 are retained as dated snapshots
-> (3.20 → 5.80 → 6.00 → 6.10) so the movement is auditable; each section names the
-> gates it was derived from. Do not quote a number from §1–§15 without its section
-> number.
+> **CURRENT SCORE: 6.40 / 10, 5th of 9 — see §17.** §1–§16 are retained as dated
+> snapshots (3.20 → 5.80 → 6.00 → 6.10 → 6.25) so the movement is auditable; each
+> section names the gates it was derived from. Do not quote a number from §1–§16
+> without its section number.
 >
 > **Method.** Every SVL score below is backed by an execution gate run **this session**,
 > not by a document. Each probe is built to be able to fail; a probe that cannot fail is
@@ -816,4 +816,106 @@ refinement was. Wiring it is the next ~+0.15.
 3. The refinement checker models **QF_LIA over int/bool only**. `/`, `%`, calls, arrays,
    floats and structs are declined to silence, so a refinement using them is *not*
    checked — that is a real scope limit, not a claim of full refinement support.
+
+---
+
+## 17. Re-score after linear/unique enforcement — **6.40 / 10**, **5th of 9**
+
+Same seven dimensions, same weights, same anchors as §2. Every gate below was run
+**this session on this tree**; nothing is carried over from §12–§16.
+
+### 17.1 Gates run this session
+
+| Gate | Command | Result |
+|---|---|---|
+| pytest | `python -m pytest tests -q` | **264 passed** (158 §1 · 166 §14 · 176 §15 · 217 §16 · 240 after refinement) |
+| Spike suite | `python -m svl.spike_runner` | **41/43** (the 2 are the declared stubs H36/H37) |
+| Golden references | `verify_all_golden_refs()` | **2/2 True** |
+| Hebrew alias contract | `verify_mapping()` / `verify_sofit_excluded()` | **22/22** / **5/5** |
+| Corpus | `python -m svl.corpus_check --json` | 25 files, **22 compiled, 0 refused**, 0 AI findings |
+| Verifier corpus | `run_suite()` | **0 disagreements** |
+| Differential execution | `tests/test_svl_differential.py` | **22/22 agree** |
+| Probe suite | `python svl-rating/probes.py` | **30 PASS / 0 FAIL / 3 INFO** |
+| Feature registry | `verify_registry()` | `(True, [], [])` — **10 kinds enforced** |
+| Self-attestation | `compile_attested` + `verify_attestation` | **VALID** |
+| s17 wasm determinism | assemble + validate | **Passed: True** |
+| **Linear gate** | `check_linear_usage(parse(tokenize(src)))` | well-formed → `([], [])`; double move → **refused** |
+| **Refinement gate** | `check_refinements(...)` | satisfied → `[]`; violated → **refused** |
+
+### 17.2 Dimension scores — re-derived, not carried over
+
+| Dim | Weight | §16 | **§17** | Evidence for the change |
+|---|---|---|---|---|
+| D1 | 20% | 6 | **6** | Unchanged. No GC, closures still a placeholder, generics parse-only. |
+| **D2** | **15%** | **7** | **8** | **A second engine is enforced.** `linear`/`unique` now discharge a real static move discipline on the compile path: a moved value may not be used or moved again (hard error), an unconsumed `linear` warns, `unique` is affine. §16.3 said the D2→7 move "would become unambiguous with one more engine (e.g. `linear`/`unique` via the existing `svl/linear_regions.py`)" — that engine is now wired. |
+| D3 | 15% | 6 | **6** | Unchanged. |
+| D4 | 20% | 8 | **8** | Unchanged. The linear discipline is a *type* rule, not a new proof obligation. Band 9 still needs proofs bound to the emitted code plus a whole-program specification. |
+| D5 | 10% | 6 | **6** | Unchanged. |
+| D6 | 10% | 4 | **4** | Unchanged this pass. |
+| D7 | 10% | 5 | **5** | Unchanged. |
+
+**Weighted: `0.20×6 + 0.15×8 + 0.15×6 + 0.20×8 + 0.10×6 + 0.10×4 + 0.10×5 = 6.40 / 10`**
+
+### 17.3 Why D2 moved to 8, and what is still missing
+
+**10 of 17 `TypeExpr` kinds are now enforced**: the core (primitives, structs, named,
+function, generic, tuple, array) plus **refinement** and **linear/unique**. Two
+Z3-discharged obligation systems and one static ownership discipline run on the compile
+path, and every non-enforced kind is refused *by name* rather than silently accepted.
+
+**Still not enforced — 7 kinds:**
+
+| Kind | Status | What would wire it |
+|---|---|---|
+| `kind_star`, `kind_arrow` | engine-only | `svl/kind_inference.py` exists (kind unification, `KindEnv`, `KindInference`) but is not on the compile path |
+| `vec`, `dynamic`, `forall`, `intersection`, `union` | parse-only | no engine; would need dependent bounds, cast checking, constraint solving, subtyping |
+
+The Mod-5/Z-2 layer remains decorative. **Band 8 is "solid, minor gaps"; the honest reading
+is that the *enforced* surface is now solid and the remaining 7 kinds are all loudly
+refused, so the gaps are visible rather than silent.** Wiring `kind_star`/`kind_arrow`
+(the last engine-only pair) is the next D2 step.
+
+### 17.4 Rank — **5th of 9**, past Dafny
+
+| Language | Weighted |
+|---|---|
+| Rust 1.99 | 8.20 |
+| Lean 4 | 7.50 |
+| Haskell (GHC) | 7.00 |
+| OCaml 5 | 6.50 |
+| **SVL** | **6.40** |
+| Dafny | 6.30 |
+| Python 3 | 5.85 |
+| C (gcc 13) | 5.65 |
+| AssemblyScript | 5.05 |
+
+The score rose 6.25 → 6.40 and **the rank moved from 6th to 5th**, above Dafny (6.30).
+Comparison-language scores are structured assessment against published specifications,
+**not** measurements — treat the rank as lower precision than the SVL score.
+
+### 17.5 What would move it next
+
+| Change | Effect | Cost |
+|---|---|---|
+| Wire `kind_star`/`kind_arrow` (engine exists: `svl/kind_inference.py`) | D2 8 → 9? ⇒ up to **+0.15 ⇒ 6.55** | M |
+| GC + closures + generics | D1 6 → 7 ⇒ **+0.20 ⇒ 6.60** | L (three hard features) |
+| Proofs bound to the emitted code + whole-program spec | D4 8 → 9 ⇒ **+0.20 ⇒ 6.60** | L (research-grade) |
+| Component runtime (load a `.so`, marshal via WIT) | D6 4 → 5 ⇒ **+0.10 ⇒ 6.50** | L (the proposal) |
+
+**The best ratio left is D2 again**: `kind_inference.py` is the last engine-only pair and
+is not wired. Note that D2 8 → 9 is *not* automatic from wiring it — band 9 is
+"best-in-class", and the remaining parse-only kinds would still be unenforced.
+
+### 17.6 Caveats
+
+1. Dimension scores are **expert assessment** backed by the gates above; only the SVL
+   row is execution-measured.
+2. **The linear discipline is STATIC.** SVL has value semantics — values are i32/f64 in
+   WASM and there is no runtime ownership. `linear`/`unique` constrain *variable usage*,
+   not memory; a program using them is making a claim the compiler can check, and the
+   claim is about aliasing, not about heap ownership.
+3. **An unconsumed `linear` is a warning, not an error.** The gate refuses only proven
+   violations (second move, use after move). A `linear` value that is never consumed
+   passes — deliberately, because a false positive would reject a correct program.
+4. The refinement checker models QF_LIA over int/bool only (§16.6).
 
