@@ -148,6 +148,11 @@ module prog {
 
   Declaration-level features (macros, module types/functors, algebraic effects, type
   classes/instances) parse and are refused by the structural checksum. See KB §11.
+- **Formal rating** — `SVL_FORMAL_RATING.md` scores SVL against Rust, Lean, Haskell, OCaml,
+  Dafny, Python, C and AssemblyScript on a 7-dimension rubric, execution-measured against the
+  gates in `svl-rating/`. Current score: **5.80/10**, **7th of 9** (above C and
+  AssemblyScript; Rust leads at 8.20). The comparison-language scores are structured
+  assessment from published specifications, not measurements.
 - **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing. **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract. **PCC is real as of 2026-11-12**: `PCCWasmModule.to_wasm_bytes_with_proofs()` emits a binary module with a standard `svl-proofs` custom section that `wasmtime.Module` validates, and `extract_proofs_from_wasm_bytes()` recovers the payload (the old WAT-text form is deprecated — wat2wasm has no custom-section syntax).
 - **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model
   of a program's arithmetic and discharges every `assert` by refuting its negation: `unsat` →

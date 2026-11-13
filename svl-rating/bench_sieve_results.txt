@@ -1,0 +1,16 @@
+==============================================================================
+MEASURED BENCHMARK — sieve(100000), best-of-5 run time (ms)
+==============================================================================
+SVL      wasm/wasmtime    result=9592     compile=    47.7 ms  run=    5.22 ms  (5.33 med)  artifact=657 B
+Rust     wasm/wasmtime    result=9592     compile=   216.1 ms  run=    3.64 ms  (4.96 med)  artifact=534 B
+C        native/x86-64    result=9592     compile=  1629.5 ms  run=    3.40 ms  (3.71 med)  artifact=16000 B
+Rust     native/x86-64    result=9592     compile=   838.5 ms  run=    4.53 ms  (7.91 med)  artifact=4537544 B
+9592
+9592
+9592
+9592
+9592
+9592
+Python   native/x86-64    result=9592     compile=     0.0 ms  run=   16.38 ms  (19.95 med)  artifact=359 B
+------------------------------------------------------------------------------
+all results identical: True (value 9592)

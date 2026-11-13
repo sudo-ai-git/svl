@@ -1,0 +1,30 @@
+### SIEVE RUN 1
+SVL      wasm/wasmtime    result=9592     compile=    39.8 ms  run=    4.19 ms  (4.81 med)  artifact=657 B
+Rust     wasm/wasmtime    result=9592     compile=   228.0 ms  run=    2.51 ms  (2.94 med)  artifact=534 B
+C        native/x86-64    result=9592     compile=   321.5 ms  run=    2.43 ms  (2.56 med)  artifact=16000 B
+Rust     native/x86-64    result=9592     compile=   366.9 ms  run=    2.27 ms  (2.63 med)  artifact=4537544 B
+Python   native/x86-64    result=9592     compile=     0.0 ms  run=    7.64 ms  (8.29 med)  artifact=359 B
+### SIEVE RUN 2
+SVL      wasm/wasmtime    result=9592     compile=    22.7 ms  run=    3.07 ms  (3.29 med)  artifact=657 B
+Rust     wasm/wasmtime    result=9592     compile=   115.3 ms  run=    2.08 ms  (2.27 med)  artifact=534 B
+C        native/x86-64    result=9592     compile=   318.9 ms  run=    2.02 ms  (2.22 med)  artifact=16000 B
+Rust     native/x86-64    result=9592     compile=   306.2 ms  run=    1.88 ms  (2.03 med)  artifact=4537544 B
+Python   native/x86-64    result=9592     compile=     0.0 ms  run=    8.03 ms  (8.35 med)  artifact=359 B
+### SIEVE RUN 3
+SVL      wasm/wasmtime    result=9592     compile=    29.1 ms  run=    3.53 ms  (3.76 med)  artifact=657 B
+Rust     wasm/wasmtime    result=9592     compile=   115.6 ms  run=    2.29 ms  (2.56 med)  artifact=534 B
+C        native/x86-64    result=9592     compile=   219.4 ms  run=    1.89 ms  (1.98 med)  artifact=16000 B
+Rust     native/x86-64    result=9592     compile=   270.1 ms  run=    2.01 ms  (2.77 med)  artifact=4537544 B
+Python   native/x86-64    result=9592     compile=     0.0 ms  run=    7.78 ms  (8.53 med)  artifact=359 B
+### XORSHIFT RUN 1
+SVL    wasm/wasmtime    compile=    18.0 ms  warm=   7.919 ms (8.156 med)  cold=   9.163 ms  artifact=210 B  result=1490141054
+Rust   wasm/wasmtime    compile=   106.5 ms  warm=   7.963 ms (8.588 med)  cold=   9.350 ms  artifact=521 B  result=1490141054
+C      native/x86-64    compile=   380.6 ms  warm=   9.405 ms (10.095 med)  cold=   9.405 ms  artifact=15968 B  result=0
+### XORSHIFT RUN 2
+SVL    wasm/wasmtime    compile=    20.6 ms  warm=   7.994 ms (8.283 med)  cold=   9.653 ms  artifact=210 B  result=1490141054
+Rust   wasm/wasmtime    compile=   121.3 ms  warm=   7.581 ms (8.112 med)  cold=   9.117 ms  artifact=521 B  result=1490141054
+C      native/x86-64    compile=   249.0 ms  warm=   9.592 ms (10.301 med)  cold=   9.592 ms  artifact=15968 B  result=0
+### XORSHIFT RUN 3
+SVL    wasm/wasmtime    compile=    25.8 ms  warm=   7.725 ms (8.094 med)  cold=   9.302 ms  artifact=210 B  result=1490141054
+Rust   wasm/wasmtime    compile=   144.3 ms  warm=   7.955 ms (8.566 med)  cold=   9.565 ms  artifact=521 B  result=1490141054
+C      native/x86-64    compile=   317.3 ms  warm=  10.624 ms (11.462 med)  cold=  10.624 ms  artifact=15968 B  result=0

@@ -1,0 +1,66 @@
+==============================================================================
+SVL FORMAL-RATING PROBE SUITE — execution evidence
+==============================================================================
+P01   PASS lexical scoping (inner let must not clobber outer)
+        returned 1, correct = 1
+P02   PASS for x in <iterable> sums the elements
+        returned 6, correct = 6
+P03   PASS && short-circuits (no division by zero)
+        f(0) returned 0, correct = 0 (false)
+P04   PASS string == compares content
+        returned 1, correct = 1
+P24   PASS float arithmetic (1.5 + 2.5)
+        returned 4.0, correct = 4.0
+P25   PASS non-exhaustive match traps
+        trapped as designed: Trap
+P26   PASS try/catch error model
+        parsed and compiled
+P27   PASS import links a module (inline import rejected)
+        inline rejected = True; two-file link -> 42 = True
+P05   PASS type soundness: return "hi" in a type int function
+        refused: Type mismatch in return: Argument mismatch: string vs int
+P06   PASS type soundness: f("hi") against f(x: int)
+        refused: Type checking error: Argument mismatch: string vs int
+P07   PASS type soundness: let x: int = "hi"
+        refused: Type mismatch in let: Argument mismatch: string vs int
+P08   PASS print(<int variable>) emits a valid module
+        assembled and ran
+P09   PASS reassigning a const
+        refused: refusing to compile — verification failed:
+  - assignment to const 'c'
+P10   PASS proof-carrying WASM artifact assembles
+        validated; proof section recovered = True
+P16   PASS memory can grow and the program is re-runnable
+        (memory 16); memory.grow present = True; two calls in one Store -> 1,1
+P17   PASS 20000-deep tail recursion completes
+        returned 20000 in 0.01s
+P28   INFO compile latency + artifact size (sieve.svl)
+        compile 15 ms, wasm 993 bytes
+P11   PASS SMT tri-state (counterexample / proven / unverified)
+        false->counterexample, true->proven, unsupported->unverified
+P12   PASS interval AI refuses provable OOB, silent on correct code
+        refused OOB = True, correct program silent = True
+P13   INFO BPSW 'theorem' layer fails any program
+        0/60 programs failed the layer (0 = constant-true, gates nothing)
+P14   INFO 231-gate PRODUCT channel is non-degenerate
+        PRODUCT == 0 for 2000/2000 random 512-byte windows
+P15   PASS strict gate refuses type error; strict=False bypasses
+        strict refused = True, strict=False compiled = True
+P19   PASS LSP server boots
+        INFO:pygls.server:Shutting down the server
+P20   PASS REPL evaluates `let x = 1`
+        Total:   5.4ms | svl>  | Goodbye!
+P21   PASS registry survives save/reload
+        reloaded and published
+P22   INFO installable package / `svlc` CLI
+        pyproject/setup.py present = True; invoked as `python -m svl.*`
+P23   PASS CI triggers on the repo's actual branch
+        workflow triggers on 'master', repo branch is 'master'
+P18   PASS bit-identical output across PYTHONHASHSEED 0/1/12345/random
+        1 distinct hashes
+P29   PASS bubble_sort matches documented output
+        got 'sorted=1 sum=28 cmps=15 swaps=8 odds=6\n'
+P30   PASS sieve matches documented output
+        got 'pi(10)=4 pi(40)=12 pi(70)=19 pi(100)=25 \n'
+==============================================================================
+TOTAL 30 | PASS 26 | FAIL 0 | INFO 4
