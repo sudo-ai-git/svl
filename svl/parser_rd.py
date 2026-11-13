@@ -135,6 +135,12 @@ class Module(ASTNode):
     name: str
     body: 'Block'
     version: Optional['Version'] = None
+    # Whole-program specification: clauses declared at MODULE scope, applying to the
+    # module's entry point (the function exported as `<module>_main`).  This is the
+    # program-level contract — it says what the program as a whole guarantees, as
+    # opposed to the per-function clauses inside the body.
+    spec_requires: Optional[Any] = None
+    spec_ensures: Optional[Any] = None
 
 
 @dataclass
@@ -698,11 +704,16 @@ class Parser:
         version = None
         if self.match(TokenType.AT):
             version = self.parse_version()
+        # Optional whole-program specification, between the name and the body:
+        #   module m requires <expr> ensures <expr> { ... }
+        # The clauses apply to the module's entry point (`main`).
+        spec_requires, spec_ensures = self.parse_contract_clauses()
         body = self.parse_block()
         return Module(
             type=NodeType.MODULE,
             line=name_tok.line, column=name_tok.column, offset=name_tok.offset,
-            name=name, version=version, body=body
+            name=name, version=version, spec_requires=spec_requires,
+            spec_ensures=spec_ensures, body=body
         )
 
     def parse_version(self) -> 'Version':

@@ -129,6 +129,24 @@ class PCCWasmModule:
         return binary + WasmCustomSection.create_proof_section(payload)
 
 
+def _module_spec_artifact(ast) -> ProofArtifact:
+    """A proof layer recording the whole-program specification verdict.
+
+    `verify_pcc_wasm` re-derives the full gate from the source, so the module spec is
+    covered transitively — but recording it in the artifact makes the attestation
+    explicit rather than implied.
+    """
+    from svl.module_spec import check_module_spec
+    problems = check_module_spec(ast)
+    return ProofArtifact(
+        layer='module-spec',
+        passed=not problems,
+        checksum='',
+        details={'problems': problems},
+        timestamp=__import__('datetime').datetime.utcnow().isoformat() + 'Z',
+    )
+
+
 def compilation_certificate(wasm_text: str) -> Tuple[str, str]:
     """The (emitted hash, compiler version) certificate for a compilation.
 
@@ -229,6 +247,7 @@ class PCCWasmGenerator:
             )
         ]
 
+        proofs = list(proofs) + [_module_spec_artifact(ast)]
         return PCCWasmModule(
             wasm_text=wasm_text,
             proofs=proofs,
@@ -309,6 +328,7 @@ class PCCWasmGenerator:
             )
         ]
 
+        proofs = list(proofs) + [_module_spec_artifact(ast)]
         return PCCWasmModule(
             wasm_text=wasm_text,
             proofs=proofs,

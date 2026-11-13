@@ -835,19 +835,31 @@ def spike_h20_pcc_wasm() -> SpikeResult:
 
     proofs = extracted.get('proofs', []) if extracted else []
     layers = {p.get('layer') for p in proofs}
-    # Four layers now: syntax, types, the constant-true BPSW check (marked
-    # `informational`), and the real SMT verdict.
+    # Five layers: syntax, types, the constant-true BPSW check (marked
+    # `informational`), the real SMT verdict, and the whole-program specification.
     has_custom_section = (
         extracted is not None
-        and len(proofs) == 4
-        and {'syntax', 'types', 'theorem', 'smt'} <= layers
+        and len(proofs) == 5
+        and {'syntax', 'types', 'theorem', 'smt', 'module-spec'} <= layers
         and any(p.get('layer') == 'theorem' and p.get('informational') for p in proofs)
     )
 
-    return SpikeResult("H20", "Proof-Carrying Code for WASM", has_custom_section,
-                      metrics={'wasm_length': len(wasm_with_proofs), 'has_custom_section': has_custom_section,
-                               'proofs_count': len(proofs), 'layers': sorted(layers)},
-                      notes="PCC WASM with custom sections implemented")
+    # A violated module spec must be RECORDED as a failed layer, not silently dropped.
+    violated = generator.generate(
+        'module m ensures result == 42 { func main() type int { return 7 } }')
+    violated_proofs = extract_proofs_from_wasm(violated.to_wasm_with_proofs()) or {}
+    spec = next((p for p in violated_proofs.get('proofs', [])
+                 if p.get('layer') == 'module-spec'), None)
+    spec_records_failure = bool(spec) and spec.get('passed') is False
+
+    ok = has_custom_section and spec_records_failure
+    return SpikeResult("H20", "Proof-Carrying Code for WASM", ok,
+                      metrics={'wasm_length': len(wasm_with_proofs),
+                               'has_custom_section': has_custom_section,
+                               'proofs_count': len(proofs), 'layers': sorted(layers),
+                               'spec_records_failure': spec_records_failure},
+                      notes=f"PCC WASM with custom sections; {len(proofs)} layers "
+                            f"(module-spec added)")
 
 # H21: Abstract Interpretation for Type Layer
 def spike_h21_abstract_interpretation() -> SpikeResult:
