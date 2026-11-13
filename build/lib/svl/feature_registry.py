@@ -58,8 +58,9 @@ FEATURES: Dict[str, Feature] = {
                          'svl/kind_inference.py is not wired into the compile path'),
     'kind_arrow': Feature('kind arrows', 'kind_arrow', ENGINE_ONLY,
                           'svl/kind_inference.py is not wired into the compile path'),
-    'refinement': Feature('refinement types', 'refinement', ENGINE_ONLY,
-                          'would discharge through Z3; no obligation is generated yet'),
+    'refinement': Feature('refinement types', 'refinement', ENFORCED,
+                          'svl/refinement_types.py discharges { v: T | P(v) } obligations '
+                          'through Z3 on the compile path'),
     # -- parse-only: nothing checks it ---------------------------------------------
     'vec': Feature('dependent array bounds', 'vec', PARSE_ONLY,
                    'vec<int, n> parses; no bound obligation is generated'),
