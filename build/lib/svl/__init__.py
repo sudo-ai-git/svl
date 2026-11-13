@@ -5,4 +5,4 @@ verifier or any third-party dependency, so `import svl` works everywhere and the
 can report a version before anything heavy loads.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

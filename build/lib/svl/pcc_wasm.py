@@ -10,6 +10,7 @@ import json
 from svl.parser_rd import Program, Module, FuncDecl, StructDecl
 from svl.theorem_layer import verify_theorem_layer
 from svl.compiler_wasm import compile_to_wasm
+from svl.attest import content_hash
 
 
 @dataclass
@@ -31,6 +32,15 @@ class PCCWasmModule:
     wasm_text: str
     proofs: List[ProofArtifact]
     source_hash: str  # SHA256 of original source
+    # Compilation certificate (the band-9 binding): the SHA256 of the EXACT emitted
+    # WAT, plus the SHA256 of the artifact's own canonical bytes (custom sections
+    # stripped), plus the compiler version.  `verify_pcc_wasm` recompiles the source
+    # with the pinned compiler and compares BOTH, so the artifact is provably the
+    # compilation of its source — not merely a file that quotes a source hash and
+    # carries unrelated bytes.  Empty on artifacts built before this existed.
+    emitted_sha256: str = ""
+    artifact_sha256: str = ""
+    compiler_version: str = ""
 
     def to_wasm_with_proofs(self) -> str:
         """Deprecated: return WAT text with a `(custom ...)` line.
@@ -45,6 +55,9 @@ class PCCWasmModule:
         # Build proof custom section
         proof_data = {
             'source_hash': self.source_hash,
+            'emitted_sha256': self.emitted_sha256,
+            'artifact_sha256': self.artifact_sha256,
+            'compiler_version': self.compiler_version,
             'proofs': [
                 {
                     'layer': p.layer,
@@ -93,8 +106,14 @@ class PCCWasmModule:
                 "wasmtime is required to emit a binary PCC artifact"
             ) from exc
         binary = wasmtime.wat2wasm(self.wasm_text)
+        # The artifact hash covers the canonical code bytes — custom sections are
+        # stripped, so it is stable across the proof section being appended.
+        self.artifact_sha256 = content_hash(bytes(binary))
         payload = {
             'source_hash': self.source_hash,
+            'emitted_sha256': self.emitted_sha256,
+            'artifact_sha256': self.artifact_sha256,
+            'compiler_version': self.compiler_version,
             'proofs': [
                 {
                     'layer': p.layer,
@@ -108,6 +127,39 @@ class PCCWasmModule:
             ],
         }
         return binary + WasmCustomSection.create_proof_section(payload)
+
+
+def _module_spec_artifact(ast) -> ProofArtifact:
+    """A proof layer recording the whole-program specification verdict.
+
+    `verify_pcc_wasm` re-derives the full gate from the source, so the module spec is
+    covered transitively — but recording it in the artifact makes the attestation
+    explicit rather than implied.
+    """
+    from svl.module_spec import check_module_spec
+    problems = check_module_spec(ast)
+    return ProofArtifact(
+        layer='module-spec',
+        passed=not problems,
+        checksum='',
+        details={'problems': problems},
+        timestamp=__import__('datetime').datetime.utcnow().isoformat() + 'Z',
+    )
+
+
+def compilation_certificate(wasm_text: str) -> Tuple[str, str]:
+    """The (emitted hash, compiler version) certificate for a compilation.
+
+    The hash covers the exact emitted WAT.  Because `compile_file_to_wasm` is a pure
+    function of the source (verified byte-identical across rebuilds), a verifier can
+    recompile the source and compare — which proves the artifact IS that source's
+    compilation rather than merely a file that quotes the source's hash.
+
+    The ARTIFACT hash (over canonical code bytes, custom sections stripped) is
+    computed by `PCCWasmModule.to_wasm_bytes_with_proofs`, which has the bytes.
+    """
+    from svl import __version__
+    return hashlib.sha256(wasm_text.encode('utf-8')).hexdigest(), __version__
 
 
 class PCCWasmGenerator:
@@ -135,6 +187,7 @@ class PCCWasmGenerator:
         source_hash = hashlib.sha256(source.encode('utf-8')).hexdigest()
 
         # 4. Create proof artifacts
+        emitted_sha256, compiler_version = compilation_certificate(wasm_text)
         proofs = [
             ProofArtifact(
                 layer='syntax',
@@ -194,10 +247,13 @@ class PCCWasmGenerator:
             )
         ]
 
+        proofs = list(proofs) + [_module_spec_artifact(ast)]
         return PCCWasmModule(
             wasm_text=wasm_text,
             proofs=proofs,
-            source_hash=source_hash
+            source_hash=source_hash,
+            emitted_sha256=emitted_sha256,
+            compiler_version=compiler_version,
         )
 
     def generate_from_ast(self, ast: Program, deterministic: bool = True) -> PCCWasmModule:
@@ -211,6 +267,7 @@ class PCCWasmGenerator:
 
         verification_result = verify_theorem_layer(source)
         wasm_text = compile_to_wasm(ast, deterministic=deterministic)
+        emitted_sha256, compiler_version = compilation_certificate(wasm_text)
 
         proofs = [
             ProofArtifact(
@@ -271,10 +328,13 @@ class PCCWasmGenerator:
             )
         ]
 
+        proofs = list(proofs) + [_module_spec_artifact(ast)]
         return PCCWasmModule(
             wasm_text=wasm_text,
             proofs=proofs,
-            source_hash=source_hash
+            source_hash=source_hash,
+            emitted_sha256=emitted_sha256,
+            compiler_version=compiler_version,
         )
 
     def _ast_to_source(self, ast: Program) -> str:
@@ -366,6 +426,69 @@ def verify_pcc_wasm(wasm, source: str) -> Tuple[bool, List[str]]:
     source_hash = hashlib.sha256(source.encode('utf-8')).hexdigest()
     if proofs_data.get('source_hash') != source_hash:
         errors.append(f"Source hash mismatch: expected {source_hash}, got {proofs_data.get('source_hash')}")
+
+    # Compilation certificate.  Two independent bindings, both required:
+    #   * artifact_sha256 — the ARTIFACT's own canonical bytes.  Without this a file
+    #     could quote a source hash and carry unrelated bytes.
+    #   * emitted_sha256  — the recompilation of the source with the pinned compiler.
+    #     Without this the artifact could be some other program that happens to quote
+    #     the right source hash.
+    # Together they prove: source --compiler--> bytes, and the artifact IS those bytes.
+    recorded_emitted = proofs_data.get('emitted_sha256')
+    recorded_artifact = proofs_data.get('artifact_sha256')
+    recorded_version = proofs_data.get('compiler_version')
+    if recorded_emitted or recorded_artifact:
+        from svl import __version__ as current_version
+        if recorded_version and recorded_version != current_version:
+            errors.append(
+                f"Compilation certificate version mismatch: artifact was built by "
+                f"compiler {recorded_version}, this is {current_version}")
+
+        if recorded_artifact:
+            from svl.attest import content_hash
+            given = content_hash(bytes(wasm) if isinstance(wasm, (bytes, bytearray)) else wasm)
+            if given != recorded_artifact:
+                errors.append(
+                    "Compilation certificate mismatch: the artifact's own bytes hash to "
+                    f"{given[:16]}..., not the recorded {recorded_artifact[:16]}... "
+                    f"— the artifact was modified after certification")
+
+        if recorded_emitted and not (recorded_version and recorded_version != current_version):
+            try:
+                import wasmtime
+                from svl.attest import content_hash
+                from svl.compiler_wasm import compile_file_to_wasm
+                from svl.pcc_wasm import compilation_certificate
+                recompiled_wat = compile_file_to_wasm(source)
+                recompiled, _ = compilation_certificate(recompiled_wat)
+                if recompiled != recorded_emitted:
+                    errors.append(
+                        "Compilation certificate mismatch: recompiling the source emits "
+                        f"bytes hashing to {recompiled[:16]}..., not the recorded "
+                        f"{recorded_emitted[:16]}... — the artifact is NOT the "
+                        f"compilation of this source")
+                # The binding that ties the two halves together: the ARTIFACT's own
+                # canonical bytes must be exactly the recompilation's.  Without this a
+                # swapped body could carry a self-consistent pair of claims.
+                if recorded_artifact:
+                    recompiled_artifact = content_hash(bytes(wasmtime.wat2wasm(recompiled_wat)))
+                    given = content_hash(bytes(wasm) if isinstance(wasm, (bytes, bytearray)) else wasm)
+                    if recompiled_artifact != given:
+                        errors.append(
+                            "Compilation certificate mismatch: the artifact's bytes are "
+                            f"not the compilation of this source (artifact "
+                            f"{given[:16]}... vs recompilation "
+                            f"{recompiled_artifact[:16]}...)")
+            except Exception as exc:                              # noqa: BLE001
+                errors.append(
+                    f"could not recompile for the compilation certificate "
+                    f"({type(exc).__name__}: {exc})")
+    else:
+        # Legacy artifact (pre-certificate).  Not a failure, but it cannot prove the
+        # binding, and the caller is told so.
+        errors.append(
+            "no compilation certificate (artifact predates emitted-bytes binding); "
+            "source hash matches but the artifact bytes are not bound to it")
 
     # Re-derive the compile-time gate from the source (AST guard + type layer + interval AI).
     try:

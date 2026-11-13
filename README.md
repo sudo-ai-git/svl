@@ -131,7 +131,7 @@ module prog {
 - **Command line** — `pip install -e .` then `svlc build|run|check|corpus|repl|lsp`
   (`svl/cli.py`, console script in `pyproject.toml`). `build|run --prove` discharges every
   `assert` with Z3; `check --json` emits machine-readable problems. Latest tagged release:
-  **`v0.6.0`**, with a GitHub Release carrying an attested `.wasm` asset.
+  **`v0.7.0`**, with a GitHub Release carrying an attested `.wasm` asset.
 - **Packages** — `svlc publish <lib.svl> --version V` verifies a library (syntax, types,
   theorem, determinism ×3), writes the package with its `.svli` contract, copies it into a
   registry directory, and reads it back and re-hashes. `svlc install <name>[@<ver>] --into
