@@ -3,7 +3,7 @@
 # Line-by-line verification, block verification on blank line
 # Live feedback: syntax errors, type errors, theorem status
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Sequence
 from dataclasses import dataclass, field
 import sys
 import readline  # For history/completion
@@ -38,12 +38,17 @@ class ReplConfig:
     max_history: int = 1000
 
 
-def run_wat(wat: str):
+def run_wat(wat: str, foreign: Optional[Sequence[bytes]] = None):
     """Assemble, validate, instantiate and run a WAT module's `<module>_main`.
 
     Returns (return_value, printed_bytes); return_value is None when the module has no
     exported entry point.  Shared by the REPL and the Jupyter kernel so both execute
     through the same host ABI.
+
+    ``foreign`` is a sequence of compiled foreign WASM modules (``.wasm`` bytes).  Any
+    `extern "c"` import that is not one of the builtin host stubs must be provided by
+    one of them, with a matching signature; otherwise `ForeignModuleError` is raised
+    before the program runs.
     """
     import wasmtime
 
@@ -71,6 +76,13 @@ def run_wat(wat: str):
     linker.define_func("env", "malloc", wasmtime.FuncType([i32], [i32]), lambda n: 1 << 20)
     linker.define_func("env", "iterator_next", wasmtime.FuncType([i32], [i32]), lambda h: 0)
     linker.define_func("env", "await", wasmtime.FuncType([i32], [i32]), lambda x: x)
+
+    from svl.foreign_link import define_foreign, load_foreign_module
+    # Always planned, even with no foreign modules: a program that declares an
+    # `extern` and is given nothing to satisfy it must say so here, not trap later
+    # with wasmtime's generic "unknown import".
+    define_foreign(store, linker, module,
+                   [load_foreign_module(engine, f) for f in foreign or []])
 
     inst = linker.instantiate(store, module)
     exports = inst.exports(store)
