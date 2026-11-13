@@ -134,25 +134,62 @@ def spike_h1_semantic_versioning() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    # Versioning IS enforced: a versioned module must compile under the strict gate.
+    from svl.compiler_wasm import compile_file_to_wasm
+    versioned_ok = True
+    try:
+        compile_file_to_wasm('module foo@1.2.3 { func main() type int { return 0 } }')
+    except Exception:                                             # noqa: BLE001
+        versioned_ok = False
+    all_pass = all(results.values()) and versioned_ok
     return SpikeResult("H1", "Semantic Versioning in Module System", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results,
+                               'versioned_module_compiles': versioned_ok},
+                      notes=f"parse ok; versioned module compiles strictly: {versioned_ok}")
 
 # H2: Effect System with Row Polymorphism
+def _strict_refuses_lenient_accepts(sources):
+    """Assert the honest contract for a non-enforced feature.
+
+    Strict mode must REFUSE it (nothing enforces it, so accepting it would be a lie);
+    `strict=False` — the documented escape hatch — must still ACCEPT it.
+
+    Returns (refused_count, lenient_ok_count).
+    """
+    from svl.compiler_wasm import compile_file_to_wasm
+    from svl.verify_gate import SVLVerificationError
+    refused = 0
+    lenient_ok = 0
+    for src in sources:
+        try:
+            compile_file_to_wasm(src)
+        except (SVLVerificationError, SyntaxError):
+            refused += 1
+        try:
+            compile_file_to_wasm(src, strict=False)
+            lenient_ok += 1
+        except Exception:                                             # noqa: BLE001
+            pass
+    return refused, lenient_ok
+
+
 def spike_h2_effect_system() -> SpikeResult:
-    """Test effect system parsing and basic inference."""
+    """Effect rows parse; strict mode refuses them (nothing enforces them).
+
+    The first case is a CONTROL: a plain function with no effect row must still
+    compile, so the spike proves the refusal is about the feature, not a broken harness.
+    """
     from svl.parser_rd import parse
     from svl.lexer import tokenize
-    
-    # Test effect annotations (using valid SVL syntax: type for return types)
-    test_cases = [
-        'func f() type int { return 42 }',
+
+    control = 'func f() type int { return 42 }'
+    effect_cases = [
         'func f() type int !IO { return 42 }',
         'func g() type int !{IO, State} { return 1 }',
         'func h() type int !{IO, State, Exception} { return 0 }',
     ]
-    
+    test_cases = [control] + effect_cases
+
     results = {}
     for tc in test_cases:
         try:
@@ -161,11 +198,23 @@ def spike_h2_effect_system() -> SpikeResult:
             results[tc] = True
         except Exception as e:
             results[tc] = False
-            
-    all_pass = all(results.values())
+
+    from svl.compiler_wasm import compile_file_to_wasm
+    control_ok = True
+    try:
+        compile_file_to_wasm(control)
+    except Exception:                                             # noqa: BLE001
+        control_ok = False
+    refused, lenient_ok = _strict_refuses_lenient_accepts(effect_cases)
+    all_pass = (all(results.values()) and control_ok
+                and refused == len(effect_cases) and lenient_ok == len(effect_cases))
     return SpikeResult("H2", "Effect System with Row Polymorphism", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'control_compiles': control_ok,
+                               'strict_refused': refused, 'lenient_accepted': lenient_ok,
+                               'of': len(effect_cases)},
+                      notes=f"parse ok; control compiles: {control_ok}; strict refused "
+                            f"{refused}/{len(effect_cases)}, lenient accepted "
+                            f"{lenient_ok}/{len(effect_cases)}")
 
 # H3: Linear/Uniqueness Types for Resource Safety
 def spike_h3_linear_types() -> SpikeResult:
@@ -189,10 +238,14 @@ def spike_h3_linear_types() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H3", "Linear/Uniqueness Types", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H4: Dependent Types for Array Bounds
 def spike_h4_dependent_types() -> SpikeResult:
@@ -215,10 +268,14 @@ def spike_h4_dependent_types() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H4", "Dependent Types for Array Bounds", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H5: Gradual Typing with Blame Calculus
 def spike_h5_gradual_typing() -> SpikeResult:
@@ -241,10 +298,14 @@ def spike_h5_gradual_typing() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H5", "Gradual Typing with Blame", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H6: Macro System with Hygiene
 def spike_h6_macro_system() -> SpikeResult:
@@ -266,10 +327,14 @@ def spike_h6_macro_system() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H6", "Macro System with Hygiene", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H7: Module Functors (ML-style)
 def spike_h7_module_functors() -> SpikeResult:
@@ -291,10 +356,14 @@ def spike_h7_module_functors() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H7", "Module Functors", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H8: Algebraic Effects with Handlers
 def spike_h8_algebraic_effects() -> SpikeResult:
@@ -317,10 +386,14 @@ def spike_h8_algebraic_effects() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H8", "Algebraic Effects with Handlers", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H9: Type Classes with Coherence
 def spike_h9_type_classes() -> SpikeResult:
@@ -343,10 +416,14 @@ def spike_h9_type_classes() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H9", "Type Classes with Coherence", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H10: Higher-Kinded Types
 def spike_h10_hkt() -> SpikeResult:
@@ -368,10 +445,14 @@ def spike_h10_hkt() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H10", "Higher-Kinded Types", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H11: Refinement Types
 def spike_h11_refinement_types() -> SpikeResult:
@@ -393,10 +474,14 @@ def spike_h11_refinement_types() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H11", "Refinement Types", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H12: Intersection and Union Types
 def spike_h12_intersection_union() -> SpikeResult:
@@ -419,10 +504,14 @@ def spike_h12_intersection_union() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H12", "Intersection and Union Types", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H13: Quantified Constraints
 def spike_h13_quantified_constraints() -> SpikeResult:
@@ -443,10 +532,14 @@ def spike_h13_quantified_constraints() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H13", "Quantified Constraints", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H14: Type-Level Computation (Type Families)
 def spike_h14_type_families() -> SpikeResult:
@@ -466,10 +559,17 @@ def spike_h14_type_families() -> SpikeResult:
     results['families_registered'] = len(engine.families) == 3
     results['cache_key_generation'] = engine._make_cache_key('List', []) is not None
     
+    # The engine exists but is NOT wired into the compile path, and there is no
+    # `family` syntax in the parser yet (TypeFamilyParser.parse returns None).  The
+    # honest assertion is that the engine works and the surface is recorded as
+    # not enforced, rather than implying the feature is usable.
+    from svl.feature_registry import FEATURES
+    results['engine_not_wired'] = (
+        'refinement' in FEATURES and FEATURES['refinement'].status != 'enforced')
     all_pass = all(results.values())
     return SpikeResult("H14", "Type-Level Computation (Type Families)", all_pass,
-                      metrics=results,
-                      notes=f"All tests: {all_pass}")
+                       metrics=results,
+                       notes=f"Engine works ({all_pass}); not wired into the compile path")
 
 # H15: Linear Type Inference with Regions
 # H15: Linear Type Inference with Regions
@@ -490,10 +590,16 @@ def spike_h15_region_inference() -> SpikeResult:
     # Test parsing (syntax not fully implemented yet, but engine works)
     results = {'region_engine_works': moved_ok}
     
+    # The region engine exists but is NOT wired into the compile path: strict mode
+    # must refuse `linear`/`unique` rather than silently accepting them.
+    refused, lenient_ok = _strict_refuses_lenient_accepts(
+        ['func f(x: linear int) type int { return x }'])
+    results['strict_refuses_linear'] = refused == 1
+    results['lenient_accepts_linear'] = lenient_ok == 1
     all_pass = all(results.values())
     return SpikeResult("H15", "Linear Type Inference with Regions", all_pass,
-                      metrics=results,
-                      notes=f"Region engine: {moved_ok}")
+                       metrics=results,
+                       notes=f"Region engine: {moved_ok}; strict refuses linear: {refused == 1}")
 
 # H16: Modal Types for Staging
 def spike_h16_modal_types() -> SpikeResult:
@@ -515,10 +621,14 @@ def spike_h16_modal_types() -> SpikeResult:
         except Exception as e:
             results[tc] = False
             
-    all_pass = all(results.values())
+    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
+    all_pass = (all(results.values()) and refused == len(test_cases)
+                and lenient_ok == len(test_cases))
     return SpikeResult("H16", "Modal Types for Staging", all_pass,
-                      metrics={'parse_tests': results},
-                      notes=f"All parse tests: {all_pass}")
+                      metrics={'parse_tests': results, 'strict_refused': refused,
+                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
+                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
+                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
 
 # H17: SMT-Based Theorem Layer (Z3 Integration)
 def spike_h17_smt_theorem() -> SpikeResult:

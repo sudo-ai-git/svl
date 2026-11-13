@@ -399,9 +399,11 @@ class TypeInferencer:
         elif ann.kind == 'array':
             return Type.array(self._type_ann_to_type(ann.args[0], env))
         if self.strict:
+            from svl.feature_registry import status_of
+            feature = status_of(getattr(ann, 'kind', '?'))
             raise UnsupportedTypeAnnotationError(
-                f"unsupported type annotation kind '{getattr(ann, 'kind', '?')}' "
-                f"(no checker is registered for it)")
+                f"unsupported type annotation kind '{feature.kind}' "
+                f"({feature.status}: {feature.note})")
         return Type.prim('int')  # lenient fallback (`strict=False`)
     
     def infer_type(self, expr: Any, env: TypeEnv, expected: Optional[Type] = None) -> Type:
@@ -1185,9 +1187,11 @@ class TypeChecker:
         elif ann.kind == 'array':
             return Type.array(self._type_ann_to_type(ann.args[0], env))
         if self.strict:
+            from svl.feature_registry import status_of
+            feature = status_of(getattr(ann, 'kind', '?'))
             raise UnsupportedTypeAnnotationError(
-                f"unsupported type annotation kind '{getattr(ann, 'kind', '?')}' "
-                f"(no checker is registered for it)")
+                f"unsupported type annotation kind '{feature.kind}' "
+                f"({feature.status}: {feature.note})")
         return Type.prim('int')  # lenient fallback (`strict=False`)
 
 

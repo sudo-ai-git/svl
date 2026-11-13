@@ -2077,7 +2077,9 @@ class Parser:
                 types.append(self.parse_type_expr())
                 if not self.match(TokenType.COMMA):
                     break
-                self.expect(TokenType.RPAREN)
+            # The closing paren was never consumed, so `(int)` left a stray `)` and
+            # `(int, int)` mis-parsed entirely -- every tuple type failed to parse.
+            self.expect(TokenType.RPAREN)
             return TypeExpr(
                 type=NodeType.TYPE_EXPR,
                 line=self.current.line, column=self.current.column, offset=self.current.offset,

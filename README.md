@@ -125,7 +125,7 @@ module prog {
   free list), `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
   unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**, **top-level
   `import`** (resolved with `base_dir`), and **`extern "c" func name(...)`** — a host import
-  you can call like any function. Measured 2026-11-12: the 79-test pytest suite assembles
+  you can call like any function. Measured 2026-11-12: the 101-test pytest suite assembles
   **and runs** every construct; the 33-row probe suite is **30 PASS / 0 FAIL / 3 INFO**
   (`svl-rating/probes.py`).
 - **Command line** — `pip install -e .` then `svlc build|run|check|corpus|repl|lsp`
@@ -135,9 +135,19 @@ module prog {
 - ~~**Self-hosting compiler** — bootstraps in 3 stages~~ **RETRACTED**: `svl/compiler_svl.svl` is a
   540-byte stub whose `main()` assigns integer constants and `assert true` — it compiles nothing. There
   is no self-hosted compiler.
-- **Extended type system** — effects, linear/unique types, dependent `vec<T,N>`, gradual typing, macros, module functors, algebraic effects, type classes, higher-kinded types, refinement types, intersection/union, quantified constraints, type families, modal types — **parse-level only.** The
-  qualifiers are parsed and then consumed by nothing: `grep "kind == 'linear'"` outside the parser
-  returns no engine, and `type_families._match_lhs` is `len(args) > 0` (it matches anything). See KB §11.
+- **Extended type system** — a wide type syntax parses, and the status of *every* kind is
+  recorded in `svl/feature_registry.py` (`verify_registry()` fails if the parser grows a
+  kind with no status decision). **Strict mode refuses what nothing enforces**: `linear int`,
+  `{v: int | v > 0}`, `int & string`, `vec<int, n>`, `?`, `box int`, `forall a. C => T` and the
+  rest are refused at compile time, naming the feature and its status; `strict=False` still
+  compiles them. Support matrix (2026-11-12):
+
+  | enforced (checked) | engine-only (not on the compile path) | parse-only |
+  |---|---|---|
+  | `int`/`float`/`bool`/`string`, struct, named, `fn(...) -> ...`, generic, tuple, array | `linear`, `unique`, `*`, `* -> *`, refinement | `vec<T,n>`, `?`, `forall`, intersection, union |
+
+  Declaration-level features (macros, module types/functors, algebraic effects, type
+  classes/instances) parse and are refused by the structural checksum. See KB §11.
 - **Verification extensions** — incremental 231-gate checksums, proof-carrying code, differential verification, property-based testing. **Real additions here:** `examples/attest.py` binds a compiled artifact to a checkable `content_sha256`, the SMT layer (`svl/smt_theorem.py`) discharges real `assert`s in Z3, `svl/serialization.py` round-trips the binary AST format, and `svl/hebrew_alias.py` pins the Hebrew alias contract. **PCC is real as of 2026-11-12**: `PCCWasmModule.to_wasm_bytes_with_proofs()` emits a binary module with a standard `svl-proofs` custom section that `wasmtime.Module` validates, and `extract_proofs_from_wasm_bytes()` recovers the payload (the old WAT-text form is deprecated — wat2wasm has no custom-section syntax).
 - **SMT theorem layer that actually proves things** — `svl/smt_theorem.py` builds a z3 model
   of a program's arithmetic and discharges every `assert` by refuting its negation: `unsat` →
@@ -209,7 +219,7 @@ requirements-dev.txt    # every dependency the suite and spikes import
    removals (see the Compiler optimizations bullet above).
 
 4. Golden refs: `python -c "from svl.golden_refs import verify_all_golden_refs; print(verify_all_golden_refs())"`
-5. `python -m pytest tests -q` — the CI suite: 79 tests covering type-directed lowering, backend
+5. `python -m pytest tests -q` — the CI suite: 101 tests covering type-directed lowering, backend
    execution (assemble **and run**), SMT loop invariants/arrays, TCO, the verification gates and the
    corpus. Every compiled module is validated with `wasmtime.Module`, not by inspecting text.
    `.github/workflows/ci.yml` runs it on Python 3.10/3.11/3.12 plus the corpus check, the golden

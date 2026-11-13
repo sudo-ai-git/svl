@@ -177,6 +177,11 @@ class ASTBinarySerializer:
         'AssignExpr': 0x2A,
         'ThrowStmt': 0x2B,
         'ExternDecl': 0x2C,
+        # Versioning parses and is advertised as a full feature, but the node was never
+        # serialisable, so the structural checksum refused every versioned module
+        # ("Unknown node type: Version").  Added 2026-11-12.
+        'Version': 0x2D,
+        'VersionConstraint': 0x2E,
     }
 
     TAG_TO_NODE = {v: k for k, v in NODE_TAGS.items()}
