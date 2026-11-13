@@ -97,6 +97,18 @@ def verify_program(source: str, ast: Any = None) -> List[str]:
     except Exception as exc:                                          # noqa: BLE001
         problems.append(f"contract prover error: {exc}")
 
+    # 5. Refinement types: `{ v: T | P(v) }` obligations.  Introduction sites (a `let`
+    #    with a refined annotation, a call to a refined parameter, a `return` against a
+    #    refined result) must be PROVEN; bindings that are proven may then be ASSUMED.
+    #    A proven counterexample is a hard error; an unmodelled predicate is silence.
+    try:
+        from svl.refinement_types import check_refinements
+        problems.extend(check_refinements(ast))
+    except ImportError:
+        pass  # z3 unavailable
+    except Exception as exc:                                          # noqa: BLE001
+        problems.append(f"refinement check error: {exc}")
+
     return problems
 
 

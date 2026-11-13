@@ -456,15 +456,23 @@ def spike_h10_hkt() -> SpikeResult:
 
 # H11: Refinement Types
 def spike_h11_refinement_types() -> SpikeResult:
-    """Test refinement type syntax ({ v: T | P })."""
+    """Test refinement type syntax ({ v: T | P }) and its enforcement.
+
+    Refinement types became ENFORCED (svl/refinement_types.py discharges the
+    obligations through Z3), so the honest contract is no longer "strict refuses".
+    It is now: a well-formed refinement is ACCEPTED, and a VIOLATED obligation is
+    REFUSED.
+    """
     from svl.parser_rd import parse
     from svl.lexer import tokenize
-    
+    from svl.compiler_wasm import compile_file_to_wasm
+    from svl.verify_gate import SVLVerificationError
+
     test_cases = [
         'func f(x: { v: int | v > 0 }) type int { return x }',
         'func g(x: { v: int | v < 100 }) type int { return x }',
     ]
-    
+
     results = {}
     for tc in test_cases:
         try:
@@ -473,15 +481,30 @@ def spike_h11_refinement_types() -> SpikeResult:
             results[tc] = True
         except Exception as e:
             results[tc] = False
-            
-    refused, lenient_ok = _strict_refuses_lenient_accepts(test_cases)
-    all_pass = (all(results.values()) and refused == len(test_cases)
-                and lenient_ok == len(test_cases))
+
+    # Introduction: a well-formed refinement is accepted...
+    well_formed_ok = True
+    for tc in test_cases:
+        try:
+            compile_file_to_wasm(tc)
+        except Exception:                                         # noqa: BLE001
+            well_formed_ok = False
+
+    # ...and a violated obligation is refused.
+    violated = 'func f() type int { let x: { v: int | v > 0 } = -5  return x }'
+    violated_refused = False
+    try:
+        compile_file_to_wasm(violated)
+    except (SVLVerificationError, SyntaxError):
+        violated_refused = True
+
+    all_pass = (all(results.values()) and well_formed_ok and violated_refused)
     return SpikeResult("H11", "Refinement Types", all_pass,
-                      metrics={'parse_tests': results, 'strict_refused': refused,
-                               'lenient_accepted': lenient_ok, 'of': len(test_cases)},
-                      notes=f"parse ok; strict refused {refused}/{len(test_cases)}, "
-                            f"lenient accepted {lenient_ok}/{len(test_cases)}")
+                      metrics={'parse_tests': results,
+                               'well_formed_accepted': well_formed_ok,
+                               'violated_refused': violated_refused},
+                      notes=f"parse ok; well-formed accepted: {well_formed_ok}; "
+                            f"violated refused: {violated_refused}")
 
 # H12: Intersection and Union Types
 def spike_h12_intersection_union() -> SpikeResult:
@@ -561,11 +584,16 @@ def spike_h14_type_families() -> SpikeResult:
     
     # The engine exists but is NOT wired into the compile path, and there is no
     # `family` syntax in the parser yet (TypeFamilyParser.parse returns None).  The
-    # honest assertion is that the engine works and the surface is recorded as
-    # not enforced, rather than implying the feature is usable.
-    from svl.feature_registry import FEATURES
+    # honest assertion is that the engine works and the surface is not reachable from
+    # source, rather than implying the feature is usable.
+    #
+    # This used to assert `FEATURES['refinement'].status != 'enforced'` as a proxy for
+    # "the engine is not wired" — a proxy that stopped being true when refinement types
+    # became enforced.  Asserting the actual thing is both more honest and stable.
+    from svl.type_families import TypeFamilyParser
+    from svl.lexer import tokenize
     results['engine_not_wired'] = (
-        'refinement' in FEATURES and FEATURES['refinement'].status != 'enforced')
+        TypeFamilyParser(tokenize('family f(x: int) = int')).parse() is None)
     all_pass = all(results.values())
     return SpikeResult("H14", "Type-Level Computation (Type Families)", all_pass,
                        metrics=results,
