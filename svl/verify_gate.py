@@ -119,6 +119,23 @@ def verify_program(source: str, ast: Any = None) -> List[str]:
     except Exception as exc:                                          # noqa: BLE001
         problems.append(f"linear type check error: {exc}")
 
+    # 7. Kind correctness: every application of a DECLARED type constructor must match
+    #    its arity.  (`type Box<a> = ...` gives Box kind `* -> *`, so `Box<int, int>`
+    #    is ill-kinded; a bare `Box` names a constructor where a type is required.)
+    try:
+        from svl.kind_inference import check_kind_correctness
+        problems.extend(check_kind_correctness(ast))
+    except Exception as exc:                                          # noqa: BLE001
+        problems.append(f"kind check error: {exc}")
+
+    # 8. `vec<T, n>` dependent bounds: when the declared size and the initializer's
+    #    length are both literal they must agree.  Anything else is silence.
+    try:
+        from svl.vec_bounds import check_vec_bounds
+        problems.extend(check_vec_bounds(ast))
+    except Exception as exc:                                          # noqa: BLE001
+        problems.append(f"vec bound check error: {exc}")
+
     return problems
 
 
