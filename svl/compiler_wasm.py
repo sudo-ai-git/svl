@@ -20,6 +20,7 @@ from svl.type_lowering import (
     infer_types, type_to_valtype, is_float, is_int, struct_name_of,
 )
 from svl.type_inference import Type, TypeVar
+from svl import gc_runtime
 
 
 # ============================================================================
@@ -240,6 +241,14 @@ class WasmCompiler:
         self._spec_names: set = set()
         self._pending_specializations: List[Tuple[str, str, Dict[int, Any]]] = []
         self._subst_stack: List[Dict[int, Any]] = []
+        # Conservative mark-sweep collection, opt-in per program via a `gc()` call.
+        # Emitting any of it would change the artifact of every allocating program, so
+        # it is gated on the program actually asking for collection.
+        self._gc_used = False
+        # While compiling one function body: the depth local to restore at return, and
+        # the names that must be re-recorded after every assignment.
+        self._shadow_depth_local: Optional[str] = None
+        self._shadow_handles: set = set()
     
     def compile(self, program: Program) -> str:
         """Compile full SVL program to WASM text format."""
@@ -255,6 +264,15 @@ class WasmCompiler:
         self._spec_names = set()
         self._pending_specializations = []
         self._subst_stack = []
+        # Is collection requested?  A `gc()` call anywhere in the program opts it in.
+        from svl.closures import walk as _ast_walk
+        self._gc_used = any(
+            isinstance(node, CallExpr) and node.callee == 'gc'
+            for node in _ast_walk(program))
+        # A `gc()` call implies a heap even in a program that never allocates directly,
+        # so the collector's own functions are emitted.
+        if self._gc_used:
+            self._uses_heap = True
         # Phase 0: run the type checker and keep its inferred types. This is the point
         # where the type layer starts driving codegen: locals, arithmetic width, struct
         # resolution and un-annotated parameters are all lowered from these types.
@@ -347,7 +365,17 @@ class WasmCompiler:
             self.state.label_counter = 0
             self._closure_env = {v: slot for slot, v in enumerate(free)}
             self._known_locals = set(self._closure_env) | {p.name for p in lam.params}
+            # The environment block is always a heap pointer; other pointer-typed
+            # bindings are roots too when collection is enabled.
+            handle_names = (['env'] + self._root_names(
+                f'lam_{index}', self._known_locals)) if self._gc_used else []
+            self._shadow_handles = set(handle_names)
+            self._shadow_depth_local = '__svl_shadow_depth' if handle_names else None
             self._compile_expr(lam.body)
+            if handle_names:
+                self._emit_shadow_prologue(func, handle_names)
+            self._shadow_depth_local = None
+            self._shadow_handles = set()
             self._closure_env = {}
             self.state.current_function = None
 
@@ -465,6 +493,69 @@ class WasmCompiler:
             kind='prim', value='void'))
         self.state.externs[item.name] = lower_func_type(
             [self._param_valtype(item.name, p) for p in item.params], ret)
+
+    # ---- conservative collector root tracking ------------------------------
+
+    _ROOT_KINDS = ('prim', 'struct', 'generic', 'array', 'tuple', 'func')
+    _NON_ROOT_PRIMS = ('float', 'void', 'never')
+
+    def _root_names(self, func_name, names) -> List[str]:
+        """Names the collector must record as potential roots.
+
+        The collector is CONSERVATIVE, so it errs toward recording: every binding whose
+        type is a word-sized SVL value is pushed, not only the ones the type layer can
+        prove are handles.  `zeros(n)` is typed `int`, so proof-based tracking would
+        miss every array built at runtime.  Floats are excluded because a shadow slot is
+        one i32 word and `local.get $f; i32.store` is invalid for an f64 local.
+        """
+        found = []
+        for name in sorted(set(names)):
+            t = self._inferred_local_type(func_name, name)
+            if t is None:
+                continue
+            kind = getattr(t, 'kind', None)
+            if kind not in self._ROOT_KINDS:
+                continue
+            if kind == 'prim' and t.args and t.args[0] in self._NON_ROOT_PRIMS:
+                continue
+            found.append(name)
+        return found
+
+    def _is_root_global(self, name: str) -> bool:
+        """True when a module global may hold a heap handle (word-sized, not f64).
+
+        A `global.get $g` of an f64 global passed to `$mark_value (param i32)` would be
+        an invalid module, so floats are excluded.
+        """
+        t = self._inferred_local_type(None, name)
+        if t is None:
+            return False
+        kind = getattr(t, 'kind', None)
+        if kind not in self._ROOT_KINDS:
+            return False
+        if kind == 'prim' and t.args and t.args[0] in self._NON_ROOT_PRIMS:
+            return False
+        val_type = self.state.globals[name].val_type
+        return val_type != WasmValType.F64
+
+    def _emit_shadow_prologue(self, func: 'WasmFunction', handle_names: List[str]):
+        """Record this frame's roots and remember the offset to restore on return."""
+        func.locals.append(('__svl_shadow_depth', WasmValType.I32))
+        prologue = ['global.get $shadow_off', 'local.set $__svl_shadow_depth']
+        for name in handle_names:
+            prologue.extend(gc_runtime.shadow_push_lines(name))
+        func.body[0:0] = prologue
+
+    def _emit_shadow_restore(self):
+        """Drop this frame's roots; called immediately before every return."""
+        if self._shadow_depth_local:
+            self.state.current_function.body.extend(
+                gc_runtime.shadow_restore_lines(self._shadow_depth_local))
+
+    def _emit_assignment_root(self, name: str):
+        """After a `let`/assignment to a pointer-typed local, record the new value."""
+        if self._gc_used and name in self._shadow_handles:
+            self.state.current_function.body.extend(gc_runtime.shadow_push_lines(name))
 
     def _collect_declarations(self, program: Program):
         """Collect all modules, functions, structs, globals."""
@@ -815,12 +906,20 @@ class WasmCompiler:
             self.state.label_counter = 0
             self._known_locals = self._collect_local_names(decl.body) | {
                 n for n, _t in func.params}
+            handle_names = (self._root_names(decl.name, self._known_locals)
+                            if self._gc_used else [])
+            self._shadow_handles = set(handle_names)
+            self._shadow_depth_local = '__svl_shadow_depth' if handle_names else None
             for p in decl.params:
                 if (p.type_ann is not None
                         and getattr(p.type_ann, 'kind', None) == 'struct'
                         and p.type_ann.value in self.state.struct_layouts):
                     self._local_struct_types[(name, p.name)] = p.type_ann.value
             self._compile_block(decl.body, is_function_body=True)
+            if handle_names:
+                self._emit_shadow_prologue(func, handle_names)
+            self._shadow_depth_local = None
+            self._shadow_handles = set()
             self.state.current_function = None
         finally:
             self._subst_stack.pop()
@@ -849,10 +948,20 @@ class WasmCompiler:
                     self._known_locals = self._collect_local_names(item.body) | {
                         n for n, _t in func.params
                     }
-                    
+                    # Collector roots: pointer-typed parameters and locals are pushed
+                    # onto the shadow stack on entry so the collector can find them.
+                    handle_names = (self._root_names(item.name, self._known_locals)
+                                    if self._gc_used else [])
+                    self._shadow_handles = set(handle_names)
+                    self._shadow_depth_local = '__svl_shadow_depth' if handle_names else None
+
                     # Compile function body
                     self._compile_block(item.body, is_function_body=True)
-                    
+
+                    if handle_names:
+                        self._emit_shadow_prologue(func, handle_names)
+                    self._shadow_depth_local = None
+                    self._shadow_handles = set()
                     self.state.current_function = None
     
     def _compile_block(self, block: Block, is_function_body: bool = False):
@@ -865,13 +974,12 @@ class WasmCompiler:
             func = self.state.current_function
             if not func.body or not func.body[-1].startswith('return'):
                 if func.func_type.results:
-                    # The body did not end in an explicit `return`, so nothing is on the
-                    # stack here. `drop; return` (the old code) is INVALID for a function
-                    # with results: `drop` needs an operand and `return` needs the result.
-                    # Every meaningful path already returned, so mark the fall-through
-                    # unreachable — valid WASM, and it traps if control can actually reach it.
+                    # Every meaningful path already returned; drop the frame's
+                    # collector roots on the way out.
+                    self._emit_shadow_restore()
                     func.body.append('unreachable')
                 else:
+                    self._emit_shadow_restore()
                     func.body.append('return')
     
     def _collect_local_names(self, block) -> set:
@@ -945,7 +1053,7 @@ class WasmCompiler:
 
     def _callee_yields_value(self, name: str) -> bool:
         """True if calling `name` produces a result value."""
-        if name in ('print', 'print_int', 'putc', 'clear', 'free'):
+        if name in ('print', 'print_int', 'putc', 'clear', 'free', 'gc'):
             return False                      # void host imports / builtins
         for fn_name, fn in self.state.functions.items():
             if fn_name == name or fn_name.endswith(f'${name}'):
@@ -972,6 +1080,8 @@ class WasmCompiler:
                 self._inferred_local_type(func.name, stmt.name), WasmValType.I32)
         func.locals.append((stmt.name, val_type))
         func.body.append(f'local.set ${stmt.name}')
+        # A newly bound heap handle is a collector root from here on.
+        self._emit_assignment_root(stmt.name)
         
         # Track the struct type of this local so `p.field` can be resolved later. A named
         # type in annotation position parses as kind='struct' for *any* identifier (including
@@ -1179,15 +1289,20 @@ class WasmCompiler:
         """
         func = self.state.current_function
         if stmt.value is None:
+            # Drop this frame's collector roots before leaving it.
+            self._emit_shadow_restore()
             func.body.append('return')
             return
         target = self._tail_call_target(stmt.value)
         if target is not None:
             for arg in stmt.value.arguments:
                 self._compile_expr(arg)
+            # A `return_call` reuses this frame, so its shadow entries must go first.
+            self._emit_shadow_restore()
             func.body.append(f'return_call ${target}')
             return
         self._compile_expr(stmt.value)
+        self._emit_shadow_restore()
         func.body.append('return')
 
     def _tail_call_target(self, expr) -> Optional[str]:
@@ -1359,6 +1474,9 @@ class WasmCompiler:
             else:
                 self._compile_expr(expr.value)
             func.body.append(f'{set_op} ${target.name}')
+            if not is_global:
+                # An overwritten heap handle must be re-recorded as a root.
+                self._emit_assignment_root(target.name)
             return
 
         if isinstance(target, IndexExpr):
@@ -1551,6 +1669,14 @@ class WasmCompiler:
             )
     
     def _compile_call_expr(self, expr: CallExpr):
+        # `gc()` — run the conservative collector at an explicit safepoint.
+        if expr.callee == 'gc':
+            if len(expr.arguments) != 0:
+                raise SyntaxError(
+                    f"gc() takes no arguments (line {getattr(expr, 'line', '?')})")
+            self._uses_heap = True
+            self.state.current_function.body.append('call $gc')
+            return
         # `len(x)` — a builtin, not a host import: word 0 of an array or string holds its
         # length, so this works uniformly for both.
         if expr.callee == 'len':
@@ -2080,9 +2206,19 @@ class WasmCompiler:
             lines.append('  (func $alloc (param $n i32) (result i32)')
             lines.append('    (local $need i32) (local $prev i32) (local $cur i32)')
             lines.append('    (local $next i32) (local $p i32)')
+            if self._gc_used:
+                # $sb/$nb hold the pre-/post-grow shadow-stack bases for relocation.
+                lines.append('    (local $sb i32) (local $nb i32)')
             lines.append('    local.get $n')
             lines.append('    i32.const 4')
             lines.append('    i32.add')
+            if self._gc_used:
+                # Pad every block to BLOCK_ALIGN so a candidate's address alone can
+                # reject interior pointers (see gc_runtime.BLOCK_ALIGN).
+                lines.append(f'    i32.const {gc_runtime.BLOCK_ALIGN - 1}')
+                lines.append('    i32.add')
+                lines.append(f'    i32.const -{gc_runtime.BLOCK_ALIGN}')
+                lines.append('    i32.and')
             lines.append('    local.set $need')
             # --- scan the free list for an exact-size block (-1 = empty) ---
             lines.append('    i32.const -1')
@@ -2130,41 +2266,81 @@ class WasmCompiler:
             lines.append('        local.get $cur')
             lines.append('        i32.const 4')
             lines.append('        i32.add')
+            if self._gc_used:
+                # A block taken from the free list is live again: clear FREE so the
+                # collector does not treat its header as an unmarked block later.
+                lines.extend(gc_runtime.alloc_free_hit_lines())
             lines.append('        return')
             lines.append('      end')
             lines.append('    end')
-            # --- bump, growing memory when the block would exceed the current size ---
+            # --- bump, growing memory when the block would exceed the heap cap ---
+            # With the collector enabled the heap may never reach the bitmap, mark or
+            # shadow regions that follow it, so the bound is BITMAP_BASE.
             lines.append('    global.get $heap')
             lines.append('    local.set $p')
-            lines.append('    local.get $p')
-            lines.append('    local.get $need')
-            lines.append('    i32.add')
-            lines.append('    memory.size')
-            lines.append('    i32.const 65536')
-            lines.append('    i32.mul')
-            lines.append('    i32.gt_u')
-            lines.append('    if')
-            lines.append('      local.get $p')
-            lines.append('      local.get $need')
-            lines.append('      i32.add')
-            lines.append('      memory.size')
-            lines.append('      i32.const 65536')
-            lines.append('      i32.mul')
-            lines.append('      i32.sub')
-            lines.append('      i32.const 65535')
-            lines.append('      i32.add')
-            lines.append('      i32.const 65536')
-            lines.append('      i32.div_u')
-            lines.append('      memory.grow')
-            lines.append('      i32.const -1')
-            lines.append('      i32.eq')
-            lines.append('      if')
-            lines.append('        unreachable')
-            lines.append('      end')
-            lines.append('    end')
+            if self._gc_used:
+                # The collector's regions sit at fixed addresses above the heap, so
+                # growing memory cannot extend the heap: BITMAP_BASE is its hard cap.
+                lines.append('    local.get $p')
+                lines.append('    local.get $need')
+                lines.append('    i32.add')
+                lines.append(f'    i32.const {gc_runtime.BITMAP_BASE}')
+                lines.append('    i32.gt_u')
+                lines.append('    if')
+                lines.append('      unreachable')
+                lines.append('    end')
+                lines.append('    local.get $p')
+                lines.append('    local.get $need')
+                lines.append('    i32.add')
+                lines.extend(['    memory.size', '    i32.const 65536', '    i32.mul'])
+                lines.append('    i32.gt_u')
+                lines.append('    if')
+                lines.append('      local.get $p')
+                lines.append('      local.get $need')
+                lines.append('      i32.add')
+                lines.extend(['      memory.size', '      i32.const 65536', '      i32.mul'])
+                lines.append('      i32.sub')
+                lines.append('      i32.const 65535')
+                lines.append('      i32.add')
+                lines.append('      i32.const 65536')
+                lines.append('      i32.div_u')
+                lines.append('      memory.grow')
+                lines.append('      i32.const -1')
+                lines.append('      i32.eq')
+                lines.append('      if')
+                lines.append('        unreachable')
+                lines.append('      end')
+                lines.append('    end')
+            else:
+                lines.append('    local.get $p')
+                lines.append('    local.get $need')
+                lines.append('    i32.add')
+                lines.extend(['    memory.size', '    i32.const 65536', '    i32.mul'])
+                lines.append('    i32.gt_u')
+                lines.append('    if')
+                lines.append('      local.get $p')
+                lines.append('      local.get $need')
+                lines.append('      i32.add')
+                lines.extend(['      memory.size', '      i32.const 65536', '      i32.mul'])
+                lines.append('      i32.sub')
+                lines.append('      i32.const 65535')
+                lines.append('      i32.add')
+                lines.append('      i32.const 65536')
+                lines.append('      i32.div_u')
+                lines.append('      memory.grow')
+                lines.append('      i32.const -1')
+                lines.append('      i32.eq')
+                lines.append('      if')
+                lines.append('        unreachable')
+                lines.append('      end')
+                lines.append('    end')
             lines.append('    local.get $p')
             lines.append('    local.get $need')
             lines.append('    i32.store')                   # header: total block size
+            if self._gc_used:
+                # Register this block start so the tracer can tell it apart from an
+                # interior word that happens to look like a pointer.
+                lines.extend(gc_runtime.set_block_bit_lines(self._heap_base))
             lines.append('    local.get $p')
             lines.append('    local.get $need')
             lines.append('    i32.add')
@@ -2176,29 +2352,47 @@ class WasmCompiler:
             # $free(payload): push the block onto the free list.
             lines.append('  (func $free (param $payload i32)')
             lines.append('    (local $b i32)')
-            lines.append('    local.get $payload')
-            lines.append('    i32.const 4')
-            lines.append('    i32.sub')
-            lines.append('    local.set $b')
-            lines.append('    local.get $b')
-            lines.append('    i32.const 4')
-            lines.append('    i32.add')
-            lines.append('    global.get $free_list')
-            lines.append('    i32.store')
-            lines.append('    local.get $b')
-            lines.append('    global.set $free_list')
+            if self._gc_used:
+                lines.extend(gc_runtime.free_lines())
+            else:
+                lines.append('    local.get $payload')
+                lines.append('    i32.const 4')
+                lines.append('    i32.sub')
+                lines.append('    local.set $b')
+                lines.append('    local.get $b')
+                lines.append('    i32.const 4')
+                lines.append('    i32.add')
+                lines.append('    global.get $free_list')
+                lines.append('    i32.store')
+                lines.append('    local.get $b')
+                lines.append('    global.set $free_list')
             lines.append('  )')
             lines.append('  (func $heap_reset')
             lines.append(f'    i32.const {self._heap_base}')
             lines.append('    global.set $heap')
             lines.append('    i32.const -1')
             lines.append('    global.set $free_list')
+            if self._gc_used:
+                # Every recorded root referred into the heap that was just discarded.
+                lines.extend(gc_runtime.heap_reset_extra_lines())
             lines.append('  )')
+            if self._gc_used:
+                pointer_globals = sorted(
+                    name for name in self.state.globals
+                    if self._is_root_global(name))
+                lines.extend(gc_runtime.mark_value_lines(self._heap_base))
+                lines.extend(gc_runtime.gc_lines(self._heap_base, pointer_globals))
         
         # Memory (declared after imports and functions; exported separately below).
         # Only programs that allocate get a larger memory, so non-allocating programs keep
         # byte-identical output.
         pages = max(self.state.memory_pages, 16) if self._uses_heap else self.state.memory_pages
+        if self._gc_used:
+            # The collector reserves fixed regions above the heap: a block-start
+            # bitmap, the mark stack and the root shadow stack.  A program that calls
+            # `gc()` must start with all of them mapped.
+            import math
+            pages = max(pages, math.ceil(gc_runtime.REQUIRED_BYTES / 65536))
         # The funcref table comes BEFORE memory in the canonical field order.
         if self._lambdas:
             lines.append(f'  (table $closures {len(self._lambdas)} funcref)')
@@ -2215,6 +2409,8 @@ class WasmCompiler:
         if self._uses_heap:
             lines.append(f'  (global $heap (mut i32) (i32.const {self._heap_base}))')
             lines.append('  (global $free_list (mut i32) (i32.const -1))')
+            if self._gc_used:
+                lines.extend(gc_runtime.globals_lines())
         
         # Globals — canonical WAT: `(global $n <type> (<init>))` when immutable,
         # `(global $n (mut <type>) (<init>))` when mutable. The old form wrapped the type

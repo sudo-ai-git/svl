@@ -49,6 +49,7 @@ BUILTIN_SIGNATURES = {
     'zeros':     (['int'], 'int'),   # allocates a length-n array, returns its pointer
     'len':       (['handle'], 'int'),  # length word of an array or string pointer
     'free':      (['handle'], 'void'), # return an allocation to the free list
+    'gc':        ([], 'void'),         # run the collector at an explicit safepoint
 }
 
 # `extern "c" func name(...)` declarations are host imports, not user functions; they are
