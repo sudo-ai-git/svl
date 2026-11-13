@@ -112,19 +112,39 @@ foreign module, not only by a host callback.
 **Gate:** SVL calls a foreign `add` → 42 (already reproduced). A foreign module
 with the wrong signature → refused.
 
-### W3 — Wire the package manager *(M)*
+### W3 — Wire the package manager *(M)* — **DONE**
 
-- `svlc publish <lib.svl>` — `create_package` (works) + record in a registry.
-- `svlc install <name>@<ver> --into <dir>` — fetch, verify `wasm_sha256` and
-  `source_sha256`, write into the project.
-- `svlc add` — install + record in a manifest (`svl.toml`).
-- Registry backend: **a local directory first** (fully verifiable offline), with an
-  HTTP layer behind the same interface later. No placeholder URLs in the CLI.
-- Bind the `.svli` artifact into the package so `_link_imports` verifies it on use.
+- `svlc publish <lib.svl> --name N --version V [--registry DIR]` — verifies (syntax +
+  types + theorem), compiles, checks determinism ×3, writes the package, copies it into
+  the registry, rewrites `index.json`, then **reads it back and re-hashes**.  The
+  `.svli` interface artifact is written into the package and copied with it.
+- `svlc install <name>[@<ver>] --into DIR` — checks the registry's recorded hashes
+  against the bytes on disk *before* writing, copies `source.svl` + `.svli` into
+  `<into>/svl_modules/<name>/<version>/`, checks again *after* writing, and records the
+  dependency in `<into>/svl.toml`.
+- `svlc add` = install + manifest. `svlc list-packages` lists a registry.
+- Registry backend: **a local directory** (`<registry>/<name>/<version>/` +
+  `index.json`), fully verifiable offline.  The `--registry` flag points at any
+  directory; there is no placeholder URL in the CLI.
+- `svl/project.py` — the manifest model; `svlc build|run|check` now default
+  `base_dir` to the source file's directory (previously the CLI passed none, so even a
+  sibling import failed) and append the enclosing project's `svl_modules/` to the
+  import search path.
 
-**Gate:** publish → install into an empty directory → compile a program that
-imports it → **correct answer**; tamper the installed `source.svl` → **refused**,
-naming the difference. Second build byte-identical.
+**Two defects this exposed, both fixed:**
+
+| Defect | Effect |
+|---|---|
+| `publish` printed `Uploading to <url>...` then `Published successfully` and returned `True` — nothing was transferred | a publish was a no-op with a success message |
+| `install` raised `NotImplementedError("Registry download not implemented")` | installing from a registry was impossible |
+| `generate_interface` recorded `source_hash` in the `.svli`, and `verify_against_interface` **never compared it** | a body-only change (`a + b` → `a - b`, same signature) was silently accepted — measured: the tampered import ran and returned **38** instead of 42 |
+| `create_package` refused to recreate a package when the *index* entry existed even though the package directory had been deleted | unrecoverable without hand-editing `~/.svl/index.json` |
+
+**Gate (measured 2026-11-12):** publish → `add` into an empty project → `svlc run` a
+program importing `mathlib/1.0.0/source.svl` → **42**; rebuild → **byte-identical**
+(sha256 `52d2cdb3…`); tamper the installed source → **refused**:
+`import 'mathlib/1.0.0/source.svl' does not match source.svli: source changed since the
+interface was recorded (hash 727823cb44ec44de... -> d5aebe72bff4caf5...)`.
 
 ### W4 — Attestation by default *(S)*
 
@@ -142,11 +162,14 @@ byte → False.
 
 | Milestone | Work | D6 evidence | Rating effect |
 |---|---|---|---|
-| **M1** | W1 + W2 | real FFI linkage, unforgeable attestation | D6 3 → 4 likely |
-| **M2** | W3 | publish/install/import as an execution gate | D6 4 → 5 possible |
+| **M1** ✅ | W1 + W2 | real FFI linkage, unforgeable attestation | D6 3 → 4 likely |
+| **M2** ✅ | W3 | publish/install/import as an execution gate | D6 4 → 5 possible |
 | **M3** | W4 | attestation on the package path | supports the above |
 
 Re-score after M2 with the same rubric and anchors; do not carry the number forward.
+**M2's gates pass (2026-11-12):** 217 tests, spikes 41/43, probes 30 PASS / 0 FAIL /
+3 INFO, corpus 22 compiled / 0 refused.  The rating re-score is the remaining step, and
+it must be done against the rubric rather than asserted here.
 
 **Deliberately not in this plan:** the WASM component model (P4.2), GC (P3.6),
 closures, generics, native/AOT (P3.7). Each is real work with its own gate; none is

@@ -132,6 +132,20 @@ module prog {
   (`svl/cli.py`, console script in `pyproject.toml`). `build|run --prove` discharges every
   `assert` with Z3; `check --json` emits machine-readable problems. Latest tagged release:
   **`v0.2.0`**, with a GitHub Release carrying an attested `.wasm` asset.
+- **Packages** — `svlc publish <lib.svl> --version V` verifies a library (syntax, types,
+  theorem, determinism ×3), writes the package with its `.svli` contract, copies it into a
+  registry directory, and reads it back and re-hashes. `svlc install <name>[@<ver>] --into
+  DIR` checks the registry's recorded hashes **before** writing, unpacks into
+  `svl_modules/<name>/<ver>/`, and records the dependency in `svl.toml`. `svlc run` a
+  program importing it and the linker refuses a source that no longer matches its
+  contract — a body-only change (`a + b` → `a - b`, same signature) is caught by the
+  recorded source hash, not just signature changes. Verified end to end: publish → add →
+  run returns 42; rebuild is byte-identical; a tampered dependency is refused by name.
+- **Foreign linking** — `svlc run --link MODULE.wasm` (repeatable) satisfies `extern "c"`
+  imports from a compiled foreign module instead of a host callback, with a link-time
+  signature check that names both sides of a mismatch. Verified: an SVL program called a
+  foreign `add` and got 42. Compiling C from source is **not** wired — `clang --target=
+  wasm32` is present but `wasm-ld` is not, so the foreign module is supplied prebuilt.
 - ~~**Self-hosting compiler** — bootstraps in 3 stages~~ **RETRACTED**: `svl/compiler_svl.svl` is a
   540-byte stub whose `main()` assigns integer constants and `assert true` — it compiles nothing. There
   is no self-hosted compiler.
