@@ -3,7 +3,7 @@
 # Implements Hindley-Milner (Algorithm W) and Bidirectional variants
 
 from typing import Dict, List, Optional, Set, Tuple, Any, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from enum import Enum
 from collections import OrderedDict
 
@@ -199,18 +199,54 @@ class TypeScheme:
         return t2
 
 
+def substitute_type_expr(te: Any, mapping: Dict[str, Any]) -> Any:
+    """Replace parameter names in a type expression — aliases are transparent.
+
+    `mapping` maps a parameter name to the argument `TypeExpr` that replaces it.  A
+    parameter used as a bare name parses as `kind='struct'` (the parser has no separate
+    identifier kind for type annotations), so that is the case that gets replaced.
+    Nested targets (`[a]`, `fn(a) -> a`, `(a, a)`) are rebuilt recursively.
+    """
+    if te is None:
+        return None
+    if not hasattr(te, '__dataclass_fields__'):
+        return te
+    if getattr(te, 'kind', None) in ('struct', 'ident') and te.value in mapping:
+        return mapping[te.value]
+    changes = {}
+    for f in te.__dataclass_fields__:
+        if f in ('line', 'column', 'offset', 'type'):
+            continue
+        value = getattr(te, f)
+        if hasattr(value, '__dataclass_fields__'):
+            new = substitute_type_expr(value, mapping)
+            if new is not value:
+                changes[f] = new
+        elif isinstance(value, list):
+            new_list = [
+                substitute_type_expr(x, mapping) if hasattr(x, '__dataclass_fields__') else x
+                for x in value
+            ]
+            if new_list != value:
+                changes[f] = new_list
+    return dc_replace(te, **changes) if changes else te
+
+
 @dataclass
 class TypeEnv:
     """Type environment with variable bindings."""
     bindings: Dict[str, TypeScheme] = field(default_factory=dict)
     parent: Optional['TypeEnv'] = None
     structs: Dict[str, Dict[str, Type]] = field(default_factory=dict)
-    
+    # `type Name<p1..pn> = target` — transparent aliases, substituted on use.
+    type_aliases: Dict[str, Tuple[List[str], Any]] = field(default_factory=dict)
+
     def extend(self, name: str, scheme: TypeScheme) -> 'TypeEnv':
-        new_env = TypeEnv(bindings=dict(self.bindings), parent=self.parent, structs=dict(self.structs))
+        new_env = TypeEnv(bindings=dict(self.bindings), parent=self.parent,
+                          structs=dict(self.structs), type_aliases=dict(self.type_aliases))
         new_env.bindings[name] = scheme
         return new_env
-    
+
     def lookup(self, name: str) -> Optional[TypeScheme]:
         if name in self.bindings:
             return self.bindings[name]
@@ -223,6 +259,14 @@ class TypeEnv:
             return self.structs[name]
         if self.parent:
             return self.parent.lookup_struct(name)
+        return None
+
+    def lookup_type_alias(self, name: str):
+        """`(params, target)` for a declared alias, or None."""
+        if name in self.type_aliases:
+            return self.type_aliases[name]
+        if self.parent:
+            return self.parent.lookup_type_alias(name)
         return None
     
     def generalize(self, t: Type, free_vars: Set[TypeVar]) -> TypeScheme:
@@ -394,11 +438,26 @@ class TypeInferencer:
                 name = str(ann.value)
                 args = []
             type_args = [self._type_ann_to_type(a, env) for a in args]
+            # A declared alias is TRANSPARENT: substitute the parameters into the target.
+            alias = env.lookup_type_alias(name) if env is not None else None
+            if alias is not None:
+                params, target = alias
+                if len(params) == len(args):
+                    return self._type_ann_to_type(
+                        substitute_type_expr(target, dict(zip(params, args))), env)
+                # An arity mismatch is reported by the kind checker; keep the opaque form.
             return Type.generic(name, type_args)
         elif ann.kind == 'tuple':
-            return Type.tuple([self._type_ann_to_type(a, env) for a in ann.args])
+            # Tuple elements live in `value` (a list); `TypeExpr` has no `args` field.
+            # Using `ann.args` made every tuple annotation raise AttributeError.
+            elements = ann.value if isinstance(ann.value, list) else []
+            return Type.tuple([self._type_ann_to_type(a, env) for a in elements])
         elif ann.kind == 'array':
-            return Type.array(self._type_ann_to_type(ann.args[0], env))
+            # The element type is in `value`, not `ann.args[0]` (which does not exist).
+            # `[T]` lowers to `List<T>` — the same type an array LITERAL synthesizes —
+            # so `let b: [int] = [40, 2]` unifies.  Lowering to Type.array(T) produced a
+            # kind mismatch (`array` vs `generic`) and refused every array annotation.
+            return Type.generic('List', [self._type_ann_to_type(ann.value, env)])
         elif ann.kind == 'refinement':
             # A refinement `{ v: T | P(v) }` IS the base type plus an obligation.
             # Returning T keeps ordinary unification working; the predicate is
@@ -1233,9 +1292,16 @@ class TypeChecker:
         if self._recording:
             self.recorded_locals[(self._current_func, stmt.name)] = value_type
 
-    def _check_type_alias(self, stmt: Any):
-        # Type aliases are transparent
-        pass
+    def _check_type_alias(self, stmt: Any) -> None:
+        """Record a `type Name<p1..pn> = target` alias.
+
+        Aliases are TRANSPARENT: `Box<int>` is the target with each parameter replaced by
+        the corresponding argument.  This used to be `pass`, so an alias was accepted as
+        syntax and then treated as an opaque generic — `type Box<a> = [a]` made `Box<int>`
+        an opaque `Box` with an `int` argument rather than an array of int.
+        """
+        if getattr(stmt, 'type_params', None):
+            self.env.type_aliases[stmt.name] = (list(stmt.type_params), stmt.target)
     
     def _type_ann_to_type(self, ann: Any, env: Optional[TypeEnv] = None) -> Type:
         """Convert type annotation AST to internal Type."""
@@ -1266,11 +1332,26 @@ class TypeChecker:
                 name = str(ann.value)
                 args = []
             type_args = [self._type_ann_to_type(a, env) for a in args]
+            # A declared alias is TRANSPARENT: substitute the parameters into the target.
+            alias = env.lookup_type_alias(name) if env is not None else None
+            if alias is not None:
+                params, target = alias
+                if len(params) == len(args):
+                    return self._type_ann_to_type(
+                        substitute_type_expr(target, dict(zip(params, args))), env)
+                # An arity mismatch is reported by the kind checker; keep the opaque form.
             return Type.generic(name, type_args)
         elif ann.kind == 'tuple':
-            return Type.tuple([self._type_ann_to_type(a, env) for a in ann.args])
+            # Tuple elements live in `value` (a list); `TypeExpr` has no `args` field.
+            # Using `ann.args` made every tuple annotation raise AttributeError.
+            elements = ann.value if isinstance(ann.value, list) else []
+            return Type.tuple([self._type_ann_to_type(a, env) for a in elements])
         elif ann.kind == 'array':
-            return Type.array(self._type_ann_to_type(ann.args[0], env))
+            # The element type is in `value`, not `ann.args[0]` (which does not exist).
+            # `[T]` lowers to `List<T>` — the same type an array LITERAL synthesizes —
+            # so `let b: [int] = [40, 2]` unifies.  Lowering to Type.array(T) produced a
+            # kind mismatch (`array` vs `generic`) and refused every array annotation.
+            return Type.generic('List', [self._type_ann_to_type(ann.value, env)])
         elif ann.kind == 'refinement':
             # A refinement `{ v: T | P(v) }` IS the base type plus an obligation.
             # Returning T keeps ordinary unification working; the predicate is
