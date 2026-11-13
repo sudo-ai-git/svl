@@ -49,13 +49,17 @@ class InferredTypes:
         return self.expr_types.get(id(expr))
 
 
-def infer_types(ast: Any) -> InferredTypes:
+def infer_types(ast: Any, strict: bool = False) -> InferredTypes:
     """Run the type checker over a parsed program and return its inferred types.
 
     This is `TypeChecker.check_program` with recording switched on; it re-runs the real
     inference rather than a second, simpler approximation of it.
+
+    Codegen is deliberately NON-strict (`strict=False`): the compile-time gate has already
+    run the strict checker and refused anything it could not verify, so the lowering pass
+    must not fail a second time on the same program.
     """
-    checker = TypeChecker()
+    checker = TypeChecker(strict=strict)
     return checker.infer_program(ast)
 
 

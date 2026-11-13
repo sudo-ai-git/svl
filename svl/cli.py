@@ -2,9 +2,11 @@
 
 Subcommands:
   svlc version            print the version
-  svlc build <file.svl>   compile to WAT (add --wasm for a binary, --prove for SMT)
+  svlc build <file.svl>   compile to WAT (add --wasm for a binary, --prove for SMT,
+                         --interface to write the .svli contract)
   svlc run   <file.svl>   compile and execute, printing the result
   svlc check <file.svl>   run the verification gate and report
+  svlc diff <a> <b>      prove or refute that two functions are equivalent
   svlc corpus             run the corpus regression check
   svlc repl               interactive shell (evaluates a block, remembers definitions)
   svlc lsp                language server over stdio
@@ -31,6 +33,12 @@ def cmd_build(args) -> int:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if args.interface:
+        from svl.interface import generate_interface, interface_path_for, write_interface
+        out_path = interface_path_for(args.file)
+        write_interface(out_path, generate_interface(src))
+        print(f"interface written: {out_path}")
+        return 0
     if args.wasm:
         try:
             import wasmtime
@@ -76,6 +84,15 @@ def cmd_check(args) -> int:
     return 0 if not problems else 1
 
 
+def cmd_diff(args) -> int:
+    """Prove (or refute) that two function files are equivalent."""
+    from svl.equivalence import svlc_diff
+    f_src = open(args.file_a, encoding="utf-8").read()
+    g_src = open(args.file_b, encoding="utf-8").read()
+    print(svlc_diff(f_src, g_src))
+    return 0
+
+
 def cmd_corpus(args) -> int:
     from svl.corpus_check import main as corpus_main
     return corpus_main()
@@ -106,6 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("build", help="compile to WAT")
     b.add_argument("file")
     b.add_argument("--wasm", action="store_true", help="emit a binary module")
+    b.add_argument("--interface", action="store_true",
+                   help="write the module's .svli interface artifact and exit")
     b.add_argument("--prove", action="store_true",
                    help="discharge every assert with the Z3 SMT prover")
     b.add_argument("--no-strict", action="store_true")
@@ -121,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("file")
     c.add_argument("--json", action="store_true", help="emit the problems as JSON")
     c.set_defaults(func=cmd_check)
+
+    d = sub.add_parser("diff", help="prove or refute that two functions are equivalent")
+    d.add_argument("file_a", help="file containing the first function")
+    d.add_argument("file_b", help="file containing the second function")
+    d.set_defaults(func=cmd_diff)
 
     sub.add_parser("corpus", help="run the corpus regression check").set_defaults(func=cmd_corpus)
     sub.add_parser("repl", help="interactive shell").set_defaults(func=cmd_repl)

@@ -108,7 +108,14 @@ def test_void_function_has_no_result(wasmtime_module):
 
 
 def test_unknown_identifier_is_a_clean_compile_error():
-    with pytest.raises(SyntaxError, match="Unknown identifier"):
+    """An unknown identifier is refused cleanly by the strict type checker.
+
+    Before P1.1 the checker failed OPEN (unknown idents synthesized `void`) and the
+    refusal came later from the backend as a `SyntaxError`.  Strict mode now refuses
+    it at the gate, which is the earlier and more specific error.
+    """
+    from svl.verify_gate import SVLVerificationError
+    with pytest.raises(SVLVerificationError, match="unknown identifier 'not_declared'"):
         compile_file_to_wasm(
             "module m { func main() type int { return not_declared } }")
 
