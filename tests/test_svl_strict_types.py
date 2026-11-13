@@ -14,9 +14,13 @@ from svl.compiler_wasm import compile_file_to_wasm
 from svl.verify_gate import SVLVerificationError
 
 UNSUPPORTED = {
-    "linear": "module t { func main() type int { let x: linear int = 5  return x } }",
     "intersection": "module t { func main() type int { let x: int & string = 5  return x } }",
 }
+
+# `linear` / `unique` are NOT unsupported any more: `svl/linear_regions.py` enforces
+# the move discipline on the compile path, so both kinds are `enforced` in the feature
+# registry.  A use is refused when the discipline is VIOLATED, which is a different
+# message from "unsupported type annotation kind" — see tests/test_svl_linear_types.py.
 
 # Refinement types are NOT unsupported any more: `svl/refinement_types.py` discharges
 # their obligations on the compile path, so the kind is `enforced` in the feature

@@ -109,6 +109,16 @@ def verify_program(source: str, ast: Any = None) -> List[str]:
     except Exception as exc:                                          # noqa: BLE001
         problems.append(f"refinement check error: {exc}")
 
+    # 6. Linear / unique types: the move discipline.  A moved value may not be used or
+    #    moved again.  Unconsumed `linear` variables are warnings, NOT errors — a false
+    #    positive would reject a correct program.
+    try:
+        from svl.linear_regions import check_linear_usage
+        linear_errors, _linear_warnings = check_linear_usage(ast)
+        problems.extend(linear_errors)
+    except Exception as exc:                                          # noqa: BLE001
+        problems.append(f"linear type check error: {exc}")
+
     return problems
 
 
