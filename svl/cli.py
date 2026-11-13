@@ -2,7 +2,8 @@
 
 Subcommands:
   svlc version            print the version
-  svlc build <file.svl>   compile to WAT (add --wasm for a binary, --prove for SMT)
+  svlc build <file.svl>   compile to WAT (add --wasm for a binary, --prove for SMT,
+                         --interface to write the .svli contract)
   svlc run   <file.svl>   compile and execute, printing the result
   svlc check <file.svl>   run the verification gate and report
   svlc corpus             run the corpus regression check
@@ -31,6 +32,12 @@ def cmd_build(args) -> int:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if args.interface:
+        from svl.interface import generate_interface, interface_path_for, write_interface
+        out_path = interface_path_for(args.file)
+        write_interface(out_path, generate_interface(src))
+        print(f"interface written: {out_path}")
+        return 0
     if args.wasm:
         try:
             import wasmtime
@@ -106,6 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("build", help="compile to WAT")
     b.add_argument("file")
     b.add_argument("--wasm", action="store_true", help="emit a binary module")
+    b.add_argument("--interface", action="store_true",
+                   help="write the module's .svli interface artifact and exit")
     b.add_argument("--prove", action="store_true",
                    help="discharge every assert with the Z3 SMT prover")
     b.add_argument("--no-strict", action="store_true")

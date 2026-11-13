@@ -1897,6 +1897,7 @@ def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) 
         return []
     import os
 
+    from svl.interface import interface_path_for
     from svl.lexer import tokenize
     from svl.parser_rd import parse
 
@@ -1913,6 +1914,16 @@ def _link_imports(program: Program, base_dir: str, _seen: Optional[set] = None) 
         _seen.add(real)
         with open(path, encoding='utf-8') as fh:
             text = fh.read()
+        # An interface artifact beside the source is a machine-checked contract: the
+        # import must still match it, or the library changed under its consumers.
+        svli = interface_path_for(path)
+        if os.path.exists(svli):
+            from svl.interface import load_interface, verify_against_interface
+            problems = verify_against_interface(text, load_interface(svli))
+            if problems:
+                raise SyntaxError(
+                    f"import '{imp.path}' does not match "
+                    f"{os.path.basename(svli)}: " + '; '.join(problems))
         linked.append((imp.path, text))
         sub = parse(tokenize(text))
         linked.extend(_link_imports(sub, os.path.dirname(path), _seen))

@@ -563,8 +563,17 @@ class TypeInferencer:
                 # parameter; a mismatch raises UnificationError, which the
                 # checker reports.
                 if len(expr.arguments) != len(params):
+                    # `UnificationError` requires both types; report the function's
+                    # signature against the tuple of arguments actually passed.
+                    arg_types = []
+                    for arg in expr.arguments:
+                        try:
+                            arg_types.append(self.synthesize(arg, env))
+                        except Exception:                             # noqa: BLE001
+                            arg_types.append(Type.prim('void'))
                     raise UnificationError(
-                        f"Argument mismatch: expected {len(params)}, got {len(expr.arguments)}")
+                        f"Argument mismatch: expected {len(params)}, got {len(expr.arguments)}",
+                        func_type, Type.tuple(arg_types))
                 for arg, param_type in zip(expr.arguments, params):
                     arg_type = self.synthesize(arg, env)
                     try:
