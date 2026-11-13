@@ -15,6 +15,7 @@ from svl.parser_rd import (
     ASTNode, TypeExpr, TypeExpr, FuncTypeDetail, Program, Module, Import, Export,
     FuncDecl, StructDecl, TypeAlias, ConstDecl, VarDecl, Block,
     LetStmt, IfStmt, WhileStmt, ForStmt, ReturnStmt, AssertStmt, TryStmt, ExprStmt,
+    ThrowStmt,
     BinaryExpr, UnaryExpr, CallExpr, MatchExpr, AwaitExpr, LambdaExpr, StructLit, ArrayLit,
     Ident, Literal, CaseClause, Pattern, FieldPattern, FieldInit,
     Param, Field, TypeExpr, FuncTypeDetail, NodeType, AssignExpr
@@ -1048,17 +1049,55 @@ class TypeChecker:
         """Check the thrown value's type.  Runtime traps stay uncaught by design."""
         self.inferencer.synthesize(stmt.value, self.env)
 
+    def _thrown_values(self, node: Any) -> List[Any]:
+        """Collect the values of every `throw` nested inside a block."""
+        out: List[Any] = []
+
+        def walk(current):
+            if isinstance(current, ThrowStmt):
+                out.append(current.value)
+            for f in getattr(current, '__dataclass_fields__', {}):
+                child = getattr(current, f, None)
+                if hasattr(child, '__dataclass_fields__'):
+                    walk(child)
+                elif isinstance(child, list):
+                    for item in child:
+                        if hasattr(item, '__dataclass_fields__'):
+                            walk(item)
+
+        walk(node)
+        return out
+
     def _check_try_stmt(self, stmt: Any):
         # Try block
         for s in stmt.try_block.statements:
             self._check_stmt(s)
-        
-        # Catch block
-        catch_env = TypeEnv(bindings=dict(self.env.bindings), parent=self.env)
+
+        # Catch block.  The catch variable's type is the THROWN type when the program
+        # does not annotate it: `try { throw 7 } catch e { return e }` binds `e` to
+        # int, not to an opaque `Error`.  Conflicting throw types fall back to Error.
+        catch_type = None
         if stmt.catch_type:
             catch_type = self._type_ann_to_type(stmt.catch_type, self.env)
         else:
+            thrown_types = []
+            for value in self._thrown_values(stmt.try_block):
+                try:
+                    thrown_types.append(self.inferencer.synthesize(value, self.env))
+                except Exception:                                     # noqa: BLE001
+                    pass
+            if thrown_types:
+                catch_type = thrown_types[0]
+                for t in thrown_types[1:]:
+                    try:
+                        self.inferencer.unify(catch_type, t)
+                    except UnificationError:
+                        catch_type = Type.prim('Error')
+                        break
+        if catch_type is None:
             catch_type = Type.prim('Error')
+
+        catch_env = TypeEnv(bindings=dict(self.env.bindings), parent=self.env)
         catch_env.bindings[stmt.catch_var] = TypeScheme(vars=[], body=catch_type)
         
         old_env = self.env
