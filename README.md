@@ -125,7 +125,7 @@ module prog {
   free list), `void` returns, **recursion**, arithmetic, bitwise (`& | ^ << >>`, unary `~`) and
   unary `-`/`!`, **short-circuit `&&`/`||`**, **`try`/`catch`/`throw`**, **top-level
   `import`** (resolved with `base_dir`), and **`extern "c" func name(...)`** — a host import
-  you can call like any function. Measured 2026-11-12: the 128-test pytest suite assembles
+  you can call like any function. Measured 2026-11-12: the 136-test pytest suite assembles
   **and runs** every construct; the 33-row probe suite is **30 PASS / 0 FAIL / 3 INFO**
   (`svl-rating/probes.py`).
 - **Command line** — `pip install -e .` then `svlc build|run|check|corpus|repl|lsp`
@@ -219,7 +219,7 @@ requirements-dev.txt    # every dependency the suite and spikes import
    removals (see the Compiler optimizations bullet above).
 
 4. Golden refs: `python -c "from svl.golden_refs import verify_all_golden_refs; print(verify_all_golden_refs())"`
-5. `python -m pytest tests -q` — the CI suite: 128 tests covering type-directed lowering, backend
+5. `python -m pytest tests -q` — the CI suite: 136 tests covering type-directed lowering, backend
    execution (assemble **and run**), SMT loop invariants/arrays, TCO, the verification gates and the
    corpus. Every compiled module is validated with `wasmtime.Module`, not by inspecting text.
    `.github/workflows/ci.yml` runs it on Python 3.10/3.11/3.12 plus the corpus check, the golden

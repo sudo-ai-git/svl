@@ -25,7 +25,7 @@ What deliberately does NOT run here:
   {17,37,73} (all residues are below 2047, the first base-2 pseudoprime), so it cannot fail and
   gates nothing. Running it would only add cost and imply a guarantee it does not provide.
 """
-from typing import List
+from typing import Any, List
 
 from svl.lexer import tokenize
 from svl.parser_rd import parse
@@ -35,14 +35,21 @@ class SVLVerificationError(Exception):
     """Raised when a program fails the compile-time verification gate."""
 
 
-def verify_program(source: str) -> List[str]:
-    """Return a list of verification problems (empty list means the program passed)."""
+def verify_program(source: str, ast: Any = None) -> List[str]:
+    """Return a list of verification problems (empty list means the program passed).
+
+    ``ast`` may be supplied when the caller already holds a parsed program — in
+    particular the LINKED program.  Verifying an unlinked source with an `import`
+    makes every imported name an unknown identifier, which is why the compile gate
+    passes the linked AST.
+    """
     problems: List[str] = []
 
-    try:
-        ast = parse(tokenize(source))
-    except SyntaxError as exc:
-        return [f"parse error: {exc}"]
+    if ast is None:
+        try:
+            ast = parse(tokenize(source))
+        except SyntaxError as exc:
+            return [f"parse error: {exc}"]
 
     # 1. AST guard (policy: forbidden functions/constructs)
     try:
@@ -55,7 +62,7 @@ def verify_program(source: str) -> List[str]:
     # 2. Type layer
     try:
         from svl.type_layer import verify_type
-        result = verify_type(source)
+        result = verify_type(source, ast=ast)
         if not result.passed:
             problems.extend(result.errors or ["type verification failed"])
     except Exception as exc:                                          # noqa: BLE001
@@ -80,14 +87,14 @@ def verify_program(source: str) -> List[str]:
     return problems
 
 
-def assert_verified(source: str) -> None:
+def assert_verified(source: str, ast: Any = None) -> None:
     """Raise if the program does not pass the gate.
 
     A parse failure is re-raised as ``SyntaxError`` so callers keep seeing the same clean,
     specific error they saw before the gate existed (a malformed program is a syntax error,
     not a verification failure).
     """
-    problems = verify_program(source)
+    problems = verify_program(source, ast=ast)
     if not problems:
         return
     if len(problems) == 1 and problems[0].startswith("parse error: "):

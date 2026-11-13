@@ -611,7 +611,9 @@ class TypeInferencer:
                 return Type.generic('List', [elem_type])
             return Type.generic('List', [Type.var()])
         
-        # Unknown function, return void
+        # Unknown function
+        if self.strict:
+            raise UnknownIdentifierError(f"unknown function '{callee_name}'")
         return Type.prim('void')
     
     def _synth_lambda(self, expr: Any, env: TypeEnv) -> Type:
@@ -742,15 +744,23 @@ class TypeChecker:
             # Setup initial environment with primitives
             self._init_env()
             
-            # Bind top-level externs and function signatures FIRST: a module body may
-            # call an `extern "c"` declared at the top level, and forward references
-            # between top-level funcs must resolve.
+            # Bind top-level externs and function signatures FIRST.
             if hasattr(ast, 'items'):
                 for item in ast.items:
                     if getattr(item, 'type', None) == NodeType.EXTERN_DECL:
                         self._check_extern_decl(item)
                     elif getattr(item, 'type', None) == NodeType.FUNC_DECL:
                         self._prebind_function(item)
+            # Prebind EVERY function in EVERY module before checking any body, so a
+            # module can call a function defined in an imported module (or later in its
+            # own module).  Without this the imported module binds too late and every
+            # cross-module call reads as an unknown function.
+            if hasattr(ast, 'modules'):
+                for module in ast.modules:
+                    if hasattr(module, 'body'):
+                        for stmt in module.body.statements:
+                            if getattr(stmt, 'type', None) == NodeType.FUNC_DECL:
+                                self._prebind_function(stmt)
             # Type check each top-level declaration
             if hasattr(ast, 'modules'):
                 for module in ast.modules:

@@ -57,15 +57,21 @@ class TypeLayer:
         self.type_checker = TypeChecker()
         self.dual_stream = DualStreamChecker(self.type_checker)
 
-    def verify_type(self, source: str, expected_type: Optional[Any] = None) -> TypeVerifyResult:
-        """Verify type of SVL source code."""
-        try:
-            from svl.lexer import tokenize
-            from svl.parser_rd import parse
+    def verify_type(self, source: str, expected_type: Optional[Any] = None,
+                    ast: Optional[Any] = None) -> TypeVerifyResult:
+        """Verify type of SVL source code.
 
-            # Lex and parse
-            tokens = tokenize(source)
-            ast = parse(tokens)
+        ``ast`` may be supplied when the caller already holds a parsed program — in
+        particular the LINKED program, so imported names resolve.  Without it the
+        source is parsed here.
+        """
+        try:
+            if ast is None:
+                from svl.lexer import tokenize
+                from svl.parser_rd import parse
+
+                tokens = tokenize(source)
+                ast = parse(tokens)
 
             # Type check
             ok, errors = self.type_checker.check_program(ast)
@@ -248,10 +254,11 @@ class TypeLayer:
 
 
 # Convenience function
-def verify_type(source: str, config: Optional[TypeVerificationConfig] = None) -> TypeVerifyResult:
+def verify_type(source: str, config: Optional[TypeVerificationConfig] = None,
+                ast: Optional[Any] = None) -> TypeVerifyResult:
     """Verify type of SVL source code."""
     layer = TypeLayer(config)
-    return layer.verify_type(source)
+    return layer.verify_type(source, ast=ast)
 
 
 if __name__ == '__main__':

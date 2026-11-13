@@ -1854,12 +1854,15 @@ def compile_file_to_wasm(source: str, deterministic: bool = True, strict: bool =
     # module bypass the AST guard, the type checker and the interval analyser.
     if strict:
         from svl.verify_gate import assert_verified, SVLVerificationError
-        assert_verified(source)
+        # Verify each imported source FIRST so a broken import is named as such.
         for path, sub_source in linked_sources:
             try:
                 assert_verified(sub_source)
             except SVLVerificationError as exc:
                 raise SVLVerificationError(f"imported module '{path}': {exc}") from exc
+        # Then verify the LINKED program, so cross-module calls resolve and a defect
+        # that only appears after linking is still caught.
+        assert_verified(source, ast=ast)
 
     wat = compile_to_wasm(ast, deterministic)
     if prove:
