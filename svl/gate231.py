@@ -3,7 +3,6 @@
 # Three checksums: SUM, LINEAR, PRODUCT mod 231
 
 from typing import List, Tuple, Optional
-import numpy as np
 
 MODULUS = 231  # 3 * 7 * 11
 ROLLING_MULTIPLIER = 31  # coprime to 231, so no single byte can force a zero
@@ -64,19 +63,22 @@ def meta_checksum(data: bytes) -> int:
 
 
 # NumPy vectorized implementations (for Spike S4 comparison)
-def sum_checksum_numpy(data: np.ndarray) -> int:
+def sum_checksum_numpy(data: bytes) -> int:
     """NumPy vectorized SUM checksum."""
+    import numpy as np
     return int(np.sum(data, dtype=np.uint64) % MODULUS)
 
 
-def linear_checksum_numpy(data: np.ndarray) -> int:
+def linear_checksum_numpy(data: bytes) -> int:
     """NumPy vectorized LINEAR checksum."""
+    import numpy as np
     indices = np.arange(1, len(data) + 1, dtype=np.uint64)
     return int(np.sum(indices * data, dtype=np.uint64) % MODULUS)
 
 
-def product_checksum_numpy(data: np.ndarray) -> int:
+def product_checksum_numpy(data: bytes) -> int:
     """NumPy implementation of the rolling-hash channel (see `rolling_checksum`)."""
+    import numpy as np
     n = len(data)
     if n == 0:
         return 0
@@ -88,18 +90,20 @@ def product_checksum_numpy(data: np.ndarray) -> int:
     return int((np.dot(data.astype(np.int64), powers)) % MODULUS)
 
 
-def rolling_checksum_numpy(data: np.ndarray) -> int:
+def rolling_checksum_numpy(data: bytes) -> int:
     """Alias for the NumPy rolling-hash channel."""
+    import numpy as np
     return product_checksum_numpy(data)
 
 
 def compute_checksums_numpy(data: bytes) -> Tuple[int, int, int]:
     """Compute all three checksums using NumPy."""
+    import numpy as np
     arr = np.frombuffer(data, dtype=np.uint8)
     return (
         sum_checksum_numpy(arr),
         linear_checksum_numpy(arr),
-        product_checksum_numpy(arr)
+        product_checksum_numpy(arr),
     )
 
 
