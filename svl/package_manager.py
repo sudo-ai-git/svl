@@ -288,6 +288,18 @@ class PackageManager:
             if not versions:
                 raise ValueError(f"{name} has no published versions")
             version = max(versions, key=_version_sort_key)
+        elif any(version.startswith(op) for op in ("^", "~", ">=", "<=", ">", "<", "=")):
+            # A CONSTRAINT, not a pinned version: pick the highest published version
+            # that satisfies it and refuse when none does, rather than silently
+            # installing something outside the requested range.
+            from svl.versions import format_constraint, select_version
+            requested = version
+            resolved = select_version(versions, requested)
+            if resolved is None:
+                raise ValueError(
+                    f"{name} has no version satisfying "
+                    f"{format_constraint(requested)} (published: {sorted(versions)})")
+            version = resolved
         if version not in versions:
             raise ValueError(
                 f"{name}@{version} is not in the registry (have: {sorted(versions)})")
