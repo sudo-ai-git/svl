@@ -1,0 +1,72 @@
+[
+  {
+    "id": "H1",
+    "hypothesis": "Tile our toric lattices to hold enough logical qubits",
+    "verdict": "INVALIDATED",
+    "evidence": "our measured rate is 2701 physical per logical; 1457 logical qubits need 3,935,357 physical qubits for data alone",
+    "detail": "Six orders of magnitude beyond the 5,402 we have, before any magic-state factory. The encoding RATE is the problem, not the grid."
+  },
+  {
+    "id": "H2",
+    "hypothesis": "Use quantum LDPC codes instead of the surface/toric family",
+    "verdict": "VALIDATED (not ours)",
+    "evidence": "published LDPC machine: 19,397 physical / 1,457 logical = 13.3 physical per logical; ours is 2701 \u2014 203x worse",
+    "detail": "This is the route that reaches ECDLP-256 on paper. It needs a trapped-ion machine with LDPC codes and CCZ factories \u2014 none of which is in this workspace."
+  },
+  {
+    "id": "H3",
+    "hypothesis": "Close the gap with a better decoder (exact MWPM / union-find)",
+    "verdict": "INVALIDATED",
+    "evidence": "the decoder changes logical error RATE and runtime, not how many physical qubits are needed to store the logical qubits",
+    "detail": "Our own probes show the decoder is the throughput bottleneck (qec_toric_sim), while the qubit count is set by encoding rate. Independent axes."
+  },
+  {
+    "id": "H4",
+    "hypothesis": "Increase the code distance / redundancy",
+    "verdict": "INVALIDATED",
+    "evidence": "d=37 needs ~2d^2 = 2,738 physical per logical; d=73 needs ~2d^2 = 10,658 physical per logical; d=145 needs ~2d^2 = 42,050 physical per logical",
+    "detail": "Distance goes the WRONG way: more distance costs more qubits per logical. d=37 already costs 2,701 per logical in our layout."
+  },
+  {
+    "id": "H5",
+    "hypothesis": "Cut the cost with better magic-state factories",
+    "verdict": "PARTIAL",
+    "evidence": "the 2026 estimate is 39M Toffoli gates over 25.7 days; runtime is dominated by magic-state production",
+    "detail": "Factories drive both qubit count and runtime, but improving them needs hardware we do not have. The 296M -> 19.4k qubit improvement came mostly from the CODE, not the factory."
+  },
+  {
+    "id": "H6",
+    "hypothesis": "Break it classically with Pollard rho",
+    "verdict": "INVALIDATED",
+    "evidence": "2^128 = 3.403e+38 group ops; at an absurd 1e12 ops/s that is 1.078e+19 years",
+    "detail": "The best classical attack on a 256-bit curve is square-root. Nothing in this workspace changes it."
+  },
+  {
+    "id": "H7",
+    "hypothesis": "Nonce reuse \u2014 the classical route that actually breaks ECDSA",
+    "verdict": "VALIDATED",
+    "evidence": "two signatures sharing a nonce recovered the private key exactly (k and d both matched); with distinct nonces the same formula gives a wrong key: True",
+    "detail": "Built and run on a SELF-GENERATED keypair. This is why ECDSA nonce reuse is fatal \u2014 and it needs no quantum computer at all."
+  },
+  {
+    "id": "H8",
+    "hypothesis": "Shor period finding on a scale we can run (N=15, a=7)",
+    "verdict": "VALIDATED at small scale / INVALIDATED at scale",
+    "evidence": "the simulated circuit returned r=4; the true order is 4",
+    "detail": "The mechanism works \u2014 the smallest admitted period is recovered, not a multiple of it. The gap to ECDLP-256 is resources: ~1457 logical qubits and ~26 days, versus the 2 logical qubits our lattice holds."
+  },
+  {
+    "id": "H9",
+    "hypothesis": "Reduce the Toffoli count further (58M -> 39M achieved in 2026)",
+    "verdict": "PARTIAL",
+    "evidence": "a 33% reduction in Toffolis cuts RUNTIME, not the qubit count",
+    "detail": "Useful but orthogonal to the qubit gap that kills H1/H2."
+  },
+  {
+    "id": "H10",
+    "hypothesis": "Repeat attempts until 95% success",
+    "verdict": "PARTIAL",
+    "evidence": "p=40.7%: 6 attempts = 154 days; p=63.3%: 3 attempts = 77 days",
+    "detail": "Arithmetic is trivial; it presumes a machine that does not exist."
+  }
+]
