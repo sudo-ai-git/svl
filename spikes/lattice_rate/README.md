@@ -63,15 +63,57 @@ per logical** versus our best 2D **1,369** — a **103×** gap.
 
 ---
 
+## Spike 2 — `spike_kd2.py`: `n = k·d²` is an invariant, and our rectangle is dominated
+
+Spike 1 found the square torus uses exactly `d²` per logical. Spike 2 tests
+whether that is an **invariant**, and then maps the frontier.
+
+**`c = n/(k·d²)` measured:**
+
+| lattice | n | k | d | c |
+|---|---|---|---|---|
+| 3×3 … 37×37 (all squares) | 18 … 2,738 | 2 | 3 … 37 | **1.000** |
+| 3×5 | 30 | 2 | 3 | 1.667 |
+| 5×12 | 120 | 2 | 5 | 2.400 |
+| 8×20 | 320 | 2 | 8 | 2.500 |
+| **37×73 (ours)** | 5,402 | 2 | 37 | **1.973** |
+
+- **Every square torus has `c = 1` exactly** — the Bravyi–Poulin–Terhal 2D bound
+  `n = Ω(d²)` saturated. It is an invariant, not a coincidence.
+- A rectangle has `c = Lx·Ly / min(Lx,Ly)²` — pure aspect-ratio waste. Our
+  37×73 measures **1.973**, i.e. it is *no better per logical qubit than a planar
+  code*, because the rectangle throws away the torus's second logical qubit.
+- **Any number of square tori keeps `c = 1`** (m=1,2,3,5,8 measured): k scales,
+  c does not.
+
+**The frontier at a fixed budget of 5,402 qubits** (the real engineering
+question — what does this hardware buy me?):
+
+| m tori | L | n used | k | d |
+|---|---|---|---|---|
+| 1 | 51 | 5,202 | 2 | **51** |
+| 2 | 36 | 5,184 | 4 | 36 |
+| 3 | 30 | 5,400 | 6 | 30 |
+| 4 | 25 | 5,000 | 8 | 25 |
+| 8 | 18 | 5,184 | **16** | 18 |
+
+**With the same 5,402 qubits, a single square 51×51 torus gives d=51 instead of
+our 37 — 40% more distance — and eight 18×18 tori give k=16 instead of our 2.**
+Our 37×73 choice is dominated on both axes.
+
+**Note on the qLDPC comparison:** the BPT bound applies only to *local* codes,
+so the quantum-LDPC machine is not "beating" it — it is outside its scope. Its
+measured ratio is 13.3 physical per logical.
+
 ## Verdict
 
 - **PARTIAL.** Jack was right that testing beats asserting: the test found a
-  real, free **2×** — our rectangle should have been a square.
+  free **2×** — our rectangle should have been a square.
 - **INVALIDATED as a path to ECDLP-256.** The 2D lattice family is at its
   provable optimum (`n = Ω(d²)`), and the only families that beat it are
-  non-local (qLDPC) or pay exponentially in distance (hyperbolic).
-- The gap that matters is **103×**, and no rearrangement of the lattice closes
-  it.
+  non-local (qLDPC) or exponentially worse in distance (hyperbolic).
+- The gap that matters is **103×** (1,369 vs 13.3), and no rearrangement of the
+  lattice closes it.
 
 **What to do with the finding:** if the lattice is ever used for storage, use
 the square `d×d` shape, not the rectangle. The 37×73 choice was justified by
