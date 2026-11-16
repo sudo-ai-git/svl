@@ -1,0 +1,11 @@
+{
+  "best_2d_lattice_rate": 1369.0,
+  "best_2d_lattice": "37x37",
+  "our_lattice_rate": 2701.0,
+  "square_same_protection_rate": 1369.0,
+  "our_choice_penalty": 1.972972972972973,
+  "qldpc_rate": 13.312971859986273,
+  "gap_to_qldpc": 102.8320358818374,
+  "two_d_bound": "n = Omega(d^2) for any 2D local code (BPT 2010)",
+  "hyperbolic": "constant rate but d ~ log n (exponential n for fixed d)"
+}
