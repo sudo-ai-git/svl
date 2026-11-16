@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Theory of Things — Interactive Prediction Workbench</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Theory of Things — Prediction Workbench</h1>
+    <p class="sub">
+      Implements the equations from
+      <a href="https://github.com/chadcoulter/REDE-3iAtlas-Signal-Processing/blob/main/The_Theory_of_Things_That_Are.md">The Theory of Things That Are</a>
+      and
+      <a href="https://github.com/chadcoulter/REDE-3iAtlas-Signal-Processing/blob/main/The_Theory_of_Things_That_Are_Not.md">The Theory of Things That Are Not</a>.
+      Adjust the parameters; every chart and table recomputes immediately. All computation is local.
+    </p>
+  </div>
+  <div class="head-actions">
+    <button id="selftest-btn" type="button">Run self-test</button>
+    <a href="README.md">README</a>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="physical" type="button">1 · Enthalpic N+1</button>
+  <button class="tab-btn" data-tab="polarity" type="button">2 · Entropic Polarity</button>
+  <button class="tab-btn" data-tab="economy" type="button">3 · Extraction / Synergy</button>
+  <button class="tab-btn" data-tab="knowledge" type="button">4 · Knowledge &amp; Observation</button>
+  <button class="tab-btn" data-tab="iteration" type="button">5 · Projection / Reflection</button>
+  <button class="tab-btn" data-tab="prediction" type="button">6 · Realization vs Projection</button>
+</nav>
+
+<main>
+
+<section class="panel active" id="panel-physical">
+  <div class="panel-head">
+    <h2>1 · Enthalpic N+1 Engine</h2>
+    <div class="presets">
+      <span>Presets:</span>
+      <button type="button" data-preset-module="physical" data-preset-name="Stable advance">Stable advance</button>
+      <button type="button" data-preset-module="physical" data-preset-name="N+1 reversal">N+1 reversal</button>
+      <button type="button" data-preset-module="physical" data-preset-name="Driven oscillation">Driven oscillation</button>
+    </div>
+    <button class="export" type="button" data-export="physical">Export CSV</button>
+  </div>
+  <details class="eq">
+    <summary>Equations used</summary>
+    <pre>x[N+1] = x[N] + u[N] + f(x[N], u[N])
+f(x,u) = −(k₁x + k₂x|x| + k₃ux)
+reversal ⇔ sign(x[N+1] − x[N]) ≠ sign(u[N])
+H = U + PV,  U[N] = U₀ + αU·x[N]
+u[N] = u₀ + uAmp·sin(2π·uFreq·N + uPhase)</pre>
+  </details>
+  <div class="grid">
+    <div class="controls" id="ctl-physical"></div>
+    <div class="charts">
+      <canvas id="chart-phys-x"></canvas>
+      <canvas id="chart-phys-h"></canvas>
+      <div class="stats" id="stats-physical"></div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="panel-polarity">
+  <div class="panel-head">
+    <h2>2 · Entropic Polarity Oscillator</h2>
+    <div class="presets">
+      <span>Presets:</span>
+      <button type="button" data-preset-module="polarity" data-preset-name="Concentration → generation">Concentration → generation</button>
+      <button type="button" data-preset-module="polarity" data-preset-name="Balanced oscillation">Balanced oscillation</button>
+      <button type="button" data-preset-module="polarity" data-preset-name="Noisy reversal">Noisy reversal</button>
+    </div>
+    <button class="export" type="button" data-export="polarity">Export CSV</button>
+  </div>
+  <details class="eq">
+    <summary>Equations used</summary>
+    <pre>E_C = +E,  E_G = −E,  |E_C| = |E_G|
+c[N+1] = c[N] + u₀ − γ(c[N] − g[N]) − κc[N] + η
+g[N+1] = g[N] − u₀ + γ(c[N] − g[N]) + κc[N] − η
+polarity = (c − g)/(c + g)
+reversal ⇔ polarity changes sign through Ω</pre>
+  </details>
+  <div class="grid">
+    <div class="controls" id="ctl-polarity"></div>
+    <div class="charts">
+      <canvas id="chart-pol-poles"></canvas>
+      <canvas id="chart-pol-pol"></canvas>
+      <div class="stats" id="stats-polarity"></div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="panel-economy">
+  <div class="panel-head">
+    <h2>3 · Extraction, Sustainability, Synergy</h2>
+    <div class="presets">
+      <span>Presets:</span>
+      <button type="button" data-preset-module="economy" data-preset-name="Extraction collapse">Extraction collapse</button>
+      <button type="button" data-preset-module="economy" data-preset-name="Sustainability">Sustainability</button>
+      <button type="button" data-preset-module="economy" data-preset-name="Synergy beyond singularity">Synergy beyond singularity</button>
+    </div>
+    <button class="export" type="button" data-export="economy">Export CSV</button>
+  </div>
+  <details class="eq">
+    <summary>Equations used</summary>
+    <pre>R[N+1] = R[N] + ρR[N](1 − R[N]/K) − C − E
+E_val = (price − cost)·E        (V_captured − C_extraction)
+S = regeneration − C            (R − C)
+Y = V(A ⊕ B) − [V(A) + V(B)] = s·(V(A) + V(B))
+reversal ⇔ extraction &gt; 0 and R[N+1] &lt; R[N]</pre>
+  </details>
+  <div class="grid">
+    <div class="controls" id="ctl-economy"></div>
+    <div class="charts">
+      <canvas id="chart-eco-stock"></canvas>
+      <canvas id="chart-eco-value"></canvas>
+      <div class="stats" id="stats-economy"></div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="panel-knowledge">
+  <div class="panel-head">
+    <h2>4 · Knowledge Geometry &amp; Observational Resolution</h2>
+    <button class="export" type="button" data-export="knowledge">Export CSV</button>
+  </div>
+  <details class="eq">
+    <summary>Equations used</summary>
+    <pre>C_K = cos θ,  S_K = sin θ,  C_K² + S_K² = 1
+K_parallel = k·cos θ,  K_perpendicular = k·sin θ
+k² = K_parallel² + K_perpendicular²
+δ ≈ B / D,  resolved ⇔ δ &gt; ε
+M[N+1] = M[N] ∪ {P[N+1]}</pre>
+  </details>
+  <div class="grid">
+    <div class="controls" id="ctl-knowledge"></div>
+    <div class="charts">
+      <canvas id="chart-kn-circle" style="height:300px"></canvas>
+      <canvas id="chart-kn-res"></canvas>
+      <div class="stats" id="stats-knowledge"></div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="panel-iteration">
+  <div class="panel-head">
+    <h2>5 · Projection / Reflection Iteration</h2>
+    <button class="export" type="button" data-export="iteration">Export CSV</button>
+  </div>
+  <details class="eq">
+    <summary>Equations used</summary>
+    <pre>K[N+1] = F(P(K[N]), K[N])
+Projection: rotate by φP, scale magnitude by p
+Reflection: reflect across core axis (S → −S), rotate by φR, scale by r
+coherence = cos Δθ between successive knowledge directions</pre>
+  </details>
+  <div class="grid">
+    <div class="controls" id="ctl-iteration"></div>
+    <div class="charts">
+      <canvas id="chart-it-circle" style="height:300px"></canvas>
+      <canvas id="chart-it-mag"></canvas>
+      <div class="stats" id="stats-iteration"></div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="panel-prediction">
+  <div class="panel-head">
+    <h2>6 · Realization vs Projection</h2>
+    <div class="presets">
+      <span>Presets:</span>
+      <button type="button" data-preset-module="prediction" data-preset-name="Calm / accurate model">Calm / accurate model</button>
+      <button type="button" data-preset-module="prediction" data-preset-name="Model mismatch">Model mismatch</button>
+      <button type="button" data-preset-module="prediction" data-preset-name="Noisy realization">Noisy realization</button>
+    </div>
+    <button class="export" type="button" data-export="prediction">Export CSV</button>
+  </div>
+  <details class="eq">
+    <summary>Equations used</summary>
+    <pre>realized:    x[N+1] = x[N] + u + f_true(x[N]) + η[N]
+projection:  x̂[N+1] = x[N] + u + f_model(x[N]) + bias
+resolution difference: δ[N+1] = x[N+1] − x̂[N+1]
+Prediction failure measures the model, not an incompleteness of the realized state.</pre>
+  </details>
+  <div class="grid">
+    <div class="controls" id="ctl-prediction"></div>
+    <div class="charts">
+      <canvas id="chart-pred-state"></canvas>
+      <canvas id="chart-pred-delta"></canvas>
+      <div class="stats" id="stats-prediction"></div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<section class="footer">
+  <h3>Self-test</h3>
+  <pre id="selftest">Not run yet. Click “Run self-test” or open this page with ?selftest=1.</pre>
+  <h3>JavaScript errors</h3>
+  <pre id="js-errors"></pre>
+</section>
+
+<script src="model.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
