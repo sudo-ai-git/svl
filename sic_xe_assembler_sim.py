@@ -1004,7 +1004,14 @@ class Simulator:
                 key = int(hexstr, 16) >> 2  # top 6 bits = opcode6
                 if key not in reverse:
                     reverse[key] = mnem.lstrip("+")
-        return reverse.get(opcode6, f"OP{opcode6:02X}")
+        if opcode6 in reverse:
+            return reverse[opcode6]
+        # An instruction may have been promoted to format 4 by pass 1, so its
+        # mnemonic is not in this format's table (e.g. LDL). Fall back to any format.
+        for mnem, (hexstr, f) in OPTAB.items():
+            if int(hexstr, 16) >> 2 == opcode6:
+                return mnem.lstrip("+")
+        return f"OP{opcode6:02X}"
 
     def run(self):
         self.running = True
