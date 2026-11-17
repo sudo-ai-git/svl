@@ -1,0 +1,28 @@
+module m {
+  func main() type void {
+    let n: int = 5
+    let j: int = 0
+    let s: int = 0
+    while j < n - 1 {
+      s = s + j
+      j = j + 1
+    }
+    let a: int = if 1 then 2 else 3
+    let b: int = if 0 then 2 else 3
+    let c: int = !(1 == 2)
+    let d: int = 0
+    if j > 0 then {
+      d = 7
+    }
+    print_int(s)
+    print(" ")
+    print_int(a)
+    print(" ")
+    print_int(b)
+    print(" ")
+    print_int(c)
+    print(" ")
+    print_int(d)
+    print("\n")
+  }
+}

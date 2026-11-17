@@ -1,0 +1,31 @@
+module m {
+  func main() type void {
+    let a: int[5] = 0
+    a[0] = 5
+    a[1] = 3
+    a[2] = 1
+    a[3] = 4
+    a[4] = 2
+    let n: int = 5
+    let i: int = 0
+    while i < n {
+      let j: int = 0
+      while j < n - 1 {
+        if a[j] > a[j + 1] then {
+          let t: int = a[j]
+          a[j] = a[j + 1]
+          a[j + 1] = t
+        }
+        j = j + 1
+      }
+      i = i + 1
+    }
+    i = 0
+    while i < n {
+      print_int(a[i])
+      print(" ")
+      i = i + 1
+    }
+    print("\n")
+  }
+}

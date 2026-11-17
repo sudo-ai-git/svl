@@ -261,14 +261,16 @@ class SICXECodeGen:
 
     def _compile_if(self, stmt):
         end_label = self.new_label("endif")
-        else_label = self.new_label("else")
+        # With no else branch, jump straight to the end: emit_label would
+        # otherwise overwrite else_label and leave it undefined (-> 0).
+        else_label = self.new_label("else") if stmt.else_branch else end_label
         self._compile_expr(stmt.condition)
         self.emit("COMP", "ZERO", comment="condition == 0?")
         self.emit("JEQ", else_label, comment="if false -> else")
         self._compile_block(stmt.then_branch)
-        self.emit("J", end_label, comment="skip else")
-        self.emit_label(else_label)
         if stmt.else_branch:
+            self.emit("J", end_label, comment="skip else")
+            self.emit_label(else_label)
             self._compile_block(stmt.else_branch)
         self.emit_label(end_label)
 
@@ -343,9 +345,11 @@ class SICXECodeGen:
             self._compile_expr(index_expr)
             self.emit("MUL", "#3", comment="index * 3 (word size)")
             self.emit("ADD", "TMP3", comment="base + index*3")
-            self.emit("STA", "IND", comment="IND = element address")
+            # Stash the target in TMP4: evaluating the value below may itself
+            # be an array access, which reuses IND.
+            self.emit("STA", "TMP4", comment="TMP4 = element address")
             self._compile_expr(value)
-            self.emit("STA", "@IND", comment=f"store value at {arr_name}[index]")
+            self.emit("STA", "@TMP4", comment=f"store value at {arr_name}[index]")
             return
 
         target_name = target.name if isinstance(target, Ident) else str(target)
@@ -370,40 +374,44 @@ class SICXECodeGen:
             if base_op is None:
                 self.emit_comment(f"unhandled compound assign: {op}")
                 return
+            # Fresh slots: the value expression may itself be a binary/array
+            # expression that reuses TMP0/TMP1.
+            lslot = self.alloc_slot("asgnL")
+            rslot = self.alloc_slot("asgnR")
             self.emit_addr("LDA", self.alloc_var(target_name), comment=f"load {target_name}")
-            self.emit("STA", "TMP0", comment="save target")
+            self.emit_addr("STA", lslot, comment="save target")
             self._compile_expr(value)
-            self.emit("STA", "TMP1", comment="save right")
-            self.emit("LDA", "TMP0", comment="reload target")
+            self.emit_addr("STA", rslot, comment="save right")
+            self.emit_addr("LDA", lslot, comment="reload target")
             if base_op == "+":
-                self.emit("ADD", "TMP1", comment=f"{target_name} + right")
+                self.emit_addr("ADD", rslot, comment=f"{target_name} + right")
             elif base_op == "-":
-                self.emit("SUB", "TMP1", comment=f"{target_name} - right")
+                self.emit_addr("SUB", rslot, comment=f"{target_name} - right")
             elif base_op == "*":
-                self.emit("MUL", "TMP1", comment=f"{target_name} * right")
+                self.emit_addr("MUL", rslot, comment=f"{target_name} * right")
             elif base_op == "/":
-                self.emit("DIV", "TMP1", comment=f"{target_name} / right")
+                self.emit_addr("DIV", rslot, comment=f"{target_name} / right")
             elif base_op == "%":
-                self.emit("STA", "MOD_ARG", comment="set mod divisor")
-                self.emit("LDA", "TMP0", comment="left operand")
+                self.emit_addr("STA", "MOD_ARG", comment="set mod divisor")
+                self.emit_addr("LDA", lslot, comment="left operand")
                 self.emit("JSUB", "MOD", comment=f"{target_name} % right")
             elif base_op == "&":
-                self.emit("AND", "TMP1", comment=f"{target_name} & right")
+                self.emit_addr("AND", rslot, comment=f"{target_name} & right")
             elif base_op == "|":
-                self.emit("OR", "TMP1", comment=f"{target_name} | right")
+                self.emit_addr("OR", rslot, comment=f"{target_name} | right")
             elif base_op == "^":
-                self.emit("STA", "XOR_ARG", comment="set xor mask")
-                self.emit("LDA", "TMP0", comment="left operand")
+                self.emit_addr("STA", "XOR_ARG", comment="set xor mask")
+                self.emit_addr("LDA", lslot, comment="left operand")
                 self.emit("JSUB", "XOR", comment=f"{target_name} ^ right")
             elif base_op == "<<":
-                self.emit("LDA", "TMP1", comment="shift amount")
+                self.emit_addr("LDA", rslot, comment="shift amount")
                 self.emit("STA", "SHL_ARG", comment="set shl amount")
-                self.emit("LDA", "TMP0", comment="value to shift")
+                self.emit_addr("LDA", lslot, comment="value to shift")
                 self.emit("JSUB", "SHL", comment=f"{target_name} << right")
             elif base_op == ">>":
-                self.emit("LDA", "TMP1", comment="shift amount")
+                self.emit_addr("LDA", rslot, comment="shift amount")
                 self.emit("STA", "SHR_ARG", comment="set shr amount")
-                self.emit("LDA", "TMP0", comment="value to shift")
+                self.emit_addr("LDA", lslot, comment="value to shift")
                 self.emit("JSUB", "SHR", comment=f"{target_name} >> right")
             addr = self.alloc_var(target_name)
             self.emit_addr("STA", addr, comment=f"store {target_name}")
@@ -472,13 +480,19 @@ class SICXECodeGen:
         op = expr.operator
         left = expr.left
         right = expr.right
+        # Each binary node gets its OWN operand slots: fixed TMP0/TMP1 are not
+        # reentrant, so a nested expression (e.g. `j < n - 1`) would clobber
+        # the enclosing node's saved operands.
+        lslot = self.alloc_slot("lhs")
+        rslot = self.alloc_slot("rhs")
+
         if op in ("==", "!=", "<", ">", "<=", ">="):
             self._compile_expr(left)
-            self.emit("STA", "TMP0", comment="save left")
+            self.emit_addr("STA", lslot, comment="save left")
             self._compile_expr(right)
-            self.emit("STA", "TMP1", comment="save right")
-            self.emit("LDA", "TMP0", comment="reload left")
-            self.emit("COMP", "TMP1", comment=f"compare {op}")
+            self.emit_addr("STA", rslot, comment="save right")
+            self.emit_addr("LDA", lslot, comment="reload left")
+            self.emit_addr("COMP", rslot, comment=f"compare {op}")
             # Convert SW to boolean in A (1 = true, 0 = false)
             true_label = self.new_label("cmp_true")
             done_label = self.new_label("cmp_done")
@@ -497,11 +511,12 @@ class SICXECodeGen:
             self.emit("LDA", "#1", comment="true")
             self.emit_label(done_label)
             return
+
         self._compile_expr(left)
-        self.emit("STA", "TMP0", comment="save left")
+        self.emit_addr("STA", lslot, comment="save left")
         self._compile_expr(right)
-        self.emit("STA", "TMP1", comment="save right")
-        self.emit("LDA", "TMP0", comment="reload left")
+        self.emit_addr("STA", rslot, comment="save right")
+
         op_map = {
             "+": "ADD",
             "-": "SUB",
@@ -511,40 +526,41 @@ class SICXECodeGen:
             "|": "OR",
         }
         if op in op_map:
-            self.emit(op_map[op], "TMP1", comment=f"{op} right")
+            self.emit_addr("LDA", lslot, comment="reload left")
+            self.emit(op_map[op], rslot, comment=f"{op} right")
         elif op == "%":
-            # Inline MOD: left % right = left - (left / right) * right
-            self.emit("LDA", "TMP0", comment="left operand")
-            self.emit("DIV", "TMP1", comment="left / right")
-            self.emit("STA", "TMP2", comment="save quotient")
-            self.emit("MUL", "TMP1", comment="quotient * right")
-            self.emit("STA", "TMP1", comment="save product")
-            self.emit("LDA", "TMP0", comment="reload left")
-            self.emit("SUB", "TMP1", comment="left - product = left % right")
-        elif op == "&":
-            self.emit("AND", "TMP1", comment=f"{op} right")
-        elif op == "|":
-            self.emit("OR", "TMP1", comment=f"{op} right")
+            # left % right = left - (left / right) * right
+            qslot = self.alloc_slot("quot")
+            pslot = self.alloc_slot("prod")
+            self.emit_addr("LDA", lslot, comment="left operand")
+            self.emit_addr("DIV", rslot, comment="left / right")
+            self.emit_addr("STA", qslot, comment="save quotient")
+            self.emit_addr("MUL", rslot, comment="quotient * right")
+            self.emit_addr("STA", pslot, comment="save product")
+            self.emit_addr("LDA", lslot, comment="reload left")
+            self.emit_addr("SUB", pslot, comment="left - product = left % right")
         elif op == "^":
-            # Inline XOR: (left | right) - (left & right) = left ^ right
-            self.emit("LDA", "TMP0", comment="reload left")
-            self.emit("OR", "TMP1", comment="left | right")
-            self.emit("STA", "TMP2", comment="save left|right")
-            self.emit("LDA", "TMP0", comment="reload left")
-            self.emit("AND", "TMP1", comment="left & right")
-            self.emit("STA", "TMP1", comment="save left&right")
-            self.emit("LDA", "TMP2", comment="reload left|right")
-            self.emit("SUB", "TMP1", comment="(left|right)-(left&right) = left^right")
+            # left ^ right = (left | right) - (left & right)
+            oslot = self.alloc_slot("orv")
+            aslot = self.alloc_slot("andv")
+            self.emit_addr("LDA", lslot, comment="reload left")
+            self.emit_addr("OR", rslot, comment="left | right")
+            self.emit_addr("STA", oslot, comment="save left|right")
+            self.emit_addr("LDA", lslot, comment="reload left")
+            self.emit_addr("AND", rslot, comment="left & right")
+            self.emit_addr("STA", aslot, comment="save left&right")
+            self.emit_addr("LDA", oslot, comment="reload left|right")
+            self.emit_addr("SUB", aslot, comment="(left|right)-(left&right) = left^right")
         elif op == "<<":
-            # shift amount is the RIGHT operand (TMP1); value is the left (TMP0)
-            self.emit("LDA", "TMP1", comment="shift amount")
+            # shift amount is the RIGHT operand; value is the left
+            self.emit_addr("LDA", rslot, comment="shift amount")
             self.emit("STA", "SHL_ARG", comment="set shl amount")
-            self.emit("LDA", "TMP0", comment="value to shift")
+            self.emit_addr("LDA", lslot, comment="value to shift")
             self.emit("JSUB", "SHL", comment=f"{op} right")
         elif op == ">>":
-            self.emit("LDA", "TMP1", comment="shift amount")
+            self.emit_addr("LDA", rslot, comment="shift amount")
             self.emit("STA", "SHR_ARG", comment="set shr amount")
-            self.emit("LDA", "TMP0", comment="value to shift")
+            self.emit_addr("LDA", lslot, comment="value to shift")
             self.emit("JSUB", "SHR", comment=f"{op} right")
 
     def _compile_unary(self, expr):
@@ -561,29 +577,31 @@ class SICXECodeGen:
             self.emit("SUB", "TMP0", comment="-operand")
             self.emit("SUB", "#1", comment="-operand - 1 = ~operand")
         elif op == "!":
-            self.emit("STA", "TMP0", comment="save operand")
+            # !x = 1 if x == 0 else 0
+            done = self.new_label("not_done")
             self.emit("COMP", "#0", comment="is operand zero?")
-            self.emit("LDA", "#0", comment="default false")
-            self.emit("JEQ", "DONE_NOT", comment="if zero -> not is true")
-            self.emit("LDA", "#1", comment="not zero -> not is false")
-            self.emit_label("DONE_NOT")
+            self.emit("LDA", "#0", comment="default: not zero -> 0")
+            self.emit("JNE", done, comment="non-zero -> false")
+            self.emit("LDA", "#1", comment="zero -> true")
+            self.emit_label(done)
         else:
             self.emit_comment(f"unhandled unary op: {op}")
 
     def _compile_ternary(self, expr):
         end_label = self.new_label("endtern")
         else_label = self.new_label("ternelse")
+        slot = self.alloc_slot("tern")   # per-node: nested ternaries must not clash
         self._compile_expr(expr.condition)
         self.emit("COMP", "#0", comment="condition == 0?")
         self.emit("JEQ", else_label, comment="if false -> else branch")
         self._compile_expr(expr.then_expr)
-        self.emit("STA", "TERN_RESULT", comment="save then result")
+        self.emit_addr("STA", slot, comment="save then result")
         self.emit("J", end_label, comment="skip else")
         self.emit_label(else_label)
         self._compile_expr(expr.else_expr)
-        self.emit("STA", "TERN_RESULT", comment="save else result")
+        self.emit_addr("STA", slot, comment="save else result")
         self.emit_label(end_label)
-        self.emit("LDA", "TERN_RESULT", comment="load ternary result")
+        self.emit_addr("LDA", slot, comment="load ternary result")
 
     def _compile_call(self, expr):
         callee = expr.callee
