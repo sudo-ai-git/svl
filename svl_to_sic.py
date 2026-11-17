@@ -128,7 +128,8 @@ class SICXECodeGen:
     def _preallocate_stmt(self, stmt):
         t = stmt.type.value
         if t == "LetStmt":
-            self.alloc_var(stmt.name)
+            if not getattr(stmt, "array_size", None):
+                self.alloc_var(stmt.name)
             self._preallocate_expr(stmt.value)
         elif t == "IfStmt":
             self._preallocate_expr(stmt.condition)
@@ -239,21 +240,19 @@ class SICXECodeGen:
 
     def _compile_let(self, stmt):
         if stmt.array_size:
+            # Array layout: a slot holding the data pointer, then `size` words.
             self._compile_expr(stmt.array_size)
-            size_slot = self.alloc_slot("tmp_arr_size")
+            size_slot = self.alloc_slot(f"{stmt.name}_asize")
             self.emit_addr("STA", size_slot, comment=f"array size for {stmt.name}")
             if isinstance(stmt.array_size, Literal):
                 size_val = stmt.array_size.value
             else:
                 size_val = 10
             base_slot = self.alloc_slot(f"{stmt.name}_base")
-            asize_slot = self.alloc_slot(f"{stmt.name}_asize")
             data_slot = self.alloc_slot(f"{stmt.name}_data", size_val)
-            self.var_addr[stmt.name] = data_slot
-            self.emit("LDA", f"#{data_slot}", comment=f"base addr for {stmt.name}")
-            self.emit_addr("STA", base_slot, comment=f"store base addr for {stmt.name}")
-            self.emit_addr("LDA", size_slot, comment="load array size")
-            self.emit_addr("STA", asize_slot, comment=f"store array size for {stmt.name}")
+            self.var_addr[stmt.name] = base_slot
+            self.emit("LDA", f"#{data_slot}", comment=f"data address for {stmt.name}")
+            self.emit_addr("STA", base_slot, comment=f"store data pointer for {stmt.name}")
         else:
             addr = self.alloc_var(stmt.name)
             self.emit_comment(f"let {stmt.name} = ...  @ {addr}")
@@ -340,15 +339,13 @@ class SICXECodeGen:
             arr_name = target.left.name
             index_expr = target.right
             self.emit_addr("LDA", self.var_addr[arr_name], comment=f"load base of {arr_name}")
-            self.emit("STA", "TMP0", comment="save base addr")
+            self.emit("STA", "TMP3", comment="save base addr")
             self._compile_expr(index_expr)
-            self.emit("STA", "TMP1", comment="save index")
-            self.emit("LDA", "TMP0", comment="reload base addr")
-            self.emit("ADD", "TMP1", comment="base + index")
-            self.emit("ADD", "#2", comment="+ 2 (skip header)")
-            self.emit("STA", "TMP2", comment="save TA")
+            self.emit("MUL", "#3", comment="index * 3 (word size)")
+            self.emit("ADD", "TMP3", comment="base + index*3")
+            self.emit("STA", "IND", comment="IND = element address")
             self._compile_expr(value)
-            self.emit("STA", "@TMP2", comment=f"store value at {arr_name}[index]")
+            self.emit("STA", "@IND", comment=f"store value at {arr_name}[index]")
             return
 
         target_name = target.name if isinstance(target, Ident) else str(target)
@@ -432,6 +429,22 @@ class SICXECodeGen:
             self._compile_index_expr(expr)
         else:
             self.emit_comment(f"unhandled expr: {type(expr).__name__}")
+
+    def _compile_index_expr(self, expr):
+        """Compile a read of arr[index] into A.
+
+        Layout: arr's slot holds the data pointer; elements are 3-byte words.
+        """
+        arr_name = expr.left.name
+        index_expr = expr.right
+        # Use TMP3 (not TMP0/TMP1) so a surrounding expression's operands survive
+        self.emit_addr("LDA", self.var_addr[arr_name], comment=f"load base of {arr_name}")
+        self.emit("STA", "TMP3", comment="save base addr")
+        self._compile_expr(index_expr)
+        self.emit("MUL", "#3", comment="index * 3 (word size)")
+        self.emit("ADD", "TMP3", comment="base + index*3")
+        self.emit("STA", "IND", comment="IND = element address")
+        self.emit("LDA", "@IND", comment=f"load {arr_name}[index]")
 
     def _compile_literal(self, expr):
         lt = expr.literal_type
@@ -656,6 +669,10 @@ class SICXECodeGen:
         self.emit_directive("WORD", "0", comment="temp 1")
         self.emit_label("TMP2")
         self.emit_directive("WORD", "0", comment="temp 2")
+        self.emit_label("TMP3")
+        self.emit_directive("WORD", "0", comment="temp 3 (array base)")
+        self.emit_label("TMP4")
+        self.emit_directive("WORD", "0", comment="temp 4")
         self.emit_label("MOD_ARG")
         self.emit_directive("WORD", "0", comment="mod divisor")
         self.emit_label("SHL_ARG")
@@ -670,6 +687,8 @@ class SICXECodeGen:
         self.emit_directive("WORD", "0", comment="ternary result")
         self.emit_label("L_SAVE")
         self.emit_directive("WORD", "0", comment="saved return address L")
+        self.emit_label("IND")
+        self.emit_directive("WORD", "0", comment="indirect element address for arrays")
         self.emit_label("MOD")
         self.emit_comment("MOD: A = A % MOD_ARG (24-bit, unsigned)")
         self.emit("STA", "MOD_DIVIDEND", comment="save dividend")

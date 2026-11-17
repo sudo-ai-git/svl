@@ -806,6 +806,9 @@ class Simulator:
         if mnemonic in ("STA", "STX", "STB", "STS", "STT", "STF"):
             reg_name = mnemonic[2]
             val = self.regs[reg_name]
+            # Indirect (@): TA holds the address to write to
+            if ni == 0b10:
+                ta = self._read_word(ta)
             self._write_word(ta, val)
             idx_note = f" [X={self.regs['X']:06X}]" if x else ""
             trace_line += f"mem[{ta:06X}] <- {reg_name} = {val:06X}{idx_note}"

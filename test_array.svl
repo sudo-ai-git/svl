@@ -1,0 +1,1 @@
+module m{func main()type void{let arr:int[5]=0 let i:int=0 let sum:int=0 arr[0]=10 arr[1]=20 arr[2]=30 arr[3]=40 arr[4]=50 i=0 while i<5{sum=sum+arr[i] i=i+1} print_int(sum)print("\n")}}
