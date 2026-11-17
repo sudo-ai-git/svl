@@ -1,0 +1,7 @@
+module cat {
+  func main() type void {
+    let fd: int = svc_open("test.txt")
+    svc_close(fd)
+    svc_exit(0)
+  }
+}
