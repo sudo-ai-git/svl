@@ -347,7 +347,7 @@ class SICXECodeGen:
         if isinstance(target, IndexExpr):
             arr_name = target.left.name
             index_expr = target.right
-            self.emit_addr("LDA", self.var_addr[arr_name], comment=f"load base of {arr_name}")
+            self.emit_addr("LDA", self._array_slot(arr_name), comment=f"load base of {arr_name}")
             self.emit("STA", "TMP3", comment="save base addr")
             self._compile_expr(index_expr)
             self.emit("MUL", "#3", comment="index * 3 (word size)")
@@ -491,6 +491,18 @@ class SICXECodeGen:
         else:
             self.emit_comment(f"unhandled expr: {type(expr).__name__}")
 
+    def _array_slot(self, name):
+        """Slot holding an array's data pointer (local array or array param).
+
+        Both hold the same thing — a pointer to the element words — so an
+        array can be passed to a function and indexed there.
+        """
+        if name in self.var_addr:
+            return self.var_addr[name]
+        if name in self.param_addr:
+            return self.param_addr[name]
+        return self.alloc_var(name)
+
     def _compile_index_expr(self, expr):
         """Compile a read of arr[index] into A.
 
@@ -499,7 +511,7 @@ class SICXECodeGen:
         arr_name = expr.left.name
         index_expr = expr.right
         # Use TMP3 (not TMP0/TMP1) so a surrounding expression's operands survive
-        self.emit_addr("LDA", self.var_addr[arr_name], comment=f"load base of {arr_name}")
+        self.emit_addr("LDA", self._array_slot(arr_name), comment=f"load base of {arr_name}")
         self.emit("STA", "TMP3", comment="save base addr")
         self._compile_expr(index_expr)
         self.emit("MUL", "#3", comment="index * 3 (word size)")

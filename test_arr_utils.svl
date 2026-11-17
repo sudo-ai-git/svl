@@ -1,0 +1,11 @@
+module utils {
+  func arrsum(a: [int], n: int) type int {
+    let s: int = 0
+    let i: int = 0
+    while i < n {
+      s = s + a[i]
+      i = i + 1
+    }
+    return s
+  }
+}

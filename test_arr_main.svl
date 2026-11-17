@@ -1,0 +1,11 @@
+module mainm {
+  func main() type void {
+    let arr: int[4] = 0
+    arr[0] = 5
+    arr[1] = 6
+    arr[2] = 7
+    arr[3] = 8
+    print_int(arrsum(arr, 4))
+    print("\n")
+  }
+}

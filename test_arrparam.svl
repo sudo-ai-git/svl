@@ -1,0 +1,36 @@
+module m {
+  func sum(a: [int], n: int) type int {
+    let s: int = 0
+    let i: int = 0
+    while i < n {
+      s = s + a[i]
+      i = i + 1
+    }
+    return s
+  }
+  func addTo(a: [int], n: int, v: int) type void {
+    let i: int = 0
+    while i < n {
+      a[i] = a[i] + v
+      i = i + 1
+    }
+    return
+  }
+  func main() type void {
+    let arr: int[3] = 0
+    arr[0] = 1
+    arr[1] = 2
+    arr[2] = 3
+    print_int(sum(arr, 3))
+    print(" ")
+    addTo(arr, 3, 10)
+    print_int(arr[0])
+    print(" ")
+    print_int(arr[1])
+    print(" ")
+    print_int(arr[2])
+    print(" ")
+    print_int(sum(arr, 3))
+    print("\n")
+  }
+}
