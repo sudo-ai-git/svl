@@ -47,6 +47,14 @@ OPTAB = {
 # Registers: A, X, L, B, S, T, F, PC, SW
 REGISTERS = {"A": 0, "X": 1, "L": 2, "B": 3, "S": 4, "T": 5, "F": 6, "PC": 8, "SW": 9}
 
+# SVC page (simulator built-ins): dispatcher at 0xFF06.
+# Fields are word-aligned because STA writes a 3-byte word.
+SVC_NUM = 0xFF07   # word:   syscall number (low byte used)
+SVC_FD  = 0xFF0A   # word:   first argument (fd / exit code)
+SVC_BUF = 0xFF0D   # word:   buffer address
+SVC_CNT = 0xFF10   # word:   transfer length (low byte used)
+SVC_NAME = 0xFF13   # word:   filename address (open/create)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SYMBOL TABLE ENTRY
@@ -278,6 +286,10 @@ class Assembler:
 
             if clean.isdigit():
                 target_address = int(clean)
+            elif clean.lower().startswith("0x") and all(
+                    c in "0123456789abcdefABCDEF" for c in clean[2:]):
+                # Hex address literal, e.g. the SVC page 0xFF07
+                target_address = int(clean, 16)
             elif clean.startswith("="):  # literal
                 # Literal: create a literal pool entry
                 lit_val = clean
@@ -653,7 +665,7 @@ class Simulator:
         #   6: close_file (A = fd)
         #   7: exit (A = exit code)
         if self.pc == 65286:
-            svc_num = self.memory.read_byte(0xFF07)
+            svc_num = self._read_word(SVC_NUM) & 0xFF
             if svc_num == 0:  # print_char
                 ch = self.regs["A"] & 0xFF
                 trace_line += f"SVC putchar: {chr(ch) if 32 <= ch < 127 else f'\\\\x{ch:02x}'}"
@@ -683,8 +695,8 @@ class Simulator:
                 self.regs["PC"] = self.regs["L"]
                 self.pc = self.regs["L"]
                 return self.regs["L"], trace_line, False
-            elif svc_num == 3:  # open_file
-                addr = self.regs["A"]
+            elif svc_num in (3, 8):  # 3=open (read), 8=create (write)
+                addr = self._read_word(SVC_NAME)
                 fname = []
                 while True:
                     b = self.memory.read_byte(addr)
@@ -693,25 +705,23 @@ class Simulator:
                     fname.append(chr(b))
                     addr += 1
                 fname_str = "".join(fname)
+                mode = "wb" if svc_num == 8 else "rb"
                 try:
-                    f = open(fname_str, "r")
+                    f = open(fname_str, mode)
                     fd = id(f) & 0xFFFF
                     self._open_files[fd] = f
                     self.regs["A"] = fd
-                    trace_line += f"SVC open: {fname_str!r} -> fd {fd}"
-                except FileNotFoundError:
+                    trace_line += f"SVC open({mode}): {fname_str!r} -> fd {fd}"
+                except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
                     self.regs["A"] = -1 & 0xFFFF
-                    trace_line += f"SVC open: {fname_str!r} -> not found"
+                    trace_line += f"SVC open({mode}): {fname_str!r} -> {type(e).__name__}"
                 self.regs["PC"] = self.regs["L"]
                 self.pc = self.regs["L"]
                 return self.regs["L"], trace_line, False
-            elif svc_num == 4:  # read_file
-                fd = self.regs["A"]
-                buf_addr = self.regs["X"]
-                count = self.memory.read_byte(self.alloc_var("svc_count") if hasattr(self, 'alloc_var') else 0x1000)
-                # Actually count is stored at TMP0 which is at a fixed location
-                # Let's read count from memory location right after buf_addr
-                count = self.memory.read_byte(buf_addr + 1)
+            elif svc_num == 4:  # read_file: args in the SVC block
+                fd = self._read_word(SVC_FD)
+                buf_addr = self._read_word(SVC_BUF)
+                count = self._read_word(SVC_CNT) & 0xFF
                 if fd not in self._open_files:
                     self.regs["A"] = -1 & 0xFFFF
                     trace_line += f"SVC read: fd {fd} not open"
@@ -719,7 +729,14 @@ class Simulator:
                     self.pc = self.regs["L"]
                     return self.regs["L"], trace_line, False
                 f = self._open_files[fd]
-                data = f.read(min(count, 256))
+                try:
+                    data = f.read(min(count, 256))
+                except (IOError, OSError, ValueError) as e:
+                    self.regs["A"] = -1 & 0xFFFF
+                    trace_line += f"SVC read: {type(e).__name__}"
+                    self.regs["PC"] = self.regs["L"]
+                    self.pc = self.regs["L"]
+                    return self.regs["L"], trace_line, False
                 for i, b in enumerate(data):
                     self.memory.write_byte(buf_addr + i, b)
                 self.regs["A"] = len(data)
@@ -727,11 +744,10 @@ class Simulator:
                 self.regs["PC"] = self.regs["L"]
                 self.pc = self.regs["L"]
                 return self.regs["L"], trace_line, False
-            elif svc_num == 5:  # write_file
-                fd = self.regs["A"]
-                buf_addr = self.regs["X"]
-                count_addr = buf_addr + 1
-                count = self.memory.read_byte(count_addr)
+            elif svc_num == 5:  # write_file: args in the SVC block
+                fd = self._read_word(SVC_FD)
+                buf_addr = self._read_word(SVC_BUF)
+                count = self._read_word(SVC_CNT) & 0xFF
                 data = bytes([self.memory.read_byte(buf_addr + i) for i in range(count)])
                 if fd not in self._open_files:
                     self.regs["A"] = -1 & 0xFFFF
@@ -740,14 +756,22 @@ class Simulator:
                     self.pc = self.regs["L"]
                     return self.regs["L"], trace_line, False
                 f = self._open_files[fd]
-                f.write(data)
+                try:
+                    f.write(data)
+                    f.flush()
+                except (IOError, OSError, ValueError) as e:
+                    self.regs["A"] = -1 & 0xFFFF
+                    trace_line += f"SVC write: {type(e).__name__}"
+                    self.regs["PC"] = self.regs["L"]
+                    self.pc = self.regs["L"]
+                    return self.regs["L"], trace_line, False
                 self.regs["A"] = count
                 trace_line += f"SVC write: fd {fd} -> {count} bytes"
                 self.regs["PC"] = self.regs["L"]
                 self.pc = self.regs["L"]
                 return self.regs["L"], trace_line, False
             elif svc_num == 6:  # close_file
-                fd = self.regs["A"]
+                fd = self._read_word(SVC_FD)
                 if fd in self._open_files:
                     self._open_files[fd].close()
                     del self._open_files[fd]
@@ -760,7 +784,7 @@ class Simulator:
                 self.pc = self.regs["L"]
                 return self.regs["L"], trace_line, False
             elif svc_num == 7:  # exit
-                code = self.regs["A"]
+                code = self._read_word(SVC_FD)
                 trace_line += f"SVC exit: code {code}"
                 return self.pc, trace_line, True
             else:

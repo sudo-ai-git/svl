@@ -1,0 +1,1 @@
+module m{func main()type void{assert(1==2) print_int(9)print("\n")}}

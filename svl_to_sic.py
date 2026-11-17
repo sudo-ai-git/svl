@@ -392,6 +392,8 @@ class SICXECodeGen:
             elif base_op == "/":
                 self.emit_addr("DIV", rslot, comment=f"{target_name} / right")
             elif base_op == "%":
+                # MOD computes A % MOD_ARG, so the divisor is the RIGHT operand
+                self.emit_addr("LDA", rslot, comment="right operand")
                 self.emit_addr("STA", "MOD_ARG", comment="set mod divisor")
                 self.emit_addr("LDA", lslot, comment="left operand")
                 self.emit("JSUB", "MOD", comment=f"{target_name} % right")
@@ -400,6 +402,8 @@ class SICXECodeGen:
             elif base_op == "|":
                 self.emit_addr("OR", rslot, comment=f"{target_name} | right")
             elif base_op == "^":
+                # XOR computes A ^ XOR_ARG, so the mask is the RIGHT operand
+                self.emit_addr("LDA", rslot, comment="right operand")
                 self.emit_addr("STA", "XOR_ARG", comment="set xor mask")
                 self.emit_addr("LDA", lslot, comment="left operand")
                 self.emit("JSUB", "XOR", comment=f"{target_name} ^ right")
@@ -619,52 +623,57 @@ class SICXECodeGen:
         if callee == "svc_open":
             if args:
                 self._compile_expr(args[0])
+                self.emit_addr("STA", 0xFF13, comment="SVC name addr")
                 self.emit("LDA", "#3", comment="SVC open")
-                self.emit("STA", "0xFF07", comment="SVC number = 3")
+                self.emit_addr("STA", 0xFF07, comment="SVC number = 3")
                 self.emit("+JSUB", "65286", comment="SVC open(name) -> fd in A")
+            return
+        if callee == "svc_create":
+            if args:
+                self._compile_expr(args[0])
+                self.emit_addr("STA", 0xFF13, comment="SVC name addr")
+                self.emit("LDA", "#8", comment="SVC create")
+                self.emit_addr("STA", 0xFF07, comment="SVC number = 8")
+                self.emit("+JSUB", "65286", comment="SVC create(name) -> fd in A (write mode)")
             return
         if callee == "svc_read":
             if len(args) >= 3:
                 self._compile_expr(args[0])
-                self.emit("STA", "svc_fd", comment="save fd")
+                self.emit_addr("STA", 0xFF0A, comment="SVC fd")
                 self._compile_expr(args[1])
-                self.emit("STA", "svc_buf", comment="save buf addr")
+                self.emit_addr("STA", 0xFF0D, comment="SVC buf")
                 self._compile_expr(args[2])
-                self.emit("STA", "svc_cnt", comment="save count")
-                self.emit_addr("LDA", self.alloc_var("svc_cnt"), comment="load count")
-                self.emit_addr("STA", self.alloc_slot("svc_buf_cnt"), comment="store count at buf+1")
-                self.emit("LDA", "svc_fd", comment="reload fd into A")
+                self.emit_addr("STA", 0xFF10, comment="SVC count")
                 self.emit("LDA", "#4", comment="SVC read = 4")
-                self.emit("STA", "0xFF07", comment="SVC number = 4")
+                self.emit_addr("STA", 0xFF07, comment="SVC number = 4")
                 self.emit("+JSUB", "65286", comment="SVC read(fd, buf, count) -> A")
             return
         if callee == "svc_write":
             if len(args) >= 3:
                 self._compile_expr(args[0])
-                self.emit("STA", "svc_fd", comment="save fd")
+                self.emit_addr("STA", 0xFF0A, comment="SVC fd")
                 self._compile_expr(args[1])
-                self.emit("STA", "svc_buf", comment="save buf addr")
+                self.emit_addr("STA", 0xFF0D, comment="SVC buf")
                 self._compile_expr(args[2])
-                self.emit("STA", "svc_cnt", comment="save count")
-                self.emit_addr("LDA", self.alloc_var("svc_cnt"), comment="load count")
-                self.emit_addr("STA", self.alloc_slot("svc_buf_cnt"), comment="store count at buf+1")
-                self.emit("LDA", "svc_fd", comment="reload fd into A")
+                self.emit_addr("STA", 0xFF10, comment="SVC count")
                 self.emit("LDA", "#5", comment="SVC write = 5")
-                self.emit("STA", "0xFF07", comment="SVC number = 5")
+                self.emit_addr("STA", 0xFF07, comment="SVC number = 5")
                 self.emit("+JSUB", "65286", comment="SVC write(fd, buf, count) -> bytes written in A")
             return
         if callee == "svc_close":
             if args:
                 self._compile_expr(args[0])
+                self.emit_addr("STA", 0xFF0A, comment="SVC fd")
                 self.emit("LDA", "#6", comment="SVC close")
-                self.emit("STA", "0xFF07", comment="SVC number = 6")
+                self.emit_addr("STA", 0xFF07, comment="SVC number = 6")
                 self.emit("+JSUB", "65286", comment="SVC close(fd)")
             return
         if callee == "svc_exit":
             if args:
                 self._compile_expr(args[0])
+                self.emit_addr("STA", 0xFF0A, comment="SVC exit code")
                 self.emit("LDA", "#7", comment="SVC exit")
-                self.emit("STA", "0xFF07", comment="SVC number = 7")
+                self.emit_addr("STA", 0xFF07, comment="SVC number = 7")
                 self.emit("+JSUB", "65286", comment="SVC exit(code)")
             return
         param_index = 0
@@ -677,6 +686,14 @@ class SICXECodeGen:
 
     def _emit_runtime(self):
         # Runtime subroutines
+        # Assertion failure handler: report and halt (previously the label was
+        # referenced but never defined, so a failing assert jumped to address 0).
+        self.emit_label("ASSERT_FAIL")
+        fail_msg = self.alloc_string("ASSERT FAILED\n")
+        self.emit("LDA", f"#{fail_msg}", comment="load failure message")
+        self.emit("+JSUB", "65283", comment="print failure message")
+        self.emit("HALT", comment="halt on assertion failure")
+
         self.emit_label("ZERO")
         self.emit_directive("WORD", "0", comment="constant 0")
         self.emit_label("RETVAL")

@@ -1,0 +1,26 @@
+module m {
+  func main() type void {
+    let path: string = "/tmp/svl_io_test.txt"
+    let fd: int = svc_create(path)
+    let buf: int[8] = 0
+    buf[0] = 72
+    buf[1] = 105
+    buf[2] = 33
+    let w: int = svc_write(fd, buf, 9)
+    svc_close(fd)
+    let fd2: int = svc_open(path)
+    let buf2: int[8] = 0
+    let r: int = svc_read(fd2, buf2, 9)
+    svc_close(fd2)
+    print_int(w)
+    print(" ")
+    print_int(r)
+    print(" ")
+    print_int(buf2[0])
+    print(" ")
+    print_int(buf2[1])
+    print(" ")
+    print_int(buf2[2])
+    print("\n")
+  }
+}

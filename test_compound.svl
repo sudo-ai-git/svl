@@ -1,0 +1,1 @@
+module m{func main()type void{let a:int=10 a+=5 a-=3 a*=2 a/=4 a%=4 a&=6 a|=9 a^=3 a<<=2 a>>=3 print_int(a)print("\n")}}
