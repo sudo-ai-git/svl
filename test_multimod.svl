@@ -1,0 +1,3 @@
+module a{func inc(x:int)type int{let r:int=x+1 return r}}
+module b{func twice(x:int)type int{let r:int=inc(inc(x)) return r}}
+module c{func main()type void{print_int(inc(41))print(" ")print_int(twice(10))print("\n")}}

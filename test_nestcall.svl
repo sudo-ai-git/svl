@@ -1,0 +1,1 @@
+module m{func add(a:int,b:int)type int{let r:int=a+b return r}func mul(a:int,b:int)type int{let r:int=a*b return r}func main()type void{let x:int=add(mul(2,3),4) let y:int=mul(add(1,2),add(3,4)) print_int(x)print(" ")print_int(y)print("\n")}}

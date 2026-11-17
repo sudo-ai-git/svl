@@ -85,6 +85,7 @@ class Assembler:
         self.object_code = []               # list of (address, object_code_hex, is_format4)
         self.errors = []
         self.line_info = []                 # (source_line_num, locctr, label, opcode, operand, obj_code)
+        self.line_size = {}                  # source_line_num -> bytes reserved in pass 1
 
     def _error(self, msg, line_num=None):
         where = f"line {line_num}" if line_num is not None else ""
@@ -124,6 +125,30 @@ class Assembler:
 
     # ---------------------------------------------------------------- pass 1
     def _pass1(self):
+        """Build the symbol table and program layout.
+
+        An instruction's size depends on whether its target is reachable with
+        a 12-bit PC-relative displacement, and label addresses depend on
+        instruction sizes. Iterate to a fixed point so that pass 2 emits
+        exactly the size pass 1 reserved.
+        """
+        decision = {}
+        prev = None
+        for _ in range(16):
+            self.symtab = {}
+            self.line_info = []
+            self.line_size = {}
+            self.locctr = 0
+            self.start_address = 0
+            self.program_name = ""
+            key = tuple(self._pass1_walk(decision))
+            if key == prev:
+                break
+            prev = key
+            decision = {k: v.address for k, v in self.symtab.items()}
+
+    def _pass1_walk(self, decision):
+        sizes = []
         i = 0
         while i < len(self.source):
             line_num, label, opcode, operand, comment = self.source[i]
@@ -164,10 +189,23 @@ class Assembler:
                     self._error(f"Unknown opcode or directive '{opcode}'", line_num)
                     i += 1
                     continue
+            elif size == 3 and operand:
+                # Promote to format 4 when the (known) target cannot be reached
+                # with a 12-bit PC-relative displacement.
+                clean = operand.strip().lstrip("@#").replace(",X", "").strip()
+                if (clean and not clean.isdigit()
+                        and not clean.lower().startswith("0x")
+                        and not clean.startswith("=")):
+                    tgt = decision.get(clean)
+                    if tgt is not None and not (-2048 <= tgt - (self.locctr + 3) <= 2047):
+                        size = 4
 
             self.line_info.append((line_num, self.locctr, label, opcode, operand, ""))
+            self.line_size[line_num] = size
             self.locctr += size
+            sizes.append(size)
             i += 1
+        return sizes
 
     def _instruction_size(self, opcode, operand):
         """Return instruction size in bytes, or None if it's a directive."""
@@ -229,11 +267,14 @@ class Assembler:
                 self.object_code.append((locctr, obj_code, False))
                 continue
 
-            # Determine format and flags
+            # Determine format and flags. Pass 1 decided the size (it may have
+            # promoted this instruction to format 4); honour that decision.
             format4 = False
             if op.startswith("+"):
                 format4 = True
                 op = op[1:]
+            elif self.line_size.get(line_num) == 4:
+                format4 = True
 
             n_i = "10"  # simple addressing by default
             x = "0"
@@ -323,13 +364,15 @@ class Assembler:
                 if -2048 <= diff <= 2047:
                     b_p = "01"  # PC-relative (b=0, p=1)
                     disp = diff & 0xFFF
+                elif target_address > 0xFFF:
+                    # Pass 1 must have reserved format 4 for this; if we get
+                    # here the two passes disagree about the layout.
+                    self._error(f"Address {target_address} out of range for format 3 at line {line_num}", line_num)
+                    continue
                 else:
                     # Base-relative with base=0 for simplicity
                     b_p = "10"  # base-relative (b=1, p=0)
                     disp = target_address & 0xFFF
-                    if target_address > 4095:
-                        self._error(f"Address {target_address} out of range for format 3 at line {line_num}", line_num)
-                        continue
 
             # Assemble object code
             opcode_hex = OPTAB[op][0]
