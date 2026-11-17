@@ -399,10 +399,12 @@ class SICXECodeGen:
                 self.emit("LDA", "TMP0", comment="left operand")
                 self.emit("JSUB", "XOR", comment=f"{target_name} ^ right")
             elif base_op == "<<":
+                self.emit("LDA", "TMP1", comment="shift amount")
                 self.emit("STA", "SHL_ARG", comment="set shl amount")
                 self.emit("LDA", "TMP0", comment="value to shift")
                 self.emit("JSUB", "SHL", comment=f"{target_name} << right")
             elif base_op == ">>":
+                self.emit("LDA", "TMP1", comment="shift amount")
                 self.emit("STA", "SHR_ARG", comment="set shr amount")
                 self.emit("LDA", "TMP0", comment="value to shift")
                 self.emit("JSUB", "SHR", comment=f"{target_name} >> right")
@@ -521,10 +523,13 @@ class SICXECodeGen:
             self.emit("LDA", "TMP2", comment="reload left|right")
             self.emit("SUB", "TMP1", comment="(left|right)-(left&right) = left^right")
         elif op == "<<":
+            # shift amount is the RIGHT operand (TMP1); value is the left (TMP0)
+            self.emit("LDA", "TMP1", comment="shift amount")
             self.emit("STA", "SHL_ARG", comment="set shl amount")
             self.emit("LDA", "TMP0", comment="value to shift")
             self.emit("JSUB", "SHL", comment=f"{op} right")
         elif op == ">>":
+            self.emit("LDA", "TMP1", comment="shift amount")
             self.emit("STA", "SHR_ARG", comment="set shr amount")
             self.emit("LDA", "TMP0", comment="value to shift")
             self.emit("JSUB", "SHR", comment=f"{op} right")

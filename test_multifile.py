@@ -12,7 +12,9 @@ import sys
 import subprocess
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent
+# Works whether this file sits at the repo root or in tests/
+ROOT = HERE if (HERE / "svl_to_sic.py").exists() else HERE.parent
 sys.path.insert(0, str(ROOT))
 
 from sic_xe_assembler_sim import Simulator
@@ -54,9 +56,9 @@ def run_object(obj_path: Path):
 
 
 def main():
-    utils_obj = compile_to_obj(ROOT / "test_utils.svl")
-    main_obj = compile_to_obj(ROOT / "test_main2.svl")
-    linked = link([utils_obj, main_obj], ROOT / "linked_test.obj")
+    utils_obj = compile_to_obj(HERE / "test_utils.svl")
+    main_obj = compile_to_obj(HERE / "test_main2.svl")
+    linked = link([utils_obj, main_obj], HERE / "linked_test.obj")
 
     trace, regs = run_object(linked)
 

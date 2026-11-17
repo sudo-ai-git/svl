@@ -1,1 +1,1 @@
-module m{func main()type void{let x:int=1 let y:int=2 let z:int=x<<1 let w:int=y>>1 return}}
+module m{func main()type void{let x:int=1 let y:int=2 let z:int=x<<2 let w:int=8>>1 let v:int=3<<0 let u:int=16>>2 print_int(z)print(" ")print_int(w)print(" ")print_int(v)print(" ")print_int(u)print("\n")}}
