@@ -1,0 +1,11 @@
+module m {
+  func f(n: int) type int {
+    let a: int = n * 2
+    if n <= 0 then { return 0 }
+    return a + f(n - 1)
+  }
+  func main() type void {
+    print_int(f(3))
+    print("\n")
+  }
+}

@@ -193,12 +193,16 @@ class Assembler:
                 # Promote to format 4 when the (known) target cannot be reached
                 # with a 12-bit PC-relative displacement.
                 clean = operand.strip().lstrip("@#").replace(",X", "").strip()
-                if (clean and not clean.isdigit()
-                        and not clean.lower().startswith("0x")
-                        and not clean.startswith("=")):
+                tgt = None
+                if clean.isdigit():
+                    tgt = int(clean)
+                elif (clean.lower().startswith("0x")
+                      and all(c in "0123456789abcdefABCDEF" for c in clean[2:])):
+                    tgt = int(clean, 16)
+                elif not clean.startswith("="):
                     tgt = decision.get(clean)
-                    if tgt is not None and not (-2048 <= tgt - (self.locctr + 3) <= 2047):
-                        size = 4
+                if tgt is not None and not (-2048 <= tgt - (self.locctr + 3) <= 2047):
+                    size = 4
 
             self.line_info.append((line_num, self.locctr, label, opcode, operand, ""))
             self.line_size[line_num] = size
@@ -455,11 +459,12 @@ class Assembler:
         if code_entries:
             current_start = code_entries[0][0]
             current_bytes = []
+            current_len = 0          # bytes, not entries (the T length field is 2 hex digits)
             current_end = current_start
 
             for addr, code in code_entries:
                 # If not contiguous with current T record, flush it
-                if addr != current_end or len(current_bytes) + len(code) // 2 > 60:
+                if addr != current_end or current_len + len(code) // 2 > 60:
                     if current_bytes:
                         hex_data = ''.join(current_bytes)
                         byte_count = len(hex_data) // 2
@@ -470,7 +475,9 @@ class Assembler:
                         )
                     current_start = addr
                     current_bytes = []
+                    current_len = 0
                 current_bytes.append(code)
+                current_len += len(code) // 2
                 current_end = addr + len(code) // 2
 
             if current_bytes:

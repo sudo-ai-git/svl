@@ -30,6 +30,32 @@ from svl.gate231 import compute_checksums as gate231_compute_checksums
 from sic_xe_assembler_sim import Assembler, Simulator, parse_source
 
 
+# Runtime scratch slots at fixed absolute addresses (0xF000 block).
+# Shared by every object file: each object carries its own copy of the runtime
+# code, so if these were per-object labels a callee would get a different
+# LSP/FPTR than its caller and its frames would land on top of the caller's.
+SLOT_BASE = 0xF000
+SLOT_ADDRS = {
+    "LSP":        SLOT_BASE + 0,     # value/return stack pointer
+    "FPTR":       SLOT_BASE + 3,     # frame pointer
+    "IND":        SLOT_BASE + 6,     # indirect address scratch
+    "TMP0":       SLOT_BASE + 9,
+    "TMP1":       SLOT_BASE + 12,
+    "TMP2":       SLOT_BASE + 15,
+    "TMP3":       SLOT_BASE + 18,
+    "TMP4":       SLOT_BASE + 21,
+    "RETVAL":     SLOT_BASE + 24,
+    "MOD_ARG":    SLOT_BASE + 27,
+    "SHL_ARG":    SLOT_BASE + 30,
+    "SHR_ARG":    SLOT_BASE + 33,
+    "XOR_ARG":    SLOT_BASE + 36,
+    "NOT_ARG":    SLOT_BASE + 39,
+    "TERN_RESULT": SLOT_BASE + 42,
+    "ZERO":       SLOT_BASE + 45,    # reads as 0; never written
+}
+PARAM_BASE = 0xF040                              # incoming argument slots
+
+
 class SICXECodeGen:
     def __init__(self):
         self.lines = []
@@ -39,13 +65,14 @@ class SICXECodeGen:
         self.string_pool = {}
         self.label_n = 0
         self.param_addr = {}
-        self.param_base = 0xF000          # fixed absolute arg-passing region (shared across objects)
+        self.param_base = PARAM_BASE      # fixed absolute arg-passing region (shared across objects)
+        self.array_locals = set()         # names whose value is an element-block address
         self.pending_label = None
         self.in_main = False
 
     # Return-address/value stack (a single global slot is not enough for recursion)
     LSTACK_BASE = 0xF400
-    LSTACK_FRAMES = 512
+    LSTACK_FRAMES = 900      # region ends at 0xFEFC, below the SVC page at 0xFF06
 
     def new_label(self, prefix="L"):
         self.label_n += 1
@@ -80,6 +107,14 @@ class SICXECodeGen:
         if label == "" and self.pending_label is not None:
             label = self.pending_label
             self.pending_label = None
+        # Runtime scratch slots live at fixed absolute addresses. Each object
+        # file carries its own copy of the runtime, so per-object slot labels
+        # would give a callee a *different* stack pointer than its caller and
+        # the callee's frames would overwrite the caller's.
+        if isinstance(operand, str):
+            core = operand.strip().lstrip("@#").replace(",X", "").strip()
+            if core in SLOT_ADDRS:
+                operand = operand.replace(core, str(SLOT_ADDRS[core]), 1)
         self.lines.append((label, opcode, operand, comment))
 
     def emit_comment(self, text):
@@ -122,8 +157,10 @@ class SICXECodeGen:
         return self.lines
 
     def _preallocate(self, program):
-        for module in program.modules:
-            self._preallocate_block(module.body)
+        # Parameters and locals are frame-allocated per function by
+        # _scan_frame, so there is nothing to preallocate here. (This pass
+        # used to create fixed slots, which are exactly what recursion breaks.)
+        return
 
     def _preallocate_block(self, block):
         for stmt in block.statements:
@@ -218,50 +255,149 @@ class SICXECodeGen:
         func_name = func.name
         self.emit_label(func_name)
         self.emit_comment(f"function {func.name}")
+
+        # Frame layout (growing up, LSP points just past the last word):
+        #   [ret][saved FPTR][arg0][arg1]...[local0]...
+        # FPTR points at arg0, so frame word k lives at FPTR + 3k.
+        # Fixed slots are shared by every invocation, which is wrong for
+        # recursion -- hence one frame per call.
+        self._scan_frame(func.params, func.body)
+        nwords = self.frame_words
+        nargs = len(func.params)
+        # Record parameters so array parameters can be told apart from locals.
         for i, param in enumerate(func.params):
             self.param_addr[param.name] = self.param_slot(i)
         self.in_main = (func.name == "main")
-        if not self.in_main:
-            # Push the return address: a single global slot would be overwritten
-            # by a recursive call.
-            self._emit_lstack_push()
-        self._compile_block(func.body)
-        if func.body.statements:
-            last = func.body.statements[-1]
-            if last.type.value != "ReturnStmt":
-                if self.in_main:
-                    self.emit("HALT", comment="halt")
-                else:
-                    self._emit_lstack_pop()
-                    self.emit("RSUB", comment="implicit return")
+
+        if self.in_main:
+            # LSP lives at a fixed address with no static initializer, so the
+            # entry point seeds it.
+            self.emit("LDA", "LSP_INIT", comment="A = initial stack pointer")
+            self.emit("STA", "LSP")
+            self.emit("LDA", "LSP")
+            self.emit("STA", "FPTR", comment="FPTR = frame base")
+            if nwords:
+                self.emit("LDA", "LSP")
+                self.emit("ADD", f"#{3 * nwords}")
+                self.emit("STA", "LSP", comment="reserve frame words")
         else:
-            if self.in_main:
-                self.emit("HALT", comment="halt")
-            else:
-                self._emit_lstack_pop()
-                self.emit("RSUB", comment="empty function")
+            self._emit_lstack_push()                     # return address
+            self.emit("LDA", "FPTR", comment="A = caller FPTR")
+            self._emit_push_a()                          # save caller's frame pointer
+            self.emit("LDA", "LSP")
+            self.emit("STA", "FPTR", comment="FPTR = frame base")
+            if nwords:
+                self.emit("LDA", "LSP")
+                self.emit("ADD", f"#{3 * nwords}")
+                self.emit("STA", "LSP", comment="reserve frame words")
+            for i in range(nargs):
+                # copy the incoming argument from the shared slot into the frame
+                self.emit_addr("LDA", self.param_slot(i), comment=f"arg {i}")
+                self.emit("STA", "TMP0")
+                self.emit("LDA", "FPTR")
+                if i:
+                    self.emit("ADD", f"#{3 * i}")
+                self.emit("STA", "IND")
+                self.emit("LDA", "TMP0")
+                self.emit("STA", "@IND", comment=f"frame arg {i}")
+
+        self._compile_block(func.body)
+
+        if func.body.statements and func.body.statements[-1].type.value == "ReturnStmt":
+            pass  # the ReturnStmt emitted its own epilogue
+        elif self.in_main:
+            self.emit("HALT", comment="halt")
+        else:
+            self._emit_frame_epilogue()
+            self.emit("RSUB", comment="implicit return")
         self.in_main = False
 
-    def _compile_let(self, stmt):
-        if stmt.array_size:
-            # Array layout: a slot holding the data pointer, then `size` words.
-            self._compile_expr(stmt.array_size)
-            size_slot = self.alloc_slot(f"{stmt.name}_asize")
-            self.emit_addr("STA", size_slot, comment=f"array size for {stmt.name}")
-            if isinstance(stmt.array_size, Literal):
-                size_val = stmt.array_size.value
-            else:
-                size_val = 10
-            base_slot = self.alloc_slot(f"{stmt.name}_base")
-            data_slot = self.alloc_slot(f"{stmt.name}_data", size_val)
-            self.var_addr[stmt.name] = base_slot
-            self.emit("LDA", f"#{data_slot}", comment=f"data address for {stmt.name}")
-            self.emit_addr("STA", base_slot, comment=f"store data pointer for {stmt.name}")
+    def _scan_frame(self, params, block):
+        """Assign each parameter and local a word offset from FPTR."""
+        self.frame_off = {}
+        self.array_locals = set()
+        self._frame_next = 0
+        for p in params:
+            self.frame_off[p.name] = self._frame_next
+            self._frame_next += 1
+            ann = getattr(p, "type_ann", None)
+            if ann is not None and getattr(ann, "kind", None) == "array":
+                self.array_locals.add(p.name)
+        self._scan_frame_stmts(block.statements)
+        self.frame_words = self._frame_next
+
+    def _scan_frame_stmts(self, stmts):
+        for s in stmts:
+            t = s.type.value
+            if t == "LetStmt":
+                self.frame_off[s.name] = self._frame_next
+                size = 1
+                if getattr(s, "array_size", None) is not None:
+                    size = (s.array_size.value if isinstance(s.array_size, Literal) else 10)
+                    self.array_locals.add(s.name)
+                self._frame_next += size
+            elif t == "IfStmt":
+                self._scan_frame_stmts(s.then_branch.statements)
+                if s.else_branch:
+                    self._scan_frame_stmts(s.else_branch.statements)
+            elif t == "WhileStmt":
+                self._scan_frame_stmts(s.body.statements)
+            elif t == "ForStmt":
+                # the induction variable is a local of this frame
+                self.frame_off[s.var] = self._frame_next
+                self._frame_next += 1
+                self._scan_frame_stmts(s.body.statements)
+            elif t == "Block":
+                self._scan_frame_stmts(s.statements)
+
+    def _emit_frame_epilogue(self):
+        self.emit("STA", "TMP1", comment="save return value across the pops")
+        self.emit("LDA", "FPTR", comment="A = FPTR")
+        self.emit("STA", "LSP", comment="drop this frame's words")
+        self._emit_pop_a()
+        self.emit("STA", "FPTR", comment="restore caller's frame pointer")
+        self._emit_lstack_pop()                          # restore L
+        self.emit("LDA", "TMP1", comment="restore return value")
+
+    def _emit_frame_addr(self, name):
+        """IND = FPTR + 3*frame_off[name]."""
+        off = 3 * self.frame_off[name]
+        self.emit("LDA", "FPTR")
+        if off:
+            self.emit("ADD", f"#{off}")
+        self.emit("STA", "IND")
+
+    def _emit_local_load(self, name):
+        self._emit_frame_addr(name)
+        self.emit("LDA", "@IND", comment=f"load {name}")
+
+    def _emit_local_store(self, name):
+        self.emit("STA", "TMP0", comment=f"value for {name}")
+        self._emit_frame_addr(name)
+        self.emit("LDA", "TMP0")
+        self.emit("STA", "@IND", comment=f"store {name}")
+
+    def _emit_array_base(self, name):
+        """A = base address of the array's element words."""
+        if name in self.param_addr:
+            # array parameter: the caller passed a pointer, copied into the frame
+            self._emit_local_load(name)
         else:
-            addr = self.alloc_var(stmt.name)
-            self.emit_comment(f"let {stmt.name} = ...  @ {addr}")
-            self._compile_expr(stmt.value)
-            self.emit_addr("STA", addr, comment=f"store {stmt.name}")
+            # local array: its words are the frame slot itself
+            off = 3 * self.frame_off[name]
+            self.emit("LDA", "FPTR")
+            if off:
+                self.emit("ADD", f"#{off}")
+
+    def _compile_let(self, stmt):
+        if getattr(stmt, "array_size", None) is not None:
+            # Storage is the frame words reserved by _scan_frame.
+            size = stmt.array_size.value if isinstance(stmt.array_size, Literal) else 10
+            self.emit_comment(
+                f"let {stmt.name} = int[{size}]  @ frame+{3 * self.frame_off[stmt.name]}")
+            return
+        self._compile_expr(stmt.value)
+        self._emit_local_store(stmt.name)
 
     def _compile_if(self, stmt):
         end_label = self.new_label("endif")
@@ -297,11 +433,11 @@ class SICXECodeGen:
         start_expr = iter_expr.left
         end_expr = iter_expr.right
         self._compile_expr(start_expr)
-        self.emit_addr("STA", self.alloc_var(stmt.var), comment=f"init {stmt.var}")
+        self._emit_local_store(stmt.var)
         loop_label = self.new_label("while")
         end_label = self.new_label("endwhile")
         self.emit_label(loop_label)
-        self.emit_addr("LDA", self.var_addr[stmt.var], comment=f"load {stmt.var}")
+        self._emit_local_load(stmt.var)
         self._emit_push_a()
         self._compile_expr(end_expr)
         self.emit("STA", "TMP1", comment="save end")
@@ -311,9 +447,9 @@ class SICXECodeGen:
         self.emit("COMP", "TMP1", comment=f"compare {stmt.var} < end")
         self.emit("JGT", end_label, comment="exit if var > end")
         self._compile_block(stmt.body)
-        self.emit_addr("LDA", self.var_addr[stmt.var], comment=f"load {stmt.var}")
+        self._emit_local_load(stmt.var)
         self.emit("ADD", "#1", comment="var + 1")
-        self.emit_addr("STA", self.var_addr[stmt.var], comment=f"store {stmt.var}")
+        self._emit_local_store(stmt.var)
         self.emit("J", loop_label, comment="repeat loop")
         self.emit_label(end_label)
 
@@ -324,7 +460,7 @@ class SICXECodeGen:
         if self.in_main:
             self.emit("HALT", comment="halt - return from main")
         else:
-            self._emit_lstack_pop()
+            self._emit_frame_epilogue()
             self.emit("RSUB", comment="return")
 
     def _compile_assert(self, stmt):
@@ -347,7 +483,7 @@ class SICXECodeGen:
         if isinstance(target, IndexExpr):
             arr_name = target.left.name
             index_expr = target.right
-            self.emit_addr("LDA", self._array_slot(arr_name), comment=f"load base of {arr_name}")
+            self._emit_array_base(arr_name)
             self.emit("STA", "TMP3", comment="save base addr")
             self._compile_expr(index_expr)
             self.emit("MUL", "#3", comment="index * 3 (word size)")
@@ -360,10 +496,14 @@ class SICXECodeGen:
             return
 
         target_name = target.name if isinstance(target, Ident) else str(target)
+        is_local = target_name in getattr(self, "frame_off", {})
         if op == "=":
             self._compile_expr(value)
-            addr = self.alloc_var(target_name)
-            self.emit_addr("STA", addr, comment=f"store {target_name}")
+            if is_local:
+                self._emit_local_store(target_name)
+            else:
+                addr = self.alloc_var(target_name)
+                self.emit_addr("STA", addr, comment=f"store {target_name}")
         else:
             op_map = {
                 "+=": "+",
@@ -383,7 +523,10 @@ class SICXECodeGen:
                 return
             # The target value goes on the value stack so a recursive call in
             # the value expression cannot clobber it.
-            self.emit_addr("LDA", self.alloc_var(target_name), comment=f"load {target_name}")
+            if is_local:
+                self._emit_local_load(target_name)
+            else:
+                self.emit_addr("LDA", self.alloc_var(target_name), comment=f"load {target_name}")
             self._emit_push_a()
             self._compile_expr(value)
             self._emit_push_a()
@@ -425,8 +568,11 @@ class SICXECodeGen:
                 self.emit("STA", "SHR_ARG", comment="set shr amount")
                 self.emit("LDA", "TMP0", comment="value to shift")
                 self.emit("JSUB", "SHR", comment=f"{target_name} >> right")
-            addr = self.alloc_var(target_name)
-            self.emit_addr("STA", addr, comment=f"store {target_name}")
+            if is_local:
+                self._emit_local_store(target_name)
+            else:
+                addr = self.alloc_var(target_name)
+                self.emit_addr("STA", addr, comment=f"store {target_name}")
 
     def _emit_lstack_push(self):
         """Push L onto the return-address stack (one frame per active call)."""
@@ -491,27 +637,16 @@ class SICXECodeGen:
         else:
             self.emit_comment(f"unhandled expr: {type(expr).__name__}")
 
-    def _array_slot(self, name):
-        """Slot holding an array's data pointer (local array or array param).
-
-        Both hold the same thing — a pointer to the element words — so an
-        array can be passed to a function and indexed there.
-        """
-        if name in self.var_addr:
-            return self.var_addr[name]
-        if name in self.param_addr:
-            return self.param_addr[name]
-        return self.alloc_var(name)
-
     def _compile_index_expr(self, expr):
         """Compile a read of arr[index] into A.
 
-        Layout: arr's slot holds the data pointer; elements are 3-byte words.
+        The array's element words start at `_emit_array_base(name)`; elements
+        are 3-byte words.
         """
         arr_name = expr.left.name
         index_expr = expr.right
         # Use TMP3 (not TMP0/TMP1) so a surrounding expression's operands survive
-        self.emit_addr("LDA", self._array_slot(arr_name), comment=f"load base of {arr_name}")
+        self._emit_array_base(arr_name)
         self.emit("STA", "TMP3", comment="save base addr")
         self._compile_expr(index_expr)
         self.emit("MUL", "#3", comment="index * 3 (word size)")
@@ -535,8 +670,11 @@ class SICXECodeGen:
 
     def _compile_ident(self, expr):
         name = expr.name
-        if name in self.param_addr:
-            self.emit_addr("LDA", self.param_addr[name], comment=f"load param {name}")
+        if name in getattr(self, "array_locals", set()):
+            # an array's value is the address of its element block
+            self._emit_array_base(name)
+        elif name in getattr(self, "frame_off", {}):
+            self._emit_local_load(name)
         else:
             addr = self.alloc_var(name)
             self.emit_addr("LDA", addr, comment=f"load {name}")
@@ -789,45 +927,20 @@ class SICXECodeGen:
         self.emit("+JSUB", "65283", comment="print stack underflow")
         self.emit("HALT", comment="halt on stack underflow")
 
-        self.emit_label("ZERO")
-        self.emit_directive("WORD", "0", comment="constant 0")
-        self.emit_label("RETVAL")
-        self.emit_directive("WORD", "0", comment="return value")
-        self.emit_label("TMP0")
-        self.emit_directive("WORD", "0", comment="temp 0")
-        self.emit_label("TMP1")
-        self.emit_directive("WORD", "0", comment="temp 1")
-        self.emit_label("TMP2")
-        self.emit_directive("WORD", "0", comment="temp 2")
-        self.emit_label("TMP3")
-        self.emit_directive("WORD", "0", comment="temp 3 (array base)")
-        self.emit_label("TMP4")
-        self.emit_directive("WORD", "0", comment="temp 4")
-        self.emit_label("MOD_ARG")
-        self.emit_directive("WORD", "0", comment="mod divisor")
-        self.emit_label("SHL_ARG")
-        self.emit_directive("WORD", "0", comment="shift amount")
-        self.emit_label("SHR_ARG")
-        self.emit_directive("WORD", "0", comment="shift amount")
-        self.emit_label("XOR_ARG")
-        self.emit_directive("WORD", "0", comment="xor mask")
-        self.emit_label("NOT_ARG")
-        self.emit_directive("WORD", "0", comment="not operand")
-        self.emit_label("TERN_RESULT")
-        self.emit_directive("WORD", "0", comment="ternary result")
-        self.emit_label("IND")
-        self.emit_directive("WORD", "0", comment="indirect element address for arrays")
-        self.emit_label("LSP")
-        self.emit_directive("WORD", str(self.LSTACK_BASE),
-                            comment="return-address/value stack pointer")
+        # Scratch slots (ZERO, RETVAL, TMP0-4, *_ARG, TERN_RESULT, IND, LSP,
+        # FPTR) are NOT defined here: they live at the fixed addresses in
+        # SLOT_ADDRS so every object file agrees on them.
         self.emit_label("LSTACK_BOT")
         self.emit_directive("WORD", str(self.LSTACK_BASE),
                             comment="stack lower bound")
         self.emit_label("LSTACK_LIM")
         self.emit_directive("WORD", str(self.LSTACK_BASE + 3 * self.LSTACK_FRAMES),
                             comment="stack upper bound (exclusive)")
+        self.emit_label("LSP_INIT")
+        self.emit_directive("WORD", str(self.LSTACK_BASE),
+                            comment="initial stack pointer")
         # The stack itself lives in the fixed region [LSTACK_BASE, LSTACK_LIM);
-        # nothing else is placed there (params are at 0xF000, SVC page at 0xFF00).
+        # nothing else is placed there (slots at 0xF000, SVC page at 0xFF00).
         self.emit_label("MOD")
         self.emit_comment("MOD: A = A % MOD_ARG (24-bit, unsigned)")
         self.emit("STA", "MOD_DIVIDEND", comment="save dividend")
