@@ -34,13 +34,12 @@ class SICXECodeGen:
     def __init__(self):
         self.lines = []
         self.var_addr = {}
-        self.next_var = 16
+        self.var_slots = []               # (label, size_in_words) to emit as RESW
+        self.slot_n = 0
         self.string_pool = {}
-        self.next_string = 1024
         self.label_n = 0
         self.param_addr = {}
-        self.param_base = 512
-        self.next_param = 0
+        self.param_base = 0xF000          # fixed absolute arg-passing region (shared across objects)
         self.pending_label = None
         self.in_main = False
 
@@ -48,17 +47,25 @@ class SICXECodeGen:
         self.label_n += 1
         return f"{prefix}{self.label_n}"
 
+    def _new_slot(self, size=1):
+        label = f"V{self.slot_n}"
+        self.slot_n += 1
+        self.var_slots.append((label, size))
+        return label
+
     def alloc_var(self, name, size=1):
+        """Allocate a relocatable variable slot; returns a label."""
         if name not in self.var_addr:
-            self.var_addr[name] = self.next_var
-            self.next_var += size * 3
+            self.var_addr[name] = self._new_slot(size)
         return self.var_addr[name]
 
-    def alloc_param(self, name):
-        if name not in self.param_addr:
-            self.param_addr[name] = self.next_param
-            self.next_param += 3
-        return self.param_addr[name]
+    def alloc_slot(self, name, size=1):
+        """Allocate an anonymous relocatable slot; returns a label."""
+        return self._new_slot(size)
+
+    def param_slot(self, index):
+        """Fixed absolute argument slot (shared convention across objects)."""
+        return self.param_base + 3 * index
 
     def alloc_string(self, text):
         if text not in self.string_pool:
@@ -81,7 +88,10 @@ class SICXECodeGen:
         self.pending_label = label
 
     def emit_addr(self, opcode, addr, comment="", label=""):
-        if addr > 4095:
+        if isinstance(addr, str):
+            # relocatable label reference
+            self.emit(opcode, addr, comment, label)
+        elif addr > 4095:
             self.emit("+" + opcode, str(addr), comment, label)
         else:
             self.emit(opcode, str(addr), comment, label)
@@ -99,6 +109,9 @@ class SICXECodeGen:
             hex_str = "".join(f"{b:02X}" for b in bytes_data)
             self.emit_comment(f"string @ {label}: {text!r}")
             self.emit_directive("BYTE", f"X'{hex_str}'", comment=f"{label} ({len(bytes_data)} bytes)")
+        for label, size in self.var_slots:
+            self.emit_label(label)
+            self.emit_directive("RESW", str(size), comment=f"variable {label} ({size} words)")
         self.emit_label("HALT")
         self.emit("HALT", comment="halt - end of program")
         self.emit("END", "MAIN", comment="entry point")
@@ -200,8 +213,8 @@ class SICXECodeGen:
         func_name = func.name
         self.emit_label(func_name)
         self.emit_comment(f"function {func.name}")
-        for param in func.params:
-            self.alloc_param(param.name)
+        for i, param in enumerate(func.params):
+            self.param_addr[param.name] = self.param_slot(i)
         self.in_main = (func.name == "main")
         if not self.in_main:
             # Save return address L before any built-in calls can clobber it
@@ -227,21 +240,23 @@ class SICXECodeGen:
     def _compile_let(self, stmt):
         if stmt.array_size:
             self._compile_expr(stmt.array_size)
-            size_addr = self.alloc_var("tmp_arr_size")
-            self.emit_addr("STA", size_addr, comment=f"array size for {stmt.name}")
+            size_slot = self.alloc_slot("tmp_arr_size")
+            self.emit_addr("STA", size_slot, comment=f"array size for {stmt.name}")
             if isinstance(stmt.array_size, Literal):
                 size_val = stmt.array_size.value
             else:
                 size_val = 10
-            addr = self.alloc_var(stmt.name, size_val + 2)
-            self.var_addr[stmt.name] = addr + 2
-            self.emit("LDA", f"#{addr + 2}", comment=f"base addr for {stmt.name}")
-            self.emit_addr("STA", addr, comment=f"store base addr for {stmt.name}")
-            self.emit_addr("LDA", size_addr, comment="load array size")
-            self.emit_addr("STA", addr + 1, comment=f"store array size for {stmt.name}")
+            base_slot = self.alloc_slot(f"{stmt.name}_base")
+            asize_slot = self.alloc_slot(f"{stmt.name}_asize")
+            data_slot = self.alloc_slot(f"{stmt.name}_data", size_val)
+            self.var_addr[stmt.name] = data_slot
+            self.emit("LDA", f"#{data_slot}", comment=f"base addr for {stmt.name}")
+            self.emit_addr("STA", base_slot, comment=f"store base addr for {stmt.name}")
+            self.emit_addr("LDA", size_slot, comment="load array size")
+            self.emit_addr("STA", asize_slot, comment=f"store array size for {stmt.name}")
         else:
             addr = self.alloc_var(stmt.name)
-            self.emit_comment(f"let {stmt.name} = ...  @ {addr:04X}")
+            self.emit_comment(f"let {stmt.name} = ...  @ {addr}")
             self._compile_expr(stmt.value)
             self.emit_addr("STA", addr, comment=f"store {stmt.name}")
 
@@ -433,8 +448,7 @@ class SICXECodeGen:
     def _compile_ident(self, expr):
         name = expr.name
         if name in self.param_addr:
-            offset = self.param_addr[name]
-            self.emit_addr("LDA", self.param_base + offset, comment=f"load param {name}")
+            self.emit_addr("LDA", self.param_addr[name], comment=f"load param {name}")
         else:
             addr = self.alloc_var(name)
             self.emit_addr("LDA", addr, comment=f"load {name}")
@@ -581,8 +595,8 @@ class SICXECodeGen:
                 self.emit("STA", "svc_buf", comment="save buf addr")
                 self._compile_expr(args[2])
                 self.emit("STA", "svc_cnt", comment="save count")
-                self.emit_addr("LDA", self.var_addr["svc_cnt"], comment="load count")
-                self.emit_addr("STA", self.var_addr["svc_buf"] + 1, comment="store count at buf+1")
+                self.emit_addr("LDA", self.alloc_var("svc_cnt"), comment="load count")
+                self.emit_addr("STA", self.alloc_slot("svc_buf_cnt"), comment="store count at buf+1")
                 self.emit("LDA", "svc_fd", comment="reload fd into A")
                 self.emit("LDA", "#4", comment="SVC read = 4")
                 self.emit("STA", "0xFF07", comment="SVC number = 4")
@@ -596,8 +610,8 @@ class SICXECodeGen:
                 self.emit("STA", "svc_buf", comment="save buf addr")
                 self._compile_expr(args[2])
                 self.emit("STA", "svc_cnt", comment="save count")
-                self.emit_addr("LDA", self.var_addr["svc_cnt"], comment="load count")
-                self.emit_addr("STA", self.var_addr["svc_buf"] + 1, comment="store count at buf+1")
+                self.emit_addr("LDA", self.alloc_var("svc_cnt"), comment="load count")
+                self.emit_addr("STA", self.alloc_slot("svc_buf_cnt"), comment="store count at buf+1")
                 self.emit("LDA", "svc_fd", comment="reload fd into A")
                 self.emit("LDA", "#5", comment="SVC write = 5")
                 self.emit("STA", "0xFF07", comment="SVC number = 5")
@@ -620,8 +634,8 @@ class SICXECodeGen:
         param_index = 0
         for arg in args:
             self._compile_expr(arg)
-            self.emit_addr("STA", self.param_base + param_index, comment=f"param[{param_index}]")
-            param_index += 3
+            self.emit_addr("STA", self.param_slot(param_index), comment=f"param[{param_index}]")
+            param_index += 1
         self.emit("JSUB", callee, comment=f"call {callee}")
 
 
@@ -776,11 +790,12 @@ def assembly_to_source(asm_lines):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 svl_to_sic.py <source.svl> [--emit-asm]")
+        print("Usage: python3 svl_to_sic.py <source.svl> [--emit-asm] [--emit-obj]")
         return 1
 
     source_path = Path(sys.argv[1])
     emit_asm = "--emit-asm" in sys.argv
+    emit_obj = "--emit-obj" in sys.argv
 
     svl_text = source_path.read_text()
 
@@ -819,6 +834,16 @@ def main():
         for err in asm.errors:
             print(f"  {err}")
         return 1
+
+    if emit_obj:
+        obj_path = str(source_path.with_suffix(".obj"))
+        lines = [records["H"]]
+        lines.extend(records["T"])
+        lines.append(records["E"])
+        Path(obj_path).write_text("\n".join(lines) + "\n")
+        print(f"Wrote object file: {obj_path}")
+        if not emit_asm:
+            return 0
 
     print("")
     print("Summary:")

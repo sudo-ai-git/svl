@@ -484,7 +484,7 @@ class Simulator:
 
         # --- Parse H record for start address ---
         h_rec = records["H"]
-        m = re.match(r"H\^(.{6})\^([0-9A-Fa-f]{6})\^([0-9A-Fa-f]{6})$", h_rec)
+        m = re.match(r"H\^([A-Za-z0-9_]{1,8})\^([0-9A-Fa-f]{6})\^([0-9A-Fa-f]{6})$", h_rec)
         if not m:
             raise ValueError(f"Malformed H record: {h_rec}")
         start_address = int(m.group(2), 16)

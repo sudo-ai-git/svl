@@ -1,0 +1,1 @@
+module utils{func add(a:int,b:int)type int{let r:int=a+b return r}func mul(a:int,b:int)type int{let r:int=a*b return r}}

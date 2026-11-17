@@ -1,0 +1,1 @@
+module main{func main()type void{let x:int=3 let y:int=4 let s:int=add(x,y) let p:int=mul(x,y) print_int(s)print(" ")print_int(p)print("\n")}}

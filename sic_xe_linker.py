@@ -135,14 +135,13 @@ class Linker:
         """Pass 1: assign absolute addresses and build global symbol table."""
         for obj in self.objects:
             obj.load_addr = self.next_load_addr
-            # All labels in this object are defined at load_addr + relative_addr
+            # All labels in this object are defined at load_addr + (rel_addr - start)
             for sym, rel_addr in obj.defined_symbols.items():
-                abs_addr = self.next_load_addr + rel_addr
+                abs_addr = self.next_load_addr + (rel_addr - obj.start)
                 if sym in self.global_symbols:
-                    raise ValueError(
-                        f"Duplicate symbol '{sym}' in {obj.name} "
-                        f"(already defined in previous object)"
-                    )
+                    # Keep first definition (runtime subroutines are identical
+                    # across object files); skip duplicates.
+                    continue
                 self.global_symbols[sym] = abs_addr
             self.next_load_addr += obj.length
 
@@ -156,10 +155,10 @@ class Linker:
                     )
                 abs_addr = self.global_symbols[sym]
                 for ref_addr, offset in refs:
-                    # Patch the address field in the instruction at ref_addr
-                    # (relative to obj.load_addr)
-                    patch_addr = obj.load_addr + ref_addr
-                    yield patch_addr, abs_addr, offset
+                    # ref_addr is in the object's own address space; yield the
+                    # linked-image address of the instruction plus the resolved target
+                    patch_linked = obj.load_addr + (ref_addr - obj.start)
+                    yield patch_linked, abs_addr, offset
 
     def link(self) -> dict:
         """Produce linked object file records.
@@ -184,20 +183,36 @@ class Linker:
                 for sym, refs in obj.undefined_symbols.items():
                     abs_sym_addr = self.global_symbols[sym]
                     for ref_addr, offset in refs:
-                        # ref_addr is relative to obj.start
-                        patch_addr = obj.load_addr + ref_addr
-                        if addr <= patch_addr < addr + byte_count:
-                            rel_offset = patch_addr - addr
+                        # ref_addr is in the object's own address space
+                        if addr <= ref_addr < addr + byte_count:
+                            rel_offset = ref_addr - addr
                             if rel_offset + 3 <= len(bytes_list):
                                 # Patch the address/displacement field.
                                 # Preserve existing xbpe bits (high nibble of byte2),
-                                # only update the 12-bit displacement/address field.
+                                # only update the address/displacement field.
                                 full_addr = (abs_sym_addr + offset) & 0xFFFFFF
-                                disp = full_addr & 0xFFF  # 12-bit displacement
+                                # Linked-image address of this instruction
+                                patch_linked = obj.load_addr + (ref_addr - obj.start)
                                 byte2_orig = bytes_list[rel_offset + 1]
-                                xbpe = byte2_orig >> 4  # high nibble = x,b,p,e
-                                bytes_list[rel_offset + 1] = (xbpe << 4) | (disp >> 8)
-                                bytes_list[rel_offset + 2] = disp & 0xFF
+                                e_bit = (byte2_orig >> 4) & 1
+                                if e_bit:
+                                    # Format 4: full 20-bit absolute address spans bytes 1-3
+                                    bytes_list[rel_offset + 1] = \
+                                        (byte2_orig & 0xF0) | ((full_addr >> 16) & 0x0F)
+                                    bytes_list[rel_offset + 2] = (full_addr >> 8) & 0xFF
+                                    bytes_list[rel_offset + 3] = full_addr & 0xFF
+                                else:
+                                    # Format 3: 12-bit PC-relative displacement.
+                                    # Force p=1, b=0 so the resolved target is
+                                    # reached relative to PC (the placeholder was
+                                    # assembled base-relative because target 0 was
+                                    # out of PC range).
+                                    disp = (abs_sym_addr - patch_linked - 3) & 0xFFF
+                                    x_bit = (byte2_orig >> 7) & 1
+                                    new_xbpe = (x_bit << 3) | 0b0010  # x, b=0, p=1, e=0
+                                    bytes_list[rel_offset + 1] = \
+                                        (new_xbpe << 4) | (disp >> 8)
+                                    bytes_list[rel_offset + 2] = disp & 0xFF
 
                 # Recompute hex from patched bytes
                 new_hex = bytes(bytes_list).hex()
@@ -212,9 +227,9 @@ class Linker:
         # Total program length
         total_length = self.next_load_addr
 
-        # Entry point: first object's entry, relocated
-        entry_addr = self.objects[0].load_addr + (
-            self.objects[0].entry - self.objects[0].start
+        # Entry point: last object's entry, relocated (main program is linked last)
+        entry_addr = self.objects[-1].load_addr + (
+            self.objects[-1].entry - self.objects[-1].start
         )
 
         return {
@@ -230,8 +245,8 @@ def emit_linked_object(result: dict, name: str = "LINKED",
     """Emit linked object as H/T/E records."""
     lines = []
 
-    # H record
-    lines.append(f"H^{name:<6}^{start:06X}^{result['total_length']:06X}")
+    # H record (name field is 6 chars in the SIC/XE object format)
+    lines.append(f"H^{name[:6]:<6}^{start:06X}^{result['total_length']:06X}")
 
     # T records - merge contiguous bytes into records of max 60 bytes
     t_records = result["linked_t"]
