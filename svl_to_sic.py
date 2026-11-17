@@ -43,9 +43,9 @@ class SICXECodeGen:
         self.pending_label = None
         self.in_main = False
 
-    # Return-address stack (a single global slot is not enough for recursion)
+    # Return-address/value stack (a single global slot is not enough for recursion)
     LSTACK_BASE = 0xF400
-    LSTACK_FRAMES = 256
+    LSTACK_FRAMES = 512
 
     def new_label(self, prefix="L"):
         self.label_n += 1
@@ -438,10 +438,12 @@ class SICXECodeGen:
         self.emit("LDA", "LSP", comment="A = LSP")
         self.emit("ADD", "#3")
         self.emit("STA", "LSP", comment="LSP += 3")
+        self._emit_stack_guard(overflow=True)
 
     def _emit_lstack_pop(self):
         """Pop L from the return-address stack, leaving A unchanged."""
         self.emit("STA", "RETVAL", comment="save A across the pop")
+        self._emit_stack_guard(overflow=False)
         self.emit("LDA", "LSP", comment="A = LSP")
         self.emit("SUB", "#3")
         self.emit("STA", "LSP", comment="LSP -= 3")
@@ -451,6 +453,21 @@ class SICXECodeGen:
         self.emit("STA", "TMP0")
         self.emit("LDL", "TMP0", comment="L = saved return address")
         self.emit("LDA", "RETVAL", comment="restore A")
+
+    def _emit_stack_guard(self, overflow):
+        """Trap if the shared stack leaves its fixed region.
+
+        Without this, running off the end writes into unrelated memory and the
+        program silently misbehaves.
+        """
+        if overflow:
+            self.emit("LDA", "LSP", comment="A = LSP")
+            self.emit("COMP", "LSTACK_LIM")
+            self.emit("JGE", "STACK_OVERFLOW", comment="stack full")
+        else:
+            self.emit("LDA", "LSP", comment="A = LSP")
+            self.emit("COMP", "LSTACK_BOT")
+            self.emit("JLE", "STACK_UNDERFLOW", comment="stack empty")
 
     def _compile_expr(self, expr):
         if expr is None:
@@ -522,9 +539,11 @@ class SICXECodeGen:
         self.emit("LDA", "LSP")
         self.emit("ADD", "#3")
         self.emit("STA", "LSP")
+        self._emit_stack_guard(overflow=True)
 
     def _emit_pop_a(self):
         """Pop A from the value stack."""
+        self._emit_stack_guard(overflow=False)
         self.emit("LDA", "LSP")
         self.emit("SUB", "#3")
         self.emit("STA", "LSP")
@@ -745,6 +764,19 @@ class SICXECodeGen:
         self.emit("+JSUB", "65283", comment="print failure message")
         self.emit("HALT", comment="halt on assertion failure")
 
+        # Stack bounds handlers: the value/return stack is a fixed region, so
+        # running off either end must report instead of corrupting memory.
+        self.emit_label("STACK_OVERFLOW")
+        ovf_msg = self.alloc_string("STACK OVERFLOW\n")
+        self.emit("LDA", f"#{ovf_msg}")
+        self.emit("+JSUB", "65283", comment="print stack overflow")
+        self.emit("HALT", comment="halt on stack overflow")
+        self.emit_label("STACK_UNDERFLOW")
+        unf_msg = self.alloc_string("STACK UNDERFLOW\n")
+        self.emit("LDA", f"#{unf_msg}")
+        self.emit("+JSUB", "65283", comment="print stack underflow")
+        self.emit("HALT", comment="halt on stack underflow")
+
         self.emit_label("ZERO")
         self.emit_directive("WORD", "0", comment="constant 0")
         self.emit_label("RETVAL")
@@ -776,7 +808,13 @@ class SICXECodeGen:
         self.emit_label("LSP")
         self.emit_directive("WORD", str(self.LSTACK_BASE),
                             comment="return-address/value stack pointer")
-        # The stack itself lives in the fixed region [LSTACK_BASE, +3*FRAMES);
+        self.emit_label("LSTACK_BOT")
+        self.emit_directive("WORD", str(self.LSTACK_BASE),
+                            comment="stack lower bound")
+        self.emit_label("LSTACK_LIM")
+        self.emit_directive("WORD", str(self.LSTACK_BASE + 3 * self.LSTACK_FRAMES),
+                            comment="stack upper bound (exclusive)")
+        # The stack itself lives in the fixed region [LSTACK_BASE, LSTACK_LIM);
         # nothing else is placed there (params are at 0xF000, SVC page at 0xFF00).
         self.emit_label("MOD")
         self.emit_comment("MOD: A = A % MOD_ARG (24-bit, unsigned)")

@@ -1,0 +1,1 @@
+module m{func f(n:int)type int{if n<=0 then{return 0} return f(n-1)}func main()type void{print_int(f(600))print("\n")}}
